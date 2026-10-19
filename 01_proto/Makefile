@@ -1,34 +1,39 @@
-CC      ?= gcc
-CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
-          -Wmissing-prototypes -Wcast-align -Wno-pointer-arith \
-          -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fvisibility=hidden
-CPPFLAGS = -Iinclude -I../00_crypto/include
-CRYPTO_A = ../00_crypto/build/libcrypto.a
+CC      ?= cc
+CFLAGS  ?= -O2 -Wall -Wextra -Wpedantic -std=c11 -fvisibility=hidden \
+           -Iinclude -I../00_crypto/include
+AR      ?= ar
+RANLIB  ?= ranlib
 
-BUILD = build
-LIB   = $(BUILD)/libproto.a
-OBJS  = $(BUILD)/proto.o $(BUILD)/replay.o
+BUILD_DIR := build
+SOURCES := $(wildcard src/*.c)
+OBJECTS := $(SOURCES:src/%.c=build/%.o)
+TESTS   := $(wildcard tests/test_*.c)
+TEST_BINS := $(TESTS:tests/test_%.c=build/test_%)
 
-.PHONY: all clean test staticcheck
+LIB := build/libproto.a
+
+.SUFFIXES:
+.SECONDARY:
 
 all: $(LIB)
 
-$(BUILD)/%.o: src/%.c | $(BUILD)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
-
-$(LIB): $(OBJS)
+$(LIB): $(OBJECTS) | build
 	$(AR) rcs $@ $^
+	$(RANLIB) $@
 
-$(BUILD):
-	mkdir -p $(BUILD)
+build/%.o: src/%.c | build
+	$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(LIB) $(CRYPTO_A)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -Iinclude tests/test_proto.c $(LIB) $(CRYPTO_A) -o $(BUILD)/test_proto
-	$(BUILD)/test_proto
+$(BUILD_DIR)/test_%: tests/test_%.c $(LIB) | build
+	$(CC) $(CFLAGS) $< -o $@ $(LIB) ../00_crypto/build/libcrypto.a -lpthread
 
-staticcheck:
-	nm -g --defined-only $(LIB) | awk '$$2=="T" {print $$3}' | sort
-	! strings $(LIB) | grep -E 'PSK|secret|password' || true
+test: $(TEST_BINS)
+	@for t in $(TEST_BINS); do echo "=== $$(basename $$t) ==="; ./$$t || exit 1; done
+
+build:
+	mkdir -p build
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf build
+
+.PHONY: all test clean

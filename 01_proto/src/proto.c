@@ -1,202 +1,228 @@
-/*
- * proto.c — DAYANJING v3 C2 协议帧层（C 端口，复刻 13_c2_server/frame.py）
- *
- * 帧格式：
- *   u32(total_len) || u32(msg_type 明文) || nonce(12) || ct || tag(16)
- *
- * Envelope（AEAD 明文，确定性编码）：
- *   u64(seq) || u32(version) || u32(type) || u32(payload_len) || payload
- *
- * AAD = "c2:v1" || u32(version) || u8(role) || u32(msg_type)  定长 14 字节
- *
- * 关键不变量：
- *  - 先验签后 accept：proto_open 先 AEAD 验签，失败立即返回，不污染重放窗口
- *  - msg_type 双重校验：帧头明文与密文内 type 必须一致
- *  - 调用方负责维护 nonce counter，溢出即报错（禁止回绕）
- */
+#define _POSIX_C_SOURCE 200809L
 #include "proto.h"
+#include "crypto.h"
+#include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
 
-const char *proto_strerror(proto_err_t e) {
-    switch (e) {
-        case PROTO_OK:            return "ok";
-        case PROTO_INVALID_ROLE:  return "invalid role";
-        case PROTO_KEYLEN:        return "key must be 32 bytes";
-        case PROTO_KEYS_EQUAL:    return "k_send must differ from k_recv";
-        case PROTO_COUNTER_FULL:  return "nonce counter exhausted";
-        case PROTO_TOO_SHORT:     return "frame too short";
-        case PROTO_TOO_LONG:      return "frame exceeds max length";
-        case PROTO_LEN_MISMATCH:  return "frame length mismatch";
-        case PROTO_VER_MISMATCH:  return "protocol version mismatch";
-        case PROTO_TYPE_MISMATCH: return "msg_type mismatch";
-        case PROTO_TAG_FAIL:      return "aead verify failed";
-        case PROTO_SEQ_REPLAY:    return "seq replay";
-        case PROTO_SEQ_TOO_OLD:   return "seq too old";
-        case PROTO_SEQ_GAP:       return "seq future gap";
-        case PROTO_NOMEM:         return "no memory";
-        case PROTO_RANGE:         return "out of range";
-        case PROTO_NOT_FOUND:     return "not found";
-        default:                  return "unknown";
+const char *proto_strerror(int err) {
+    switch (err) {
+        case PROTO_OK: return "ok";
+        case PROTO_ERR: return "error";
+        case PROTO_ERR_FORMAT: return "format error";
+        case PROTO_ERR_AUTH: return "auth failed";
+        case PROTO_ERR_REPLAY: return "replay detected";
+        case PROTO_ERR_NOMEM: return "no memory";
+        default: return "unknown";
     }
 }
 
-/* 小端读写 */
-static void w32(uint8_t **p, uint32_t v) { *(*p)++ = v;       *(*p)++ = v>>8;
-                                          *(*p)++ = v>>16;   *(*p)++ = v>>24; }
-static void w64(uint8_t **p, uint64_t v) { for (int i=0;i<8;i++) { *(*p)++ = v; v>>=8; } }
-static uint32_t r32(const uint8_t **p) { uint32_t v=(*p)[0]|((uint32_t)(*p)[1]<<8)
-        |((uint32_t)(*p)[2]<<16)|((uint32_t)(*p)[3]<<24); *p+=4; return v; }
-static uint64_t r64(const uint8_t **p) { uint64_t v=0; for(int i=0;i<8;i++){v|=((uint64_t)*(*p)++)<<(i*8);} return v; }
+void proto_frame_free(proto_frame_t *frame) {
+    if (frame && frame->payload) {
+        crypto_secure_zero(frame->payload, frame->payload_len);
+        free(frame->payload);
+        frame->payload = NULL;
+    }
+}
 
-proto_err_t proto_build_aad(uint8_t role, uint32_t msg_type, uint8_t aad[PROTO_AAD_LEN]) {
-    if (!aad) return PROTO_ERR;
-    /* 定长域分离编码：prefix(6) || version(4) || role(1) || type(4) = 15 字节 */
-    aad[0]=0; aad[1]='c'; aad[2]=':'; aad[3]='v'; aad[4]='1'; aad[5]=0;
-    aad[6]  = (uint8_t)(PROTO_VERSION);
-    aad[7]  = (uint8_t)(PROTO_VERSION >> 8);
-    aad[8]  = (uint8_t)(PROTO_VERSION >> 16);
-    aad[9]  = (uint8_t)(PROTO_VERSION >> 24);
-    aad[10] = 0;   /* role 不公开（参考 python 版占位 0） */
-    aad[11] = (uint8_t)(msg_type);
-    aad[12] = (uint8_t)(msg_type >> 8);
-    aad[13] = (uint8_t)(msg_type >> 16);
-    aad[14] = (uint8_t)(msg_type >> 24);
+/* AAD construction: session_id || msg_type || direction || nonce_counter */
+void proto_build_aad(const proto_frame_t *frame, uint8_t *aad, size_t *aad_len) {
+    memcpy(aad, frame->session_id, 6);
+    aad[6] = frame->msg_type;
+    aad[7] = frame->flags;
+    aad[8] = (frame->nonce_counter >> 24) & 0xFF;
+    aad[9] = (frame->nonce_counter >> 16) & 0xFF;
+    aad[10] = (frame->nonce_counter >> 8) & 0xFF;
+    aad[11] = frame->nonce_counter & 0xFF;
+    *aad_len = 12;
+}
+
+/* Wire format for sealed frame:
+ *  [nonce(12)] [encrypted(header||payload)] [tag(16)]
+ *  where header = magic|version|msg_type|session_id|flags|nonce_counter|payload_len
+ */
+int proto_seal(const uint8_t *key, proto_frame_t *frame, uint8_t *out, size_t *out_len) {
+    if (!key || !frame || !out || !out_len) return PROTO_ERR;
+
+    /* Step 1: encode plaintext frame (header + payload) */
+    size_t plain_len = PROTO_HEADER_LEN + frame->payload_len;
+    uint8_t *plain = (uint8_t*)malloc(plain_len);
+    if (!plain) return PROTO_ERR_NOMEM;
+
+    size_t pl = plain_len;
+    int rc = proto_frame_encode(frame, plain, &pl);
+    if (rc != PROTO_OK) {
+        free(plain);
+        return rc;
+    }
+
+    /* Step 2: build AAD.  Must be derivable by the receiver WITHOUT decrypting,
+     * so we use the 12-byte AEAD nonce (frame->nonce(8) || counter(4)).  This is
+     * identical to what proto_open() reconstructs from the ciphertext prefix. */
+    uint8_t aad[12];
+    memcpy(aad, frame->nonce, 8);
+    aad[8]  = (frame->nonce_counter >> 24) & 0xFF;
+    aad[9]  = (frame->nonce_counter >> 16) & 0xFF;
+    aad[10] = (frame->nonce_counter >> 8) & 0xFF;
+    aad[11] = frame->nonce_counter & 0xFF;
+    size_t aad_len = 12;
+
+    /* Step 3: AEAD encrypt
+     * output layout: [12-byte AEAD nonce] [ciphertext] [16-byte tag]
+     */
+    size_t total = 12 + plain_len + PROTO_TAG_LEN;
+    if (*out_len < total) {
+        free(plain);
+        return PROTO_ERR_NOMEM;
+    }
+
+    /* Use frame->nonce (8 bytes) + counter as 12-byte AEAD nonce */
+    uint8_t aead_nonce[12];
+    memcpy(aead_nonce, frame->nonce, 8);
+    aead_nonce[8]  = (frame->nonce_counter >> 24) & 0xFF;
+    aead_nonce[9]  = (frame->nonce_counter >> 16) & 0xFF;
+    aead_nonce[10] = (frame->nonce_counter >> 8) & 0xFF;
+    aead_nonce[11] = frame->nonce_counter & 0xFF;
+
+    /* Write AEAD nonce first */
+    memcpy(out, aead_nonce, 12);
+
+    /* Encrypt: ciphertext goes after nonce, tag after ciphertext */
+    uint8_t tag[PROTO_TAG_LEN];
+    int ret = crypto_aead_seal(key, aead_nonce, 12,
+                               aad, aad_len,
+                               plain, plain_len,
+                               out + 12, tag);
+    if (ret == CRYPTO_OK) {
+        memcpy(out + 12 + plain_len, tag, PROTO_TAG_LEN);
+        *out_len = total;
+        ret = PROTO_OK;
+    } else {
+        ret = PROTO_ERR;
+    }
+
+    crypto_secure_zero(plain, plain_len);
+    free(plain);
+    crypto_secure_zero(tag, PROTO_TAG_LEN);
+    crypto_secure_zero(aead_nonce, 12);
+    return ret;
+}
+
+int proto_open(const uint8_t *key, const uint8_t *in, size_t in_len, proto_frame_t *frame) {
+    if (!key || !in || !frame) return PROTO_ERR;
+    if (in_len < 12 + PROTO_HEADER_LEN + PROTO_TAG_LEN) return PROTO_ERR_FORMAT;
+
+    /* Extract AEAD nonce (first 12 bytes) */
+    uint8_t aead_nonce[12];
+    memcpy(aead_nonce, in, 12);
+
+    size_t ciphertext_len = in_len - 12 - PROTO_TAG_LEN;
+    const uint8_t *ciphertext = in + 12;
+    const uint8_t *tag = in + 12 + ciphertext_len;
+
+    /*
+     * AAD = frame->nonce(8) || counter(4) = the first 12 bytes of the AEAD nonce.
+     * This is identical to what proto_seal() used, and is derivable by the receiver
+     * directly from the ciphertext prefix without decrypting anything.
+     */
+    uint8_t aad[12];
+    memcpy(aad, aead_nonce, 12);
+    size_t aad_len = 12;
+
+    uint8_t *decrypted = (uint8_t*)malloc(ciphertext_len);
+    if (!decrypted) return PROTO_ERR_NOMEM;
+
+    int ret = crypto_aead_open(key, aead_nonce, 12,
+                               aad, aad_len,
+                               ciphertext, ciphertext_len,
+                               tag, decrypted);
+
+    if (ret == CRYPTO_OK) {
+        ret = proto_frame_decode(decrypted, ciphertext_len, frame);
+    } else {
+        ret = PROTO_ERR_AUTH;
+    }
+
+    crypto_secure_zero(decrypted, ciphertext_len);
+    free(decrypted);
+    crypto_secure_zero(aead_nonce, 12);
+    return ret;
+}
+
+int proto_frame_encode(const proto_frame_t *frame, uint8_t *out, size_t *out_len) {
+    if (!frame || !out || !out_len) return PROTO_ERR;
+    if (frame->payload_len > PROTO_MAX_PAYLOAD) return PROTO_ERR_FORMAT;
+
+    size_t total = PROTO_HEADER_LEN + frame->payload_len;
+    if (*out_len < total) return PROTO_ERR_NOMEM;
+    *out_len = total;
+
+    size_t pos = 0;
+    out[pos++] = (PROTO_MAGIC >> 8) & 0xFF;
+    out[pos++] = PROTO_MAGIC & 0xFF;
+    out[pos++] = PROTO_VERSION;
+    out[pos++] = frame->msg_type;
+    memcpy(out + pos, frame->session_id, 6); pos += 6;
+    out[pos++] = frame->flags;
+    out[pos++] = (frame->nonce_counter >> 24) & 0xFF;
+    out[pos++] = (frame->nonce_counter >> 16) & 0xFF;
+    out[pos++] = (frame->nonce_counter >> 8) & 0xFF;
+    out[pos++] = frame->nonce_counter & 0xFF;
+    out[pos++] = (frame->payload_len >> 24) & 0xFF;
+    out[pos++] = (frame->payload_len >> 16) & 0xFF;
+    out[pos++] = (frame->payload_len >> 8) & 0xFF;
+    out[pos++] = frame->payload_len & 0xFF;
+    memcpy(out + pos, frame->nonce, PROTO_NONCE_LEN); pos += PROTO_NONCE_LEN;
+    if (frame->payload_len > 0 && frame->payload) {
+        memcpy(out + pos, frame->payload, frame->payload_len);
+    }
     return PROTO_OK;
 }
 
-/*
- * 编码：构造 Envelope 明文，构 AAD，调 crypto_aead_seal。
- * 编码：构造 Envelope 明文 -> 构 AAD -> 调 crypto_aead_seal。
- * 帧头附明文 msg_type，供对端重建一致 AAD。
- */
-proto_err_t proto_seal(const uint8_t k_send[PROTO_KEY_LEN],
-                       uint8_t nonce_prefix[8], uint32_t *counter,
-                       uint8_t *nonce_buf,
-                       uint64_t seq, uint32_t msg_type,
-                       const uint8_t *payload, uint32_t payload_len,
-                       uint8_t *out, size_t out_cap, size_t *out_len) {
-    if (!k_send || !counter || !nonce_buf || !out || !out_len)
-        return PROTO_ERR;
-    if (payload_len > 0 && !payload) return PROTO_ERR;
+int proto_frame_decode(const uint8_t *in, size_t in_len, proto_frame_t *frame) {
+    if (!in || !frame) return PROTO_ERR;
+    if (in_len < PROTO_HEADER_LEN) return PROTO_ERR_FORMAT;
 
-    /* 计算各段长度 */
-    size_t env_len = PROTO_ENVELOPE_MIN + payload_len;
-    size_t body_len = 4 /*type*/ + 12 /*nonce*/ + env_len + CRYPTO_TAG_LEN;
-    size_t wire_len = 4 /*total_len*/ + body_len;
+    uint16_t magic = ((uint16_t)in[0] << 8) | in[1];
+    if (magic != PROTO_MAGIC) return PROTO_ERR_FORMAT;
 
-    if (wire_len > PROTO_MAX_FRAME) return PROTO_TOO_LONG;
-    if (wire_len > out_cap) return PROTO_RANGE;
+    frame->payload = NULL;
+    size_t pos = 2;
+    uint8_t version = in[pos++];
+    if (version != PROTO_VERSION) return PROTO_ERR_FORMAT;
 
-    if (*counter == UINT32_MAX) return PROTO_COUNTER_FULL;
+    frame->msg_type = in[pos++];
+    memcpy(frame->session_id, in + pos, 6); pos += 6;
+    frame->flags = in[pos++];
+    frame->nonce_counter = ((uint32_t)in[pos] << 24) | ((uint32_t)in[pos+1] << 16)
+                        | ((uint32_t)in[pos+2] << 8) | in[pos+3];
+    pos += 4;
+    frame->payload_len = ((uint32_t)in[pos] << 24) | ((uint32_t)in[pos+1] << 16)
+                       | ((uint32_t)in[pos+2] << 8) | in[pos+3];
+    pos += 4;
 
-    /* 构造 12B nonce = 8B 随机前缀 || 4B 计数器（大端，与 python 版一致） */
-    uint8_t nonce[CRYPTO_NONCE_LEN];
-    memcpy(nonce, nonce_prefix, 8);
-    nonce[8]  = (uint8_t)((*counter >> 24) & 0xff);
-    nonce[9]  = (uint8_t)((*counter >> 16) & 0xff);
-    nonce[10] = (uint8_t)((*counter >> 8)  & 0xff);
-    nonce[11] = (uint8_t)(*counter & 0xff);
+    if (frame->payload_len > PROTO_MAX_PAYLOAD) return PROTO_ERR_FORMAT;
 
-    /* Envelope 明文 */
-    uint8_t *env = malloc(env_len);
-    if (!env) return PROTO_NOMEM;
-    uint8_t *p = env;
-    w64(&p, seq);
-    w32(&p, PROTO_VERSION);
-    w32(&p, msg_type);
-    w32(&p, payload_len);
-    if (payload_len) memcpy(p, payload, payload_len);
+    memcpy(frame->nonce, in + pos, PROTO_NONCE_LEN);
+    pos += PROTO_NONCE_LEN;
 
-    /* AAD（定长域分离） */
-    uint8_t aad[PROTO_AAD_LEN];
-    proto_err_t rc = proto_build_aad(0, msg_type, aad);
-    if (rc != PROTO_OK) { free(env); return rc; }
-
-    /* AEAD seal：ciphertext 缓冲 = ct(env_len) + tag(16) */
-    uint8_t *ct_tag = malloc(env_len + CRYPTO_TAG_LEN);
-    if (!ct_tag) { free(env); return PROTO_NOMEM; }
-    size_t sealed = 0;
-    rc = (proto_err_t)crypto_aead_seal(ct_tag, &sealed, env, env_len,
-                                       aad, sizeof(aad), k_send, nonce);
-    free(env);
-    if (rc != PROTO_OK) { free(ct_tag); return rc; }
-    if (sealed != env_len + CRYPTO_TAG_LEN) { free(ct_tag); return PROTO_ERR; }
-
-    /* 组装 wire */
-    uint8_t *q = out;
-    w32(&q, (uint32_t)body_len);     /* total_len（body 部分长度）*/
-    w32(&q, msg_type);               /* 明文 msg_type */
-    memcpy(q, nonce, 12); q += 12;   /* nonce */
-    memcpy(q, ct_tag, sealed); q += sealed;  /* ct || tag */
-
-    memcpy(nonce_buf, nonce, CRYPTO_NONCE_LEN);
-    (*counter)++;
-    *out_len = wire_len;
-    free(ct_tag);
+    if (frame->payload_len > 0) {
+        if (in_len < PROTO_HEADER_LEN + frame->payload_len) return PROTO_ERR_FORMAT;
+        frame->payload = (uint8_t*)malloc(frame->payload_len);
+        if (!frame->payload) return PROTO_ERR_NOMEM;
+        memcpy(frame->payload, in + pos, frame->payload_len);
+    }
     return PROTO_OK;
 }
 
-/*
- * 解码：先读帧头与 nonce，重建 AAD，调 crypto_aead_open 验签；
- * 验签通过后解析 Envelope 并双重校验 msg_type。
- * 任何失败返回 PROTO_TAG_FAIL —— 调用方应静默关连接，不回显细节。
- */
-proto_err_t proto_open(const uint8_t k_recv[PROTO_KEY_LEN], uint8_t role,
-                       const uint8_t *wire, size_t wire_len,
-                       uint64_t *seq, uint32_t *msg_type,
-                       uint8_t *payload_out, size_t payload_cap,
-                       size_t *payload_len) {
-    if (!k_recv || !wire || !seq || !msg_type || !payload_out || !payload_len)
-        return PROTO_ERR;
-
-    if (wire_len < 4 + 4 + 12 + CRYPTO_TAG_LEN + PROTO_ENVELOPE_MIN)
-        return PROTO_TOO_SHORT;
-    if (wire_len > PROTO_MAX_FRAME) return PROTO_TOO_LONG;
-
-    const uint8_t *p = wire;
-    uint32_t total_len = r32(&p);
-    if (total_len > PROTO_MAX_FRAME) return PROTO_TOO_LONG;
-    if (total_len + 4 != wire_len) return PROTO_LEN_MISMATCH;
-
-    uint32_t hdr_type = r32(&p);            /* 帧头明文 msg_type */
-    uint8_t nonce[CRYPTO_NONCE_LEN];
-    memcpy(nonce, p, 12); p += 12;
-
-    size_t ct_tag_len = total_len - 4 - 12;  /* 去掉 type 和 nonce */
-    if (ct_tag_len < CRYPTO_TAG_LEN + PROTO_ENVELOPE_MIN) return PROTO_TOO_SHORT;
-
-    /* 重建 AAD（与加密端一致） */
-    uint8_t aad[PROTO_AAD_LEN];
-    proto_err_t rc = proto_build_aad(0, hdr_type, aad);
-    if (rc != PROTO_OK) return rc;
-
-    /* 先验签 */
-    size_t pt_len = 0;
-    uint8_t *pt = malloc(ct_tag_len - CRYPTO_TAG_LEN);
-    if (!pt) return PROTO_NOMEM;
-    rc = (proto_err_t)crypto_aead_open(pt, &pt_len, p, ct_tag_len,
-                                       aad, sizeof(aad), k_recv, nonce);
-    if (rc != PROTO_OK) { free(pt); return PROTO_TAG_FAIL; }
-    if (pt_len != ct_tag_len - CRYPTO_TAG_LEN) { free(pt); return PROTO_TAG_FAIL; }
-
-    /* 解析 Envelope */
-    const uint8_t *q = pt;
-    uint64_t e_seq = r64(&q);
-    uint32_t e_ver = r32(&q);
-    uint32_t e_type = r32(&q);
-    uint32_t e_plen = r32(&q);
-    if (e_ver != PROTO_VERSION) { free(pt); return PROTO_VER_MISMATCH; }
-    if (e_type != hdr_type)      { free(pt); return PROTO_TYPE_MISMATCH; }
-    if (pt_len != PROTO_ENVELOPE_MIN + e_plen) { free(pt); return PROTO_LEN_MISMATCH; }
-    if (e_plen > pt_len - PROTO_ENVELOPE_MIN)  { free(pt); return PROTO_LEN_MISMATCH; }
-    if (e_plen > payload_cap)    { free(pt); return PROTO_RANGE; }
-
-    memcpy(payload_out, q, e_plen);
-    *seq = e_seq;
-    *msg_type = e_type;
-    *payload_len = e_plen;
-    free(pt);
-    return PROTO_OK;
+int proto_replay_check(uint32_t *window, uint32_t window_size, uint32_t counter) {
+    if (!window || window_size == 0) return PROTO_ERR;
+    if (counter < window[0]) return PROTO_ERR_REPLAY;
+    if (counter > window[1]) {
+        window[0] = counter > window_size - 1 ? counter - window_size + 1 : 0;
+        window[1] = counter;
+        return PROTO_OK;
+    }
+    /* within window - check if already seen (simplified: reject all within window) */
+    return PROTO_ERR_REPLAY;
 }
