@@ -208,6 +208,69 @@ static void yuyv_to_ycbcr(const uint8_t *yuv, uint8_t *ycbcr,
     }
 }
 
+/* 8-bit 饱和钳位 */
+static inline uint8_t clamp8(int32_t v)
+{
+    if (v < 0)   return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
+
+/* ====================================================================
+ * 彩色空间转换：NV12 → Y'CbCr
+ *
+ * NV12 布局：Y 平面（width*height，行优先） + 交错 UV 平面（4:2:0 半分辨率，
+ * U/V 交替存放）。色度按 2x2 共享，需上采样到每像素一组 CbCr。
+ * ==================================================================== */
+static void nv12_to_ycbcr(const uint8_t *nv12, uint8_t *ycbcr,
+                          uint32_t width, uint32_t height)
+{
+    const uint8_t *yp  = nv12;
+    const uint8_t *uvp = nv12 + (size_t)width * height;
+    uint32_t cw = (width  + 1) / 2;   /* 每行 UV 对数（奇数宽向上取整） */
+    uint32_t ch = (height + 1) / 2;   /* 色度行数（奇数高向上取整） */
+
+    for (uint32_t y = 0; y < height; y++) {
+        uint32_t cy = y / 2;
+        if (cy >= ch) cy = ch - 1;    /* 奇数高：末行复用上一行色度 */
+        for (uint32_t x = 0; x < width; x++) {
+            uint32_t cx = x / 2;
+            if (cx >= cw) cx = cw - 1; /* 奇数宽：末列复用左一色度 */
+            size_t uvi = ((size_t)cy * cw + cx) * 2;
+            size_t d   = ((size_t)y * width + x) * 3;
+            ycbcr[d + 0] = yp[(size_t)y * width + x];
+            ycbcr[d + 1] = uvp[uvi + 0];
+            ycbcr[d + 2] = uvp[uvi + 1];
+        }
+    }
+}
+
+/* ====================================================================
+ * 彩色空间转换：RGB24 → Y'CbCr（ITU-R BT.601 全范围）
+ *
+ * 整数系数（libjpeg 同款，左移 16 位定标）：
+ *   Y  = ( 19595*R + 38470*G +  7471*B) >> 16
+ *   Cb = (-11059*R - 21709*G + 32768*B) >> 16 + 128
+ *   Cr = ( 32768*R - 27439*G -  5329*B) >> 16 + 128
+ * 注意：+128 必须在移位之后，写成 ">> 16 + 128" 会被解析成 ">> 144"。
+ * ==================================================================== */
+static void rgb24_to_ycbcr(const uint8_t *rgb, uint8_t *ycbcr,
+                           uint32_t width, uint32_t height)
+{
+    size_t n = (size_t)width * height;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t r = rgb[i * 3 + 0];
+        uint32_t g = rgb[i * 3 + 1];
+        uint32_t b = rgb[i * 3 + 2];
+        int32_t yy = ( 19595 * (int32_t)r + 38470 * (int32_t)g +  7471 * (int32_t)b) >> 16;
+        int32_t cb = (-11059 * (int32_t)r - 21709 * (int32_t)g + 32768 * (int32_t)b) >> 16;
+        int32_t cr = ( 32768 * (int32_t)r - 27439 * (int32_t)g -  5329 * (int32_t)b) >> 16;
+        ycbcr[i * 3 + 0] = clamp8(yy);
+        ycbcr[i * 3 + 1] = clamp8(cb + 128);
+        ycbcr[i * 3 + 2] = clamp8(cr + 128);
+    }
+}
+
 /* ====================================================================
  * 二维 DCT（8x8 点），固定点整数实现（左移 9 位避免溢出）。
  * 系数取自标准 DCT 公式，缩放 1/sqrt(2) 已并入矩阵。
@@ -789,6 +852,36 @@ cam_err_t cam_frame_to_jpeg(const cam_frame_t *frame,
         return CAM_OK;
     }
 
-    /* NV12 / RGB24 等：当前实现不支持，需扩展 */
+    if (frame->fmt == CAM_FMT_NV12 || frame->fmt == CAM_FMT_RGB24) {
+        if (frame->width == 0 || frame->height == 0)
+            return CAM_ERR_INVALID_ARG;
+
+        /* 输入长度校验：拒绝截断帧，杜绝越界读。
+         * NV12 = w*h*3/2（Y 平面 + 半分辨率交错 UV），RGB24 = w*h*3。
+         * 先乘后除保证整除（乘数 3 或 6，除 2 无余数）。 */
+        size_t need = (size_t)frame->width * frame->height *
+                      (frame->fmt == CAM_FMT_NV12 ? 3 : 6) / 2;
+        if (frame->len < need)
+            return CAM_ERR_INVALID_ARG;
+
+        size_t npix = (size_t)frame->width * frame->height;
+        uint8_t *ycbcr = (uint8_t *)malloc(npix * 3);
+        if (!ycbcr) return CAM_ERR_GENERIC;
+
+        if (frame->fmt == CAM_FMT_NV12)
+            nv12_to_ycbcr(frame->data, ycbcr, frame->width, frame->height);
+        else
+            rgb24_to_ycbcr(frame->data, ycbcr, frame->width, frame->height);
+
+        size_t written = encode_color_jpeg(ycbcr, frame->width, frame->height,
+                                          (int)frame->width, 75,
+                                          out, out ? *out_cap : 0);
+        free(ycbcr);
+        if (written == 0) return CAM_ERR_TRANSFORM;
+        *out_len = written;
+        return CAM_OK;
+    }
+
+    /* NONE / UNKNOWN：语义不明的原始字节，禁止当 JPEG 透传 */
     return CAM_ERR_TRANSFORM;
 }

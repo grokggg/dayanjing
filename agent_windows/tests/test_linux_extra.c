@@ -9,7 +9,7 @@
  *   1. cam_errstr 全错误码映射
  *   2. MJPEG 直通：合法帧字节级复制 / 非法帧拒绝 / 缓冲区不足回填
  *   3. YUYV422 转码：多尺寸、确定性、参数校验、探测容量
- *   4. 未支持格式（NV12/RGB24/NONE/UNKNOWN）显式报错，禁止静默把 YUV 当 JPEG
+ *   4. NV12/RGB24 真转码（含截断输入拒绝）；NONE/UNKNOWN 仍显式报错
  *   5. Mock 源边界：enumerate 空参、close 后 capture、pts 单调、destroy 安全
  */
 
@@ -189,24 +189,76 @@ int main(void)
         free(o1); free(o2);
     }
 
-    /* ---------- 4. 未支持格式显式报错 ---------- */
+    /* ---------- 4. NV12/RGB24 真转码 + 语义不明格式仍报错 ---------- */
     {
-        uint8_t raw[256];
-        memset(raw, 0x55, sizeof(raw));
-        size_t cap = sizeof(raw), len = 0;
+        const uint32_t W = 16, H = 8;
+        size_t nv12_len = (size_t)W * H * 3 / 2;   /* Y + 半分辨率交错 UV */
+        size_t rgb_len  = (size_t)W * H * 3;
+
+        uint8_t *nv12 = (uint8_t *)malloc(nv12_len);
+        uint8_t *rgb  = (uint8_t *)malloc(rgb_len);
+        CHECK(nv12 != NULL && rgb != NULL, "NV12/RGB24 输入缓冲分配成功");
+        for (size_t i = 0; i < nv12_len; i++) nv12[i] = (uint8_t)(i * 7 + 3);
+        for (size_t i = 0; i < rgb_len;  i++) rgb[i]  = (uint8_t)(i * 5 + 1);
+
         cam_frame_t nf;
-        nf.data = raw; nf.len = sizeof(raw);
-        nf.width = 16; nf.height = 8; nf.pts_us = 4;
+        nf.width = W; nf.height = H; nf.pts_us = 4;
 
-        cam_err_t r[4];
-        nf.fmt = CAM_FMT_NV12;    r[0] = cam_frame_to_jpeg(&nf, NULL, &cap, &len);
-        nf.fmt = CAM_FMT_RGB24;   r[1] = cam_frame_to_jpeg(&nf, NULL, &cap, &len);
-        nf.fmt = CAM_FMT_NONE;    r[2] = cam_frame_to_jpeg(&nf, NULL, &cap, &len);
-        nf.fmt = CAM_FMT_UNKNOWN; r[3] = cam_frame_to_jpeg(&nf, NULL, &cap, &len);
+        /* 4a. NV12 真转码 */
+        nf.data = nv12; nf.len = nv12_len; nf.fmt = CAM_FMT_NV12;
+        size_t cap = 0, olen = 0;
+        CHECK(cam_frame_to_jpeg(&nf, NULL, &cap, &olen) == CAM_OK && olen > 0,
+              "NV12: 探测模式 CAM_OK 且长度>0");
+        uint8_t *oj = (uint8_t *)malloc(olen);
+        CHECK(oj != NULL, "NV12: 输出缓冲分配成功");
+        size_t oc = olen;
+        CHECK(cam_frame_to_jpeg(&nf, oj, &oc, &olen) == CAM_OK,
+              "NV12: 实际编码 CAM_OK");
+        CHECK(is_jpeg(oj, olen), "NV12: 产物是结构合法 JPEG（SOI/EOI 完整）");
 
-        CHECK(r[0] == CAM_ERR_TRANSFORM && r[1] == CAM_ERR_TRANSFORM &&
-              r[2] == CAM_ERR_TRANSFORM && r[3] == CAM_ERR_TRANSFORM,
-              "NV12/RGB24/NONE/UNKNOWN -> CAM_ERR_TRANSFORM（不支持即报错，禁静默透传）");
+        /* 回环：产物当 MJPEG 直通，模块内 is_jpeg 全结构校验通过才算真 JPEG */
+        cam_frame_t mj;
+        mj.data = oj; mj.len = olen; mj.fmt = CAM_FMT_MJPEG;
+        mj.width = W; mj.height = H; mj.pts_us = 5;
+        size_t mcap = olen, mlen = 0;
+        CHECK(cam_frame_to_jpeg(&mj, NULL, &mcap, &mlen) == CAM_OK,
+              "NV12: 产物通过模块内 is_jpeg 全结构校验（回环直通成功）");
+        free(oj);
+
+        /* 4b. RGB24 真转码 */
+        nf.data = rgb; nf.len = rgb_len; nf.fmt = CAM_FMT_RGB24;
+        cap = 0; olen = 0;
+        CHECK(cam_frame_to_jpeg(&nf, NULL, &cap, &olen) == CAM_OK && olen > 0,
+              "RGB24: 探测模式 CAM_OK 且长度>0");
+        oj = (uint8_t *)malloc(olen);
+        CHECK(oj != NULL, "RGB24: 输出缓冲分配成功");
+        oc = olen;
+        CHECK(cam_frame_to_jpeg(&nf, oj, &oc, &olen) == CAM_OK,
+              "RGB24: 实际编码 CAM_OK");
+        CHECK(is_jpeg(oj, olen), "RGB24: 产物是结构合法 JPEG（SOI/EOI 完整）");
+        mj.data = oj; mj.len = olen;
+        mcap = olen; mlen = 0;
+        CHECK(cam_frame_to_jpeg(&mj, NULL, &mcap, &mlen) == CAM_OK,
+              "RGB24: 产物通过模块内 is_jpeg 全结构校验（回环直通成功）");
+        free(oj);
+
+        /* 4c. 截断输入必须拒绝（防越界读） */
+        cap = 4096; olen = 0;
+        nf.data = nv12; nf.len = nv12_len - 1; nf.fmt = CAM_FMT_NV12;
+        CHECK(cam_frame_to_jpeg(&nf, NULL, &cap, &olen) == CAM_ERR_INVALID_ARG,
+              "NV12: 截断输入 -> CAM_ERR_INVALID_ARG（长度校验生效）");
+        nf.data = rgb; nf.len = rgb_len - 1; nf.fmt = CAM_FMT_RGB24;
+        CHECK(cam_frame_to_jpeg(&nf, NULL, &cap, &olen) == CAM_ERR_INVALID_ARG,
+              "RGB24: 截断输入 -> CAM_ERR_INVALID_ARG（长度校验生效）");
+
+        /* 4d. 语义不明格式仍报错，禁止静默透传 */
+        nf.data = rgb; nf.len = rgb_len;
+        nf.fmt = CAM_FMT_NONE;    cam_err_t r0 = cam_frame_to_jpeg(&nf, NULL, &cap, &olen);
+        nf.fmt = CAM_FMT_UNKNOWN; cam_err_t r1 = cam_frame_to_jpeg(&nf, NULL, &cap, &olen);
+        CHECK(r0 == CAM_ERR_TRANSFORM && r1 == CAM_ERR_TRANSFORM,
+              "NONE/UNKNOWN -> CAM_ERR_TRANSFORM（语义不明，禁静默透传）");
+
+        free(nv12); free(rgb);
     }
 
     /* ---------- 5. Mock 源边界 ---------- */
