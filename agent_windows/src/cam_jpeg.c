@@ -498,7 +498,6 @@ static size_t encode_color_jpeg(const uint8_t *ycbcr, uint32_t width, uint32_t h
     /* 容量检查：探测模式下（out==NULL 或 out_cap==0）只做边界判断不写入。
      * 为保证探测结果与实际编码完全一致，探测时分配一块临时缓冲跑一遍，
      * 这样调用方拿到的容量就是真实写入量，不会有低估风险。 */
-    uint8_t  tmp[4096];          /* 小图探测缓冲；不足时按需扩容 */
     uint8_t *tmpp = NULL;
     size_t   real_cap = out_cap;
     int      probing = (out == NULL) || (out_cap == 0);
@@ -538,7 +537,7 @@ static size_t encode_color_jpeg(const uint8_t *ycbcr, uint32_t width, uint32_t h
     if (p + 18 > end) return 0;
     *p++ = 0xFF; *p++ = M_APP0;
     w16(&p, 16);                       /* 长度(含自身) */
-    memcpy(p, "JFIF", 4); p += 4;
+    memcpy(p, "JFIF", 5); p += 5;   /* 含 NUL 终止符，共 5 字节 */
     *p++ = 1; *p++ = 1;                /* version 1.1 */
     *p++ = 0;                          /* density units: 0 = 无单位 */
     w16(&p, 1); w16(&p, 1);            /* 密度 1x1 */
