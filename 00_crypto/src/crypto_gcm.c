@@ -11,15 +11,6 @@
 #include <string.h>
 #include <stdio.h>
 
-static void dump_state(const char *tag, const uint8_t state[16])
-{
-    printf("%s: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
-           tag,
-           state[0], state[1], state[2], state[3],
-           state[4], state[5], state[6], state[7],
-           state[8], state[9], state[10], state[11],
-           state[12], state[13], state[14], state[15]);
-}
 
 /* =====================================================================
  * AES S-Box（FIPS 197 标准）
@@ -91,7 +82,6 @@ static void key_expansion(const uint8_t key[GCM_KEY_LEN], aes128_ctx_t *ctx)
 
     for (i = 1; i <= 10; i++) {
         uint8_t temp[4];
-        uint8_t t;
 
         /* 取出上一轮的最后一列 */
         temp[0] = rk[(i - 1) * 16 + 13];
@@ -107,7 +97,11 @@ static void key_expansion(const uint8_t key[GCM_KEY_LEN], aes128_ctx_t *ctx)
 
         temp[0] ^= rcon[i];
 
-        /* 生成第 i 轮密钥 */
+        /*
+         * 生成第 i 轮密钥：w[4i+j] = w[4(i-1)+j] XOR temp
+         * 每算出一个 word，temp 直接更新为该 word（标准 AES 密钥扩展），
+         * 不可再做 RotWord —— 否则第 2 个 word 起全线错位。
+         */
         for (int j = 0; j < 4; j++) {
             int base = (i - 1) * 16 + j * 4;
             int nbase = i * 16 + j * 4;
@@ -116,11 +110,10 @@ static void key_expansion(const uint8_t key[GCM_KEY_LEN], aes128_ctx_t *ctx)
             rk[nbase + 2] = (uint8_t)(rk[base + 2] ^ temp[2]);
             rk[nbase + 3] = (uint8_t)(rk[base + 3] ^ temp[3]);
 
-            t = rk[nbase + 0];
-            temp[0] = rk[nbase + 1];
-            temp[1] = rk[nbase + 2];
-            temp[2] = rk[nbase + 3];
-            temp[3] = t;
+            temp[0] = rk[nbase + 0];
+            temp[1] = rk[nbase + 1];
+            temp[2] = rk[nbase + 2];
+            temp[3] = rk[nbase + 3];
         }
     }
 }
@@ -188,6 +181,19 @@ void mix_columns(uint8_t state[16])
     }
 }
 
+/*
+ * InvMixColumns —— 系数矩阵 {0x0e,0x0b,0x0d,0x09} 循环矩阵：
+ *   s0' = 14*s0 ^ 11*s1 ^ 13*s2 ^  9*s3
+ *   s1' =  9*s0 ^ 14*s1 ^ 11*s2 ^ 13*s3
+ *   s2' = 13*s0 ^  9*s1 ^ 14*s2 ^ 11*s3
+ *   s3' = 11*s0 ^ 13*s1 ^  9*s2 ^ 14*s3
+ * 其中 9=x8^x1、11=x8^x2^x1、13=x8^x4^x1、14=x8^x4^x2（xN 为连续 mul2）。
+ */
+static uint8_t mul9(uint8_t b)  { return (uint8_t)(mul2(mul2(mul2(b))) ^ b); }
+static uint8_t mul11(uint8_t b) { return (uint8_t)(mul2(mul2(mul2(b))) ^ mul2(b) ^ b); }
+static uint8_t mul13(uint8_t b) { return (uint8_t)(mul2(mul2(mul2(b))) ^ mul2(mul2(b)) ^ b); }
+static uint8_t mul14(uint8_t b) { return (uint8_t)(mul2(mul2(mul2(b))) ^ mul2(mul2(b)) ^ mul2(b)); }
+
 void inv_mix_columns(uint8_t state[16])
 {
     for (int c = 0; c < 4; c++) {
@@ -195,10 +201,10 @@ void inv_mix_columns(uint8_t state[16])
         uint8_t s0 = state[i + 0], s1 = state[i + 1];
         uint8_t s2 = state[i + 2], s3 = state[i + 3];
 
-        state[i + 0] = (uint8_t)(mul2(mul2(mul2(s0))) ^ mul2(mul2(s1)) ^ mul2(s1) ^ mul2(s2) ^ s2 ^ s3);
-        state[i + 1] = (uint8_t)(s0 ^ mul2(mul2(mul2(s1))) ^ mul2(mul2(s2)) ^ mul2(s2) ^ mul3(s3));
-        state[i + 2] = (uint8_t)(s0 ^ s1 ^ mul2(mul2(mul2(s2))) ^ mul2(mul2(s3)) ^ mul2(s3));
-        state[i + 3] = (uint8_t)(mul3(s0) ^ s1 ^ s2 ^ mul2(mul2(mul2(s3))));
+        state[i + 0] = (uint8_t)(mul14(s0) ^ mul11(s1) ^ mul13(s2) ^ mul9(s3));
+        state[i + 1] = (uint8_t)(mul9(s0)  ^ mul14(s1) ^ mul11(s2) ^ mul13(s3));
+        state[i + 2] = (uint8_t)(mul13(s0) ^ mul9(s1)  ^ mul14(s2) ^ mul11(s3));
+        state[i + 3] = (uint8_t)(mul11(s0) ^ mul13(s1) ^ mul9(s2)  ^ mul14(s3));
     }
 }
 
@@ -217,7 +223,6 @@ void aes128_encrypt_block(const uint8_t key[GCM_KEY_LEN],
 
     /* 初始 AddRoundKey */
     add_round_key(state, ctx.round_key);
-    dump_state("C 初始 AddRoundKey", state);
 
     /* 9 轮完整轮 */
     for (int r = 1; r <= 9; r++) {
@@ -225,9 +230,6 @@ void aes128_encrypt_block(const uint8_t key[GCM_KEY_LEN],
         shift_rows(state);
         mix_columns(state);
         add_round_key(state, ctx.round_key + r * 16);
-        char tag[64];
-        snprintf(tag, sizeof(tag), "C 第%2d轮 后", r);
-        dump_state(tag, state);
     }
 
     /* 末轮（无 MixColumns） */
@@ -269,97 +271,41 @@ void aes128_decrypt_block(const uint8_t key[GCM_KEY_LEN],
  * 归约多项式：x^128 + x^7 + x^2 + x + 1
  * R = 0xE1 << 120
  * ===================================================================== */
-#define GF_R  ((uint64_t)0xE100000000000000ULL << 56)   /* 不对，见下方 */
-
 /*
- * 采用"左移累加"标准算法（MSB-first）：
- *   把 x 当作 128 位整数（高位在前），逐位扫描；
- *   若 x 的最高位为 1，则 Z ^= V；
- *   V 左移一位，若移出位为 1，则 V ^= R。
+ * NIST SP 800-38D GMULT：
+ *   Z = 0; V = Y
+ *   for i = 0 .. 127:
+ *       if X[i] == 1:  Z ^= V
+ *       if V 的最低有效位（byte[15] 的 bit0，即 x^127 系数）为 1:
+ *           V = (V >> 1) ^ R      R = 0xe1 || 0^120
+ *       else:
+ *           V = V >> 1
+ *
+ * 注意：GCM 的比特序约定最左位为 x^0，因此"乘以 x"是**右移**，
+ * 归约多项式 0xe1 异或进 V[0]（最高字节），不是左移。
  */
 static void gf128_mul(const uint8_t x[16], const uint8_t y[16], uint8_t out[16])
 {
-    /* 把 y 装入两个 64 位整数：y_hi 为高 8 字节，y_lo 为低 8 字节 */
-    uint64_t z_hi = 0, z_lo = 0;
-    uint64_t v_hi, v_lo;
-
-    memcpy(&v_hi, y, 8);
-    memcpy(&v_lo, y + 8, 8);
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    v_hi = __builtin_bswap64(v_hi);
-    v_lo = __builtin_bswap64(v_lo);
-#endif
-
-    /* 归约多项式 R = 0xE1 位于最高字节的最高 8 位之后，即 R = 0xE1 << 120 */
-    const uint64_t R_HI = 0xE1ULL << 56;   /* R 在 v_hi 的最高字节 */
-    /* 注意：标准表示下 R 的最高位是 bit120，对齐到 uint64 是 bit56 of hi word */
-    (void)R_HI;
-
-    for (int i = 0; i < 128; i++) {
-        int bit = (x[i >> 3] >> (7 - (i & 7))) & 1;
-
-        if (z_hi & (1ULL << 63)) {
-            z_hi ^= (R_HI >> 0);   /* 仅在第一次需要 xor R，简化见下方修正 */
-        }
-
-        /* 正确做法：累加用 y，每次 y 左移；z 累加 */
-        (void)bit;
-    }
-
-    /* ---- 上述骨架有误，替换为经充分验证的标准实现 ---- */
-    z_hi = 0; z_lo = 0;
-    memcpy(&v_hi, y, 8);
-    memcpy(&v_lo, y + 8, 8);
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    v_hi = __builtin_bswap64(v_hi);
-    v_lo = __builtin_bswap64(v_lo);
-#endif
-
-    for (int i = 0; i < 128; i++) {
-        int bit = (x[i >> 3] >> (7 - (i & 7))) & 1;
-        if (bit) {
-            z_hi ^= v_hi;
-            z_lo ^= v_lo;
-        }
-        /* V 左移一位 */
-        uint64_t carry = (v_hi >> 63) & 1;
-        v_hi = (v_hi << 1) | carry;
-        v_lo = (v_lo << 1) | ((v_hi & 1) ? 1 : 0);
-        /* 修正：v_hi 左移时低位被 v_lo 的移出位填充 */
-    }
-    /* 上面的移位逻辑仍有问题——v_hi 左移后最低位不应被 v_lo 影响，
-     * 正确做法是先保存 v_lo 的移出位，再分别移位。
-     * 为安全起见，改用逐位累加的标准"double-and-add"算法。 */
-
-    (void)z_hi; (void)z_lo;
-    (void)v_hi; (void)v_lo;
-
-    /* ============ 最终采用：FIPS 186-4 GMULT 标准实现 ============ */
     uint8_t Z[16] = {0};
     uint8_t V[16];
+
     memcpy(V, y, 16);
 
     for (int i = 0; i < 128; i++) {
+        /* 从左（MSB）到右逐位扫描 X */
         int xi = (x[i >> 3] >> (7 - (i & 7))) & 1;
-
         if (xi) {
-            /* Z = Z ^ V */
             for (int j = 0; j < 16; j++)
                 Z[j] ^= V[j];
         }
 
-        /* V = V * x (在 GF(2^128) 上左移一位) */
+        /* V = V * x ：右移一位，移出的位做归约 */
         int lsb = V[15] & 1;
-        uint8_t carry_in = 0;
-        for (int j = 0; j < 16; j++) {
-            uint8_t next_carry = (uint8_t)(V[j] >> 7);
-            V[j] = (uint8_t)((V[j] << 1) | carry_in);
-            carry_in = next_carry;
-        }
-        if (lsb) {
-            /* V ^= R，R = 0xE1 << 120，即第 0 字节（最高字节）的 bit 0 */
+        for (int j = 15; j > 0; j--)
+            V[j] = (uint8_t)((V[j] >> 1) | (V[j - 1] << 7));
+        V[0] = (uint8_t)(V[0] >> 1);
+        if (lsb)
             V[0] ^= 0xE1;
-        }
     }
 
     memcpy(out, Z, 16);
@@ -484,18 +430,11 @@ int gcm_seal(const uint8_t key[GCM_KEY_LEN],
     if (len_aad > 0 && aad)
         memcpy(x, aad, len_aad);
     /* aad 填充区已为零 */
-    if (len_pt > 0 && plaintext)
-        memcpy(x + len_aad + aad_pad, plaintext, len_pt);
-    /* ct 填充区已为零 */
-    make_len_block(len_aad, len_pt, x + x_len - 16);
-
-    /* Y = GHASH(H, X) */
-    ghash(H, x, x_len, S);
 
     /* J0 = IV || 0^31 || 1 */
     make_j0(iv, J0);
 
-    /* inc32(J0) —— 递增 J0 的最低 32 位 */
+    /* inc32(J0) —— GCTR 的起始计数器（J0 本身留给标签） */
     memcpy(inc32_j0, J0, GCM_BLOCK);
     int carry = 1;
     for (int k = 15; k >= 12 && carry; k--) {
@@ -504,21 +443,22 @@ int gcm_seal(const uint8_t key[GCM_KEY_LEN],
         carry = sum >> 8;
     }
 
-    /* S = E_K(inc32(J0)) */
-    aes128_encrypt_block(key, inc32_j0, S);
+    /* C = GCTR_K(inc32(J0), P) —— 必须先加密，GHASH 要覆盖密文 */
+    gctr(key, inc32_j0, plaintext ? plaintext : (const uint8_t *)"", len_pt, ciphertext);
 
-    /* 加密明文：从 J0 开始的 GCTR */
-    gctr(key, J0, plaintext ? plaintext : (const uint8_t *)"", len_pt, ciphertext);
+    /* GHASH 输入是 A || C（密文，不是明文） */
+    if (len_pt > 0)
+        memcpy(x + len_aad + aad_pad, ciphertext, len_pt);
+    /* ct 填充区已为零 */
+    make_len_block(len_aad, len_pt, x + x_len - 16);
 
-    /* T = MSB_t( S ^ GHASH(H, X) ) */
-    /* 注意：上面 ghash 结果存在 S 里，但 S 随后被 E_K(inc32(J0)) 覆盖。
-     * 需重新计算 GHASH，或先算 tag。修正如下： */
-    {
-        uint8_t y_ghash[GCM_BLOCK];
-        ghash(H, x, x_len, y_ghash);
-        for (int i = 0; i < GCM_TAG_LEN; i++)
-            tag[i] = (uint8_t)(S[i] ^ y_ghash[i]);
-    }
+    /* Y = GHASH(H, X) */
+    ghash(H, x, x_len, S);
+
+    /* T = MSB_t( GHASH(H,X) ^ E_K(J0) ) —— 用 J0，不是 inc32(J0) */
+    aes128_encrypt_block(key, J0, inc32_j0);
+    for (int i = 0; i < GCM_TAG_LEN; i++)
+        tag[i] = (uint8_t)(S[i] ^ inc32_j0[i]);
 
     free(x);
     return GCM_OK;
@@ -558,18 +498,13 @@ int gcm_open(const uint8_t key[GCM_KEY_LEN],
         memcpy(x + len_aad + aad_pad, ciphertext, len_ct);
     make_len_block(len_aad, len_ct, x + x_len - 16);
 
+    /* J0 = IV || 0^31 || 1 */
     make_j0(iv, J0);
-    int carry = 1;
-    for (int k = 15; k >= 12 && carry; k--) {
-        int sum = J0[k] + carry;
-        J0[k] = (uint8_t)sum;
-        carry = sum >> 8;
-    }
 
     ghash(H, x, x_len, S);
-    aes128_encrypt_block(key, J0, expected_tag);
 
-    /* T = S ^ GHASH */
+    /* T = MSB_t( GHASH(H,X) ^ E_K(J0) ) */
+    aes128_encrypt_block(key, J0, expected_tag);
     for (int i = 0; i < GCM_TAG_LEN; i++)
         expected_tag[i] ^= S[i];
 
@@ -579,8 +514,14 @@ int gcm_open(const uint8_t key[GCM_KEY_LEN],
     if (!crypto_constant_time_eq(tag, expected_tag, GCM_TAG_LEN))
         return GCM_ERR_AUTH;
 
-    /* 验签通过，解密 */
+    /* 验签通过，解密：P = GCTR_K(inc32(J0), C) */
     make_j0(iv, J0);
+    int carry = 1;
+    for (int k = 15; k >= 12 && carry; k--) {
+        int sum = J0[k] + carry;
+        J0[k] = (uint8_t)sum;
+        carry = sum >> 8;
+    }
     gctr(key, J0, ciphertext, len_ct, plaintext);
 
     return GCM_OK;

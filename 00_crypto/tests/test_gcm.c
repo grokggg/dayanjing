@@ -110,7 +110,8 @@ static void test_nist_ex1(void)
     hex2bin(tag_hex, expected_tag, 16);
 
     uint8_t ct[16], tag[16];
-    int rc = gcm_seal(key, iv, aad, 10, pt, 16, ct, tag);
+    /* NIST Ex1 的 AAD 为空（ab6e47d4... 是 AAD 为空时的标签） */
+    int rc = gcm_seal(key, iv, NULL, 0, pt, 16, ct, tag);
     ASSERT(rc == GCM_OK, "NIST Ex1 seal return code");
 
     ASSERT(memcmp(ct, expected_ct, 16) == 0, "NIST Ex1 ciphertext");
@@ -118,7 +119,7 @@ static void test_nist_ex1(void)
 
     /* 验签并解密 */
     uint8_t recovered[16];
-    rc = gcm_open(key, iv, aad, 10, ct, 16, tag, recovered);
+    rc = gcm_open(key, iv, NULL, 0, ct, 16, tag, recovered);
     ASSERT(rc == GCM_OK, "NIST Ex1 open return code");
     ASSERT(memcmp(recovered, pt, 16) == 0, "NIST Ex1 open plaintext");
 
@@ -147,7 +148,8 @@ static void test_nist_ex2(void)
     const char *iv_hex = "000000000000000000000000";
     const char *aad_hex= "00000000000000000000";
     const char *pt_hex = "00000000000000000000000000000000";
-    const char *tag_hex= "ab6e47d42cec13bdf53a67b21257bddf";
+    /* 带 10 字节 AAD 时的标签（Python cryptography 交叉验证值） */
+    const char *tag_hex= "98da4edef1a98577dcb6f7582604276a";
 
     uint8_t key[16], iv[12], aad[10], pt[16];
     uint8_t expected_tag[16];
