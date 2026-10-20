@@ -1,16 +1,5 @@
-# Build artifacts
 build/
-__pycache__/
 *.o
 *.a
-*.so
+__pycache__/
 *.pyc
-*.pyo
-
-# Test artifacts
-/tmp/mock_*.dll
-
-# Editor / OS
-.vscode/
-.idea/
-.DS_Store
