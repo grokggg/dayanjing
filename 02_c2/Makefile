@@ -9,12 +9,13 @@ CFLAGS  += -Iinclude -I../00_crypto/include -I../agent_windows/include
 LDFLAGS ?=
 
 BUILD   := build
-HDR     := include/c2.h include/c2_frame.h ../00_crypto/include/crypto_hash.h \
+HDR     := include/c2.h include/c2_frame.h include/c2_hsmsg.h \
+           ../00_crypto/include/crypto_hash.h \
            ../00_crypto/include/crypto_gcm.h
 
 .PHONY: all clean test mkdirs inspect e2e
 
-all: mkdirs $(BUILD)/test_c2 $(BUILD)/test_c2_frame
+all: mkdirs $(BUILD)/test_c2 $(BUILD)/test_c2_frame $(BUILD)/test_hs_net
 
 mkdirs:
 	@mkdir -p $(BUILD)
@@ -32,6 +33,10 @@ $(BUILD)/c2.o: src/c2.c $(HDR) | mkdirs
 $(BUILD)/c2_frame.o: src/c2_frame.c $(HDR) | mkdirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 握手报文层：HELLO/WELCOME/FINISHED 编解码 + HMAC 双向认证
+$(BUILD)/c2_hsmsg.o: src/c2_hsmsg.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # ---- 测试 ----
 $(BUILD)/test_c2: $(BUILD)/c2.o $(BUILD)/crypto_hash.o tests/test_c2.c $(HDR) | mkdirs
 	$(CC) $(CFLAGS) tests/test_c2.c $(BUILD)/c2.o $(BUILD)/crypto_hash.o -o $@ $(LDFLAGS)
@@ -39,9 +44,17 @@ $(BUILD)/test_c2: $(BUILD)/c2.o $(BUILD)/crypto_hash.o tests/test_c2.c $(HDR) | 
 $(BUILD)/test_c2_frame: $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o tests/test_c2_frame.c $(HDR) | mkdirs
 	$(CC) $(CFLAGS) tests/test_c2_frame.c $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o -o $@ $(LDFLAGS)
 
+$(BUILD)/test_hs_net: tests/test_hs_net.c $(BUILD)/c2.o $(BUILD)/c2_hsmsg.o \
+                      $(BUILD)/c2_frame.o $(BUILD)/crypto_hash.o \
+                      $(BUILD)/crypto_gcm.o $(HDR) | mkdirs
+	$(CC) $(CFLAGS) tests/test_hs_net.c $(BUILD)/c2.o $(BUILD)/c2_hsmsg.o \
+	      $(BUILD)/c2_frame.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_gcm.o \
+	      -o $@ $(LDFLAGS)
+
 test: all
 	./$(BUILD)/test_c2
 	./$(BUILD)/test_c2_frame
+	./$(BUILD)/test_hs_net
 
 # ---- 端到端：采集 -> 封装 -> 落盘（供 Python 侧解封验证） ----
 $(BUILD)/cam_jpeg.o: ../agent_windows/src/cam_jpeg.c | mkdirs

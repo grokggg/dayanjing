@@ -19,6 +19,13 @@
 #define P2P_HOST_LEN      64
 #define P2P_MAX_HOPS      16
 
+/* 电路建立头（endpoint 发给首跳，每跳按自身 mesh 解析下一跳）：
+ *   n_ids(u8) || ids[n_ids][16] || final_port(u16 LE) || host_len(u8) || host
+ * 语义：ids 为**含首跳**的待穿越节点序列；每跳校验 ids[0]==自身，
+ *       弹掉自身后将剩余 ids + 最终目标(host:port) 转发给下一跳。
+ * 最后一跳（n_ids==1，仅剩自己）直接连最终目标。 */
+#define P2P_ROUTE_HDR_MAX_IDS 16
+
 typedef enum {
     P2P_ROLE_ENDPOINT = 0,   /* 植入体，只发起，不转发 */
     P2P_ROLE_EDGE     = 1,   /* 边缘跳板，对外可达 */
@@ -97,5 +104,41 @@ int  p2p_route_path_qos(const p2p_mesh_t *m, const uint8_t *from, const uint8_t 
 /* ---- 数据面：委托 08_lateral 的 poll 双工中继 ----
  * idle_ms <= 0 表示无超时。 */
 int  p2p_relay(int cfd, int tfd, int idle_ms);
+
+/* ====================================================================
+ * 电路建立：QoS 算路 -> 逐跳动态转发（QoS 与数据面联动）
+ * ==================================================================== */
+
+/* 取节点监听地址（host/port），供建连；未找到返回 P2P_ERR_NOTFOUND */
+int  p2p_node_endpoint(const p2p_mesh_t *m, const uint8_t *id,
+                       const char **host, uint16_t *port);
+
+/* 构造电路头。ids_flat 为 n_ids 个节点 ID 的连续缓冲（n_ids*16 字节）。
+ * out 可为 NULL（仅探测长度）。host 为最终目标（如回显服务）。 */
+int  p2p_route_build_hdr(const uint8_t *ids_flat, int n_ids,
+                         const char *final_host, uint16_t final_port,
+                         uint8_t *out, size_t cap, size_t *len);
+
+/* 解析电路头。host_cap 需 >= host_len+1 */
+int  p2p_route_parse_hdr(const uint8_t *in, size_t len,
+                         uint8_t ids[][P2P_NODE_ID_LEN], int max_ids, int *n_ids,
+                         char *final_host, size_t host_cap, uint16_t *final_port);
+
+/*
+ * 中继一跳：读电路头 -> 校验自身 -> 解析下一跳 -> 建连 -> 转发剩余头 -> 双工中继。
+ * 这是 QoS 与数据面的联动点：路径由 p2p_route_path_qos 算出，
+ * 每一跳按自己 mesh 里的邻居地址真实建连，不是测试里手工串的进程。
+ */
+int  p2p_route_handle_conn(const p2p_mesh_t *m, const uint8_t *my_id, int cfd);
+
+/* 监听循环：accept 后 fork 子进程处理一条电路 */
+void p2p_route_serve(const p2p_mesh_t *m, const uint8_t *my_id, int listen_fd);
+
+/*
+ * 发起端：按 QoS 算路 -> 连首跳 -> 发电路头，返回可直接收发的应用 fd。
+ * 成功后 *out_fd 即对最终目标的端到端隧道（中间跳只转发密文/字节）。
+ */
+int  p2p_route_open(const p2p_mesh_t *m, const uint8_t *from, const uint8_t *dst,
+                    const char *final_host, uint16_t final_port, int *out_fd);
 
 #endif /* P2P_H */
