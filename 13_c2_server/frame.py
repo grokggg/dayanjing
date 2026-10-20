@@ -188,11 +188,10 @@ class SealedEnvelope:
 
     @staticmethod
     def _build_aad(msg_type: int) -> bytes:
-        """AAD 定长域分离编码：prefix || version || role || msg_type"""
+        """AAD 定长域分离编码：prefix || version || msg_type（13 字节，与 C 侧 c2_frame_aad 对齐）"""
         return (
             AAD_PREFIX
             + struct.pack("<I", PROTO_VERSION)
-            + struct.pack("<B", 0)  # role 占位（加密端不公开角色，由协议状态决定）
             + struct.pack("<I", msg_type)
         )
 

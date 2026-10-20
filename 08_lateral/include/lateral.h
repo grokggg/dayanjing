@@ -5,11 +5,36 @@
 
 typedef struct { uint32_t base; uint32_t mask; } lat_cidr_t;
 
-/* 解析 "192.168.1.0/24"。成功 0。base/mask 为主机字节序 */
 int lat_cidr_parse(const char *s, lat_cidr_t *out);
-/* 该 CIDR 内可用主机数（不含网络号/广播，/32 与 /31 特殊处理）。成功 0 */
 int lat_cidr_hosts(const lat_cidr_t *c, uint32_t *hosts);
-/* 解析端口规格 "80,443,1000-1002"，填充 ports；*n 为端口数。成功 0 */
 int lat_ports_parse(const char *spec, int *ports, size_t cap, size_t *n);
+
+/* ---- 真实 TCP 端口扫描（connect 探测，支持超时） ---- */
+typedef struct { int port; int open; } lat_scan_res_t;
+int lat_scan_tcp(const char *host, const int *ports, size_t n, int timeout_ms,
+                 lat_scan_res_t *res, size_t cap, size_t *found);
+
+/* ---- 横向移动协议插件 ---- */
+#define LAT_PLAT_ANY 0
+#define LAT_PLAT_WIN 1
+#define LAT_PLAT_NIX 2
+#define LAT_NAME_MAX 16
+
+typedef struct {
+    char   name[LAT_NAME_MAX];
+    int    platform;
+    size_t (*build_cmd)(const char *target, const char *cmd, char *out, size_t cap);
+} lat_plugin_t;
+
+int  lat_plugin_register(const lat_plugin_t *p);
+const lat_plugin_t *lat_plugin_lookup(const char *name);
+size_t lat_plugin_count(void);
+const lat_plugin_t *lat_plugin_at(size_t i);
+void lat_plugin_reset(void);
+
+/* ---- SOCKS5 报文编解码（RFC 1928） ---- */
+size_t lat_socks5_greeting(uint8_t *out, size_t cap);
+size_t lat_socks5_request(const char *host, int port, uint8_t *out, size_t cap);
+int    lat_socks5_reply_ok(const uint8_t *reply, size_t len);
 
 #endif

