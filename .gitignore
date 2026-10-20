@@ -4,3 +4,9 @@ build/
 __pycache__/
 *.pyc
 
+
+# 构建制品
+static/
+build/
+*.a
+*.o
