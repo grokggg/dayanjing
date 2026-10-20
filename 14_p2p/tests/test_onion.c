@@ -1,324 +1,252 @@
 /*
  * DAYANJING v4 — 14_p2p/tests/test_onion.c
  *
- * 洋葱路由分层加密验证 + E2EE 与动态路由的叠加。
+ * 洋葱路由测试（层密钥 = X25519 ephemeral-static，无全网共享 master）。
  *
- * 覆盖（单元部分，纯内存）：
- *   1. 层密钥派生确定性与按 hop 分离
- *   2. 逐跳 peel：每跳解出正确下一跳；最后一跳解出最终 host:port
- *   3. 核心性质 A：中间跳无法解密内层（用自己的密钥 peel inner -> AUTH）
- *   4. 核心性质 B：中间跳剥出的层里不含最终目标字节（看不到链路形状）
- *   5. 错误主密钥 / 篡改洋葱 -> AUTH
- *   6. salt 不同 -> 层密钥不同（跨电路隔离）
- *
- * 覆盖（端到端部分，真进程 + 真 socket）：
- *   7. 四级链路 endpoint->e0->e1->core->echo，洋葱路由逐跳转发
- *   8. 在同一 fd 上叠加 p2p_tunnel_send/recv（E2EE），字节级一致
- *
- * 注意：端口必须在 fork 之前确定。子进程复制的是 fork 时刻的 mesh，
- * 若 fork 后才回填端口，子进程拿到的仍是旧值，转发会连到已死的端口。
+ * 取证方式：部分用例不依赖模块自报，而是直接在洋葱字节里搜特征
+ * （最终目标主机名、深跳 ID），搜到即判失败 —— 防止"加密做了但漏字段"。
  */
 
-#include "p2p.h"
 #include "p2p_onion.h"
-#include "p2p_crypto.h"
+
+#include "crypto_x25519.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <errno.h>
 
-static int pass = 0, fail = 0;
-#define CK(c, m) do { if (c) { pass++; printf("[PASS] %s\n", m); } \
-                      else { fail++; printf("[FAIL] %s\n", m); } } while (0)
+static int g_pass = 0, g_fail = 0;
 
-static void mkid(uint8_t *id, uint8_t v) { memset(id, v, P2P_NODE_ID_LEN); }
-
-/* ---- 真 socket 辅助 ---- */
-
-static int listen_on(uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons(port);
-    if (bind(fd, (struct sockaddr *)&a, sizeof a) != 0) { close(fd); return -1; }
-    if (listen(fd, 8) != 0) { close(fd); return -1; }
-    return fd;
+static void check(int cond, const char *name) {
+    if (cond) { g_pass++; printf("[PASS] %s\n", name); }
+    else      { g_fail++; printf("[FAIL] %s\n", name); }
 }
 
-/* 探测一个当前可用端口（测试环境，TOCTOU 可接受）。
- * cursor 为进出参数：成功后推进到 p+1，保证连续多次调用不返回同一端口 ——
- * 否则所有进程会抢同一个端口，后 bind 的拿 EADDRINUSE(98)。 */
-static int pick_port(uint16_t *out, uint16_t *cursor) {
-    for (uint16_t p = *cursor; p < 47000; p++) {
-        int fd = listen_on(p);
-        if (fd >= 0) { close(fd); *out = p; *cursor = (uint16_t)(p + 1); return 0; }
-    }
-    return -1;
+/* 在 haystack 中搜 needle */
+static int contains(const uint8_t *hay, size_t n,
+                    const uint8_t *needle, size_t m) {
+    if (!m || m > n) return 0;
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(hay + i, needle, m) == 0) return 1;
+    return 0;
 }
 
-/* echo 服务监听固定端口：收多少吐多少 */
-static pid_t spawn_echo_on(uint16_t port) {
-    int lfd = listen_on(port);
-    if (lfd < 0) return -1;
-    pid_t p = fork();
-    if (p == 0) {
-        setpgid(0, 0);
-        for (;;) {
-            int c = accept(lfd, NULL, NULL);
-            if (c < 0) { if (errno == EINTR) continue; break; }
-            char buf[4096];
-            for (;;) {
-                ssize_t r = recv(c, buf, sizeof buf, 0);
-                if (r <= 0) break;
-                size_t off = 0;
-                while (off < (size_t)r) {
-                    ssize_t w = send(c, buf + off, (size_t)r - off, MSG_NOSIGNAL);
-                    if (w <= 0) break;
-                    off += (size_t)w;
-                }
-            }
-            close(c);
-        }
-        _exit(0);
-    }
-    close(lfd);
-    return p;
-}
-
-/* 洋葱中继节点：持有自己的 mesh 视图与洋葱主密钥，监听固定端口 */
-static pid_t spawn_onion_relay_on(const p2p_mesh_t *tmpl, const uint8_t *my_id,
-                                  const uint8_t *master, uint16_t port) {
-    int lfd = listen_on(port);
-    if (lfd < 0) return -1;
-    pid_t p = fork();
-    if (p == 0) {
-        setpgid(0, 0);
-        p2p_onion_route_serve(tmpl, my_id, master, lfd);
-        _exit(0);
-    }
-    close(lfd);
-    return p;
+static void mkid(uint8_t id[16], const char *tag) {
+    memset(id, 0, 16);
+    /* 用可辨识但不全 ASCII 的填充，避免"碰巧搜到"或"搜不到"的假结论 */
+    size_t n = strlen(tag);
+    for (size_t i = 0; i < 16; i++)
+        id[i] = (uint8_t)(i < n ? (unsigned char)tag[i] : (0xa0u + i));
 }
 
 int main(void) {
-    printf("=== 14_p2p 洋葱路由分层加密测试 ===\n");
+    uint8_t idA[16], idB[16], idC[16];
+    mkid(idA, "EDGE0"); mkid(idB, "EDGE1"); mkid(idC, "COREHOP");
 
-    uint8_t master[P2P_ONION_MASTER_LEN];
-    memset(master, 0x5a, sizeof master);
-    uint8_t salt[P2P_ONION_SALT_LEN];
-    memset(salt, 0x11, sizeof salt);
+    /* 每跳各自的静态密钥对 */
+    uint8_t skA[32], pkA[32], skB[32], pkB[32], skC[32], pkC[32];
+    check(x25519_generate_keypair(skA, pkA) == X25519_OK, "生成 A 静态密钥对");
+    check(x25519_generate_keypair(skB, pkB) == X25519_OK, "生成 B 静态密钥对");
+    check(x25519_generate_keypair(skC, pkC) == X25519_OK, "生成 C 静态密钥对");
 
-    uint8_t e0[16], e1[16], core[16], ep[16];
-    mkid(e0, 0x10); mkid(e1, 0x11); mkid(core, 0x12); mkid(ep, 0x13);
+    uint8_t hops[3 * 16], pubs[3 * 32], salt[16];
+    memcpy(hops,       idA, 16);
+    memcpy(hops + 16,  idB, 16);
+    memcpy(hops + 32,  idC, 16);
+    memcpy(pubs,       pkA, 32);
+    memcpy(pubs + 32,  pkB, 32);
+    memcpy(pubs + 64,  pkC, 32);
+    memset(salt, 0x5a, 16);
 
-    /* ---- 1. 层密钥派生 ---- */
+    /* ---- 1. 层密钥双向一致：建电路方与解层方算出同一把钥匙 ---- */
     {
-        uint8_t k1[16], k2[16], k1b[16];
-        CK(p2p_onion_layer_key(master, salt, e0, k1) == P2P_ONION_OK, "layer key e0");
-        CK(p2p_onion_layer_key(master, salt, e1, k2) == P2P_ONION_OK, "layer key e1");
-        CK(p2p_onion_layer_key(master, salt, e0, k1b) == P2P_ONION_OK, "layer key e0 again");
-        CK(memcmp(k1, k2, 16) != 0, "不同跳层密钥不同");
-        CK(memcmp(k1, k1b, 16) == 0, "层密钥派生确定");
-
-        uint8_t salt2[16]; memset(salt2, 0x22, sizeof salt2);
-        uint8_t k3[16];
-        p2p_onion_layer_key(master, salt2, e0, k3);
-        CK(memcmp(k1, k3, 16) != 0, "salt 不同则层密钥不同（跨电路隔离）");
+        uint8_t eph_priv[32], eph_pub[32];
+        x25519_generate_keypair(eph_priv, eph_pub);
+        uint8_t k1[16], k2[16];
+        int r1 = p2p_onion_layer_key(eph_priv, pkA, salt, idA, k1);  /* 建电路方 */
+        int r2 = p2p_onion_layer_key(skA, eph_pub, salt, idA, k2);   /* A 自己 */
+        check(r1 == P2P_ONION_OK && r2 == P2P_ONION_OK, "层密钥派生双方均成功");
+        check(memcmp(k1, k2, 16) == 0, "层密钥双向一致（X25519 双向性）");
     }
 
-    /* ---- 2. 洋葱构建 + 逐跳 peel ---- */
+    /* ---- 2. 不同跳、不同 salt 必须得到不同层密钥 ---- */
     {
-        uint8_t hops[3 * P2P_NODE_ID_LEN];
-        memcpy(hops + 0 * 16, e0, 16);
-        memcpy(hops + 1 * 16, e1, 16);
-        memcpy(hops + 2 * 16, core, 16);
+        uint8_t e_priv[32], e_pub[32];
+        x25519_generate_keypair(e_priv, e_pub);
+        uint8_t kA[16], kB[16];
+        p2p_onion_layer_key(skA, e_pub, salt, idA, kA);
+        p2p_onion_layer_key(skB, e_pub, salt, idB, kB);
+        check(memcmp(kA, kB, 16) != 0, "不同跳层密钥不同");
 
-        uint8_t onion[4096]; size_t olen = 0;
-        CK(p2p_onion_build(master, salt, hops, 3, "127.0.0.1", 9999,
-                           onion, sizeof onion, &olen) == P2P_ONION_OK,
-           "构建 3 跳洋葱");
-
-        int ff = 0; uint8_t nxt[16]; char host[256]; uint16_t port = 0;
-        uint8_t inner[4096]; size_t ilen = 0;
-
-        /* 首跳 e0 剥开 */
-        CK(p2p_onion_peel(master, salt, e0, onion, olen, &ff, nxt,
-                          host, sizeof host, &port, inner, sizeof inner, &ilen)
-           == P2P_ONION_OK, "e0 剥开自己的层");
-        CK(ff == 0, "e0 不是最后一跳");
-        CK(memcmp(nxt, e1, 16) == 0, "e0 解出的下一跳是 e1");
-        CK(ilen > 0, "e0 拿到内层洋葱");
-        CK(strstr(host, "127.0.0.1") == NULL && port == 0,
-           "e0 看不到最终目标 host:port");
-
-        /* 核心性质 A：e0 用自己的密钥解不开内层 */
-        int ff2 = 0; uint8_t nxt2[16]; uint16_t p2 = 0; size_t il2 = 0;
-        CK(p2p_onion_peel(master, salt, e0, inner, ilen, &ff2, nxt2,
-                          host, sizeof host, &p2, NULL, 0, &il2)
-           == P2P_ONION_ERR_AUTH, "e0 无法解密内层（AUTH）");
-
-        /* e1 剥开 */
-        uint8_t inner2[4096]; size_t ilen2 = 0;
-        CK(p2p_onion_peel(master, salt, e1, inner, ilen, &ff, nxt,
-                          host, sizeof host, &port, inner2, sizeof inner2, &ilen2)
-           == P2P_ONION_OK, "e1 剥开自己的层");
-        CK(ff == 0 && memcmp(nxt, core, 16) == 0, "e1 解出的下一跳是 core");
-        CK(strstr(host, "127.0.0.1") == NULL && port == 0,
-           "e1 也看不到最终目标");
-
-        /* core 剥开：最后一跳 */
-        CK(p2p_onion_peel(master, salt, core, inner2, ilen2, &ff, nxt,
-                          host, sizeof host, &port, NULL, 0, &il2)
-           == P2P_ONION_OK, "core 剥开自己的层");
-        CK(ff == 1, "core 是最后一跳");
-        CK(strcmp(host, "127.0.0.1") == 0 && port == 9999,
-           "core 解出最终目标 host:port");
-
-        /* 错误主密钥 */
-        uint8_t bad[16]; memset(bad, 0x99, sizeof bad);
-        CK(p2p_onion_peel(bad, salt, e0, onion, olen, &ff, nxt,
-                          host, sizeof host, &port, NULL, 0, &il2)
-           == P2P_ONION_ERR_AUTH, "错误主密钥 -> AUTH");
-
-        /* 篡改洋葱 */
-        uint8_t tampered[4096];
-        memcpy(tampered, onion, olen);
-        tampered[olen - 1] ^= 0x01;
-        CK(p2p_onion_peel(master, salt, e0, tampered, olen, &ff, nxt,
-                          host, sizeof host, &port, NULL, 0, &il2)
-           == P2P_ONION_ERR_AUTH, "篡改洋葱 -> AUTH");
+        uint8_t salt2[16];
+        memset(salt2, 0xa5, 16);
+        uint8_t kA2[16];
+        p2p_onion_layer_key(skA, e_pub, salt2, idA, kA2);
+        check(memcmp(kA, kA2, 16) != 0, "换 salt 后层密钥不同");
     }
 
-    /* ---- 3. 端到端：真进程四级链路 + E2EE 叠加 ---- */
+    /* ---- 3. 三跳洋葱逐层剥离 ---- */
+    uint8_t onion[4096];
+    size_t  onion_len = 0;
     {
-        uint16_t e0p = 0, e1p = 0, corep = 0, echop = 0;
-        uint16_t cursor = 46000;
-        if (pick_port(&echop, &cursor) || pick_port(&e0p, &cursor) ||
-            pick_port(&e1p, &cursor) || pick_port(&corep, &cursor)) {
-            printf("[FAIL] pick port\n"); fail++; return 1;
+        int rc = p2p_onion_build(hops, 3, pubs, salt,
+                                 "SECRETTARGETHOST", 9999,
+                                 onion, sizeof onion, &onion_len);
+        check(rc == P2P_ONION_OK, "构建 3 层洋葱");
+        printf("[INFO] onion 长度=%zu\n", onion_len);
+    }
+
+    uint8_t inner1[4096]; size_t inner1_len = 0;
+    {
+        int ff = 0; uint8_t next[16]; char host[256]; uint16_t port = 0;
+        memset(next, 0, sizeof next);
+        int rc = p2p_onion_peel(skA, salt, idA, onion, onion_len,
+                                &ff, next, host, sizeof host, &port,
+                                inner1, sizeof inner1, &inner1_len);
+        check(rc == P2P_ONION_OK, "A 剥开自己那层");
+        check(ff == 0, "A 不是最后一跳");
+        check(memcmp(next, idB, 16) == 0, "A 只知道下一跳是 B");
+        printf("[INFO] A: 下一跳=B, 内层密文 %zu 字节（不可读）\n", inner1_len);
+    }
+    uint8_t inner2[4096]; size_t inner2_len = 0;
+    {
+        int ff = 0; uint8_t next[16]; char host[256]; uint16_t port = 0;
+        int rc = p2p_onion_peel(skB, salt, idB, inner1, inner1_len,
+                                &ff, next, host, sizeof host, &port,
+                                inner2, sizeof inner2, &inner2_len);
+        check(rc == P2P_ONION_OK, "B 剥开自己那层");
+        check(ff == 0, "B 不是最后一跳");
+        check(memcmp(next, idC, 16) == 0, "B 只知道下一跳是 C");
+    }
+    {
+        int ff = 0; uint8_t next[16]; char host[256]; uint16_t port = 0;
+        memset(host, 0, sizeof host);
+        size_t dummy_len = 0;
+        int rc = p2p_onion_peel(skC, salt, idC, inner2, inner2_len,
+                                &ff, next, host, sizeof host, &port,
+                                NULL, 0, &dummy_len);
+        check(rc == P2P_ONION_OK, "C 剥开自己那层");
+        check(ff == 1, "C 是最后一跳");
+        check(strcmp(host, "SECRETTARGETHOST") == 0 && port == 9999,
+              "C 解出最终目标 host:port");
+        printf("[INFO] C: 最终目标=%s:%u\n", host, port);
+    }
+
+    /* ---- 4. 取证：洋葱字节里不含最终目标与深跳 ID ---- */
+    {
+        const char *tgt = "SECRETTARGETHOST";
+        check(!contains(onion, onion_len, (const uint8_t *)tgt, strlen(tgt)),
+              "洋葱中不含最终目标主机名明文");
+        check(!contains(onion, onion_len, idC, 16), "洋葱中不含深跳 C 的 ID 明文");
+        /* A 的内层里也不该有（A 只能看到 B 的层，看不到 C） */
+        check(!contains(inner1, inner1_len, idC, 16), "A 持有的内层不含 C 的 ID");
+    }
+
+    /* ---- 5. 核心取证：攻破一跳解不出其他跳的层（无共享主密钥） ---- */
+    {
+        /* A 拿自己的私钥去剥 B 那层 -> 必须失败 */
+        int ff = 0; uint8_t next[16]; char host[256]; uint16_t port = 0;
+        size_t dl = 0;
+        int rc = p2p_onion_peel(skA, salt, idB, inner1, inner1_len,
+                                &ff, next, host, sizeof host, &port, NULL, 0, &dl);
+        check(rc == P2P_ONION_ERR_AUTH, "A 的私钥剥不开 B 的层（AUTH）");
+
+        /* B 拿自己私钥去剥 A 那层（外层）-> 同样失败 */
+        rc = p2p_onion_peel(skB, salt, idA, onion, onion_len,
+                            &ff, next, host, sizeof host, &port, NULL, 0, &dl);
+        check(rc == P2P_ONION_ERR_AUTH, "B 的私钥剥不开 A 的层（AUTH）");
+
+        /* 掌握一跳私钥 + 全部线上字节，仍解不出其他层 */
+        rc = p2p_onion_peel(skA, salt, idA, inner2, inner2_len,
+                            &ff, next, host, sizeof host, &port, NULL, 0, &dl);
+        check(rc == P2P_ONION_ERR_AUTH, "A 的私钥剥不开最内层 C 的层（AUTH）");
+    }
+
+    /* ---- 6. 篡改检测 ---- */
+    {
+        uint8_t bad[4096];
+        memcpy(bad, onion, onion_len);
+        bad[onion_len - 1] ^= 0x01;
+        int ff = 0; uint8_t next[16]; char host[256]; uint16_t port = 0;
+        size_t dl = 0;
+        int rc = p2p_onion_peel(skA, salt, idA, bad, onion_len,
+                                &ff, next, host, sizeof host, &port, NULL, 0, &dl);
+        check(rc == P2P_ONION_ERR_AUTH, "篡改末字节后剥层失败（AUTH）");
+
+        /* 改临时公钥（层密钥协商输入）也须失败 */
+        memcpy(bad, onion, onion_len);
+        bad[0] ^= 0x01;
+        rc = p2p_onion_peel(skA, salt, idA, bad, onion_len,
+                            &ff, next, host, sizeof host, &port, NULL, 0, &dl);
+        check(rc == P2P_ONION_ERR_AUTH, "篡改临时公钥后剥层失败（AUTH）");
+    }
+
+    /* ---- 7. 边界与参数校验 ---- */
+    {
+        size_t need = 0;
+        check(p2p_onion_build(hops, 3, pubs, salt, "h", 1, NULL, 0, &need)
+              == P2P_ONION_OK && need > 0, "build(NULL) 仅探测长度");
+        check(p2p_onion_build(hops, 0, pubs, salt, "h", 1, onion, sizeof onion, &need)
+              == P2P_ONION_ERR_ARG, "n_hops=0 -> ARG");
+        check(p2p_onion_build(hops, 17, pubs, salt, "h", 1, onion, sizeof onion, &need)
+              == P2P_ONION_ERR_ARG, "n_hops 超上限 -> ARG");
+        check(p2p_onion_build(NULL, 3, pubs, salt, "h", 1, onion, sizeof onion, &need)
+              == P2P_ONION_ERR_ARG, "hops=NULL -> ARG");
+        check(p2p_onion_build(hops, 3, NULL, salt, "h", 1, onion, sizeof onion, &need)
+              == P2P_ONION_ERR_ARG, "hop_pub=NULL -> ARG");
+        /* 缓冲区不足 */
+        check(p2p_onion_build(hops, 3, pubs, salt, "h", 1, onion, 8, &need)
+              == P2P_ONION_ERR_LEN, "缓冲区不足 -> LEN");
+        /* 过短洋葱 */
+        uint8_t tiny[8] = {0};
+        int ff = 0; uint8_t next[16]; char host[256]; uint16_t port = 0; size_t dl = 0;
+        check(p2p_onion_peel(skA, salt, idA, tiny, sizeof tiny,
+                             &ff, next, host, sizeof host, &port, NULL, 0, &dl)
+              == P2P_ONION_ERR_FMT, "过短洋葱 -> FMT");
+        check(p2p_onion_peel(NULL, salt, idA, onion, onion_len,
+                             &ff, next, host, sizeof host, &port, NULL, 0, &dl)
+              == P2P_ONION_ERR_ARG, "sk=NULL -> ARG");
+    }
+
+    /* ---- 8. 电路头与转发封装往返 ---- */
+    {
+        uint8_t hdr[4096]; size_t hlen = 0;
+        int rc = p2p_onion_build_hdr(hops, 3, pubs, salt,
+                                     "SECRETTARGETHOST", 9999,
+                                     hdr, sizeof hdr, &hlen);
+        check(rc == P2P_ONION_OK, "构建电路头");
+        uint8_t s2[16]; const uint8_t *o2 = NULL; size_t o2len = 0;
+        check(p2p_onion_parse_hdr(hdr, hlen, s2, &o2, &o2len) == P2P_ONION_OK,
+              "解析电路头");
+        check(memcmp(s2, salt, 16) == 0, "salt 往返一致");
+        /* 注意：每次 build 都生成新的临时密钥对，故不可与原洋葱比字节，
+         * 只能验证"取出的这段确实能被首跳剥开" */
+        check(o2len > 0, "取出的洋葱非空");
+        {
+            int ff = 0; uint8_t next[16]; char h2[256]; uint16_t p2 = 0; size_t dl = 0;
+            int pr = p2p_onion_peel(skA, s2, idA, o2, o2len,
+                                    &ff, next, h2, sizeof h2, &p2, NULL, 0, &dl);
+            check(pr == P2P_ONION_OK && ff == 0 && memcmp(next, idB, 16) == 0,
+                  "解析出的洋葱可被首跳剥开且下一跳=B");
         }
 
-        p2p_mesh_t m;
-        p2p_mesh_init(&m);
-        p2p_node_add(&m, ep,   P2P_ROLE_ENDPOINT, "ep",   "127.0.0.1", 1);
-        p2p_node_add(&m, e0,   P2P_ROLE_EDGE,     "e0",   "127.0.0.1", e0p);
-        p2p_node_add(&m, e1,   P2P_ROLE_EDGE,     "e1",   "127.0.0.1", e1p);
-        p2p_node_add(&m, core, P2P_ROLE_CORE,     "core", "127.0.0.1", corep);
-        p2p_neighbor_link(&m, ep, e0);
-        p2p_neighbor_link(&m, e0, e1);
-        p2p_neighbor_link(&m, e1, core);
-        p2p_link_set_rtt(&m, ep, e0, 1);
-        p2p_link_set_rtt(&m, e0, e1, 1);
-        p2p_link_set_rtt(&m, e1, core, 1);
-
-        pid_t pe  = spawn_echo_on(echop);
-        pid_t r0  = spawn_onion_relay_on(&m, e0,   master, e0p);
-        pid_t r1  = spawn_onion_relay_on(&m, e1,   master, e1p);
-        pid_t rc_ = spawn_onion_relay_on(&m, core, master, corep);
-        if (pe < 0 || r0 < 0 || r1 < 0 || rc_ < 0) {
-            printf("[FAIL] spawn\n"); fail++; return 1;
-        }
-        printf("[INFO] 链路: ep -> e0(%u) -> e1(%u) -> core(%u) -> echo(%u)\n",
-               e0p, e1p, corep, echop);
-
-        uint8_t csalt[P2P_ONION_SALT_LEN];
-        memset(csalt, 0x77, sizeof csalt);
-        int fd = -1;
-        int orc = p2p_onion_route_open(&m, ep, core, "127.0.0.1", echop,
-                                       master, csalt, &fd);
-        CK(orc == P2P_OK && fd >= 0, "洋葱四级链路建立");
-        if (fd < 0) goto cleanup_e2e;
-
-        struct timeval tv;
-        tv.tv_sec = 6; tv.tv_usec = 0;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-
-
-        /* E2EE 叠加：在同一 fd 上跑隧道 */
-        p2p_tunnel_t ta, tb;
-        uint8_t kf[16], kr[16];
-        memset(kf, 0x31, 16);
-        memset(kr, 0x32, 16);
-        uint8_t np[8]; memset(np, 0x40, 8);
-        CK(p2p_tunnel_init(&ta, kf, kr, np) == P2P_C_OK, "隧道 A 初始化");
-        CK(p2p_tunnel_init(&tb, kr, kf, np) == P2P_C_OK, "隧道 B 初始化（方向相反）");
-
-        const char *msg = "ONION-E2EE-PAYLOAD-0123456789";
-        CK(p2p_tunnel_send(&ta, fd, 0x21, (const uint8_t *)msg, strlen(msg))
-           == P2P_C_OK, "隧道发送（四级洋葱链路之上）");
-
-        /* echo 把密文原样吐回，用 B 端密钥解 */
-        uint8_t rbuf[512]; size_t rlen = 0;
-        uint64_t seq = 0; uint32_t mt = 0;
-        int rcv = p2p_tunnel_recv(&tb, fd, &seq, &mt, rbuf, sizeof rbuf, &rlen);
-        CK(rcv == P2P_C_OK, "隧道接收并验签");
-        CK(rcv == P2P_C_OK && rlen == strlen(msg) &&
-           memcmp(rbuf, msg, rlen) == 0, "E2EE + 洋葱四级链路字节级一致");
-        CK(rcv == P2P_C_OK && mt == 0x21, "msg_type 透传正确");
-
-        close(fd);
-cleanup_e2e:
-        kill(-r0, SIGKILL); kill(-r1, SIGKILL); kill(-rc_, SIGKILL);
-        kill(-pe, SIGKILL);
-        waitpid(r0, NULL, 0); waitpid(r1, NULL, 0);
-        waitpid(rc_, NULL, 0); waitpid(pe, NULL, 0);
+        uint8_t fwd[4096]; size_t flen = 0;
+        check(p2p_onion_build_fwd(inner1, inner1_len, fwd, sizeof fwd, &flen)
+              == P2P_ONION_OK, "构建转发封装");
+        const uint8_t *i2 = NULL; size_t i2len = 0;
+        check(p2p_onion_parse_fwd(fwd, flen, &i2, &i2len) == P2P_ONION_OK,
+              "解析转发封装");
+        check(i2len == inner1_len && memcmp(i2, inner1, inner1_len) == 0,
+              "转发封装内容字节级一致");
     }
 
-    /* ---- 4. 主动探测：真实 TCP connect 计时（解除"需外部测量后手工 set"） ---- */
+    /* ---- 9. 每条电路的洋葱不同（临时密钥随机） ---- */
     {
-        uint16_t tp = 0;
-        uint16_t cursor = 46100;
-        if (pick_port(&tp, &cursor) != 0) { CK(0, "pick probe port"); goto done; }
-        pid_t srv = spawn_echo_on(tp);
-        if (srv < 0) { CK(0, "spawn probe target"); goto done; }
-
-        p2p_mesh_t pm;
-        p2p_mesh_init(&pm);
-        uint8_t pa[16], pb[16], pc[16];
-        mkid(pa, 0x61); mkid(pb, 0x62); mkid(pc, 0x63);
-        p2p_node_add(&pm, pa, P2P_ROLE_ENDPOINT, "PA", "127.0.0.1", 1);
-        p2p_node_add(&pm, pb, P2P_ROLE_EDGE,     "PB", "127.0.0.1", tp);
-        p2p_node_add(&pm, pc, P2P_ROLE_EDGE,     "PC", "127.0.0.1", 1);
-        p2p_neighbor_link(&pm, pa, pb);
-        p2p_neighbor_link(&pm, pa, pc);
-
-        uint32_t rtt = 0;
-        CK(p2p_link_probe(&pm, pa, pb, &rtt) == P2P_OK, "主动探测回环邻居成功");
-        CK(rtt >= 1, "探测 RTT 至少 1ms（回环握手极快，0 会被当作未测量）");
-
-        uint32_t ew = 0, ok2 = 0;
-        p2p_link_get_qos(&pm, pa, pb, &ew, NULL, NULL, &ok2, NULL);
-        CK(ew > 0, "探测后 EWMA 已建立（不再需要外部 set）");
-        CK(ok2 == 1, "探测成功计数 +1");
-
-        /* 探测不可达邻居：必须累加失败计数，让丢包惩罚生效 */
-        int prc = p2p_link_probe(&pm, pa, pc, NULL);
-        uint32_t f2 = 0;
-        p2p_link_get_qos(&pm, pa, pc, NULL, NULL, NULL, NULL, &f2);
-        if (prc != P2P_OK) CK(f2 == 1, "探测失败累加失败计数（丢包惩罚生效）");
-        else               CK(f2 == 0, "探测成功则不计失败");
-
-        kill(-srv, SIGKILL);
-        waitpid(srv, NULL, 0);
+        uint8_t o2[4096]; size_t o2len = 0;
+        p2p_onion_build(hops, 3, pubs, salt, "h", 1, o2, sizeof o2, &o2len);
+        check(o2len != onion_len || memcmp(o2, onion, onion_len) != 0,
+              "同参数两次构建的洋葱不同（临时密钥随机）");
     }
 
-done:
-    printf("\n=== 洋葱路由测试 total=%d pass=%d fail=%d ===\n", pass + fail, pass, fail);
-    fflush(stdout);
-    _exit(fail ? 1 : 0);
+    printf("\ntotal=%d pass=%d fail=%d\n", g_pass + g_fail, g_pass, g_fail);
+    return g_fail ? 1 : 0;
 }

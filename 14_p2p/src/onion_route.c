@@ -118,10 +118,9 @@ static ssize_t recv_framed(int fd, uint8_t body[ONION_MAX_BODY], uint8_t *type) 
 int p2p_onion_route_open(const p2p_mesh_t *m, const uint8_t *from,
                          const uint8_t *dst,
                          const char *final_host, uint16_t final_port,
-                         const uint8_t master[P2P_ONION_MASTER_LEN],
                          const uint8_t salt[P2P_ONION_SALT_LEN],
                          int *out_fd) {
-    if (!m || !from || !dst || !out_fd || !master || !salt) return P2P_ERR_ARGS;
+    if (!m || !from || !dst || !out_fd || !salt) return P2P_ERR_ARGS;
     if (!final_host || !final_port) return P2P_ERR_ARGS;
 
     /* QoS 算路（Dijkstra，按链路质量；不是 BFS，也不是硬编码） */
@@ -140,7 +139,17 @@ int p2p_onion_route_open(const p2p_mesh_t *m, const uint8_t *from,
 
     uint8_t hdr[ONION_MAX_BODY];
     size_t  hlen = 0;
-    rc = p2p_onion_build_hdr(master, salt, path_flat, n_hop,
+    /* 收集每一跳的静态公钥（层密钥协商用；私钥留在各跳本地） */
+    uint8_t pub_flat[P2P_MAX_HOPS * P2P_PUBKEY_LEN];
+    memset(pub_flat, 0, sizeof pub_flat);
+    for (int i = 0; i < n_hop; i++) {
+        if (p2p_node_get_pub(m, path[i], pub_flat + (size_t)i * P2P_PUBKEY_LEN)
+            != P2P_OK) {
+            return P2P_ERR_UNREACH;   /* 缺公钥的节点不能当跳板 */
+        }
+    }
+
+    rc = p2p_onion_build_hdr(path_flat, n_hop, pub_flat, salt,
                              final_host, final_port, hdr, sizeof hdr, &hlen);
     if (rc != P2P_ONION_OK) return P2P_ERR_ARGS;
 
@@ -162,8 +171,8 @@ int p2p_onion_route_open(const p2p_mesh_t *m, const uint8_t *from,
  * ==================================================================== */
 
 int p2p_onion_route_handle(const p2p_mesh_t *m, const uint8_t *my_id,
-                           const uint8_t master[P2P_ONION_MASTER_LEN], int cfd) {
-    if (!m || !my_id || !master || cfd < 0) return P2P_ERR_ARGS;
+                           const uint8_t sk[P2P_ONION_SK_LEN], int cfd) {
+    if (!m || !my_id || !sk || cfd < 0) return P2P_ERR_ARGS;
 
     uint8_t body[ONION_MAX_BODY];
     uint8_t type = 0;
@@ -198,7 +207,7 @@ int p2p_onion_route_handle(const p2p_mesh_t *m, const uint8_t *my_id,
     size_t inner_len = 0;
     memset(next_id, 0, sizeof next_id);
 
-    int rc = p2p_onion_peel(master, salt, my_id, onion, onion_len,
+    int rc = p2p_onion_peel(sk, salt, my_id, onion, onion_len,
                             &final_flag, next_id, fhost, sizeof fhost, &fport,
                             inner, sizeof inner, &inner_len);
     if (rc == P2P_ONION_ERR_AUTH) return P2P_ERR_NOTFOUND;  /* 不是给我的 */
@@ -233,9 +242,9 @@ int p2p_onion_route_handle(const p2p_mesh_t *m, const uint8_t *my_id,
 }
 
 void p2p_onion_route_serve(const p2p_mesh_t *m, const uint8_t *my_id,
-                           const uint8_t master[P2P_ONION_MASTER_LEN],
+                           const uint8_t sk[P2P_ONION_SK_LEN],
                            int listen_fd) {
-    if (!m || !my_id || !master || listen_fd < 0) return;
+    if (!m || !my_id || !sk || listen_fd < 0) return;
     for (;;) {
         int cfd = accept(listen_fd, NULL, NULL);
         if (cfd < 0) {
@@ -244,7 +253,7 @@ void p2p_onion_route_serve(const p2p_mesh_t *m, const uint8_t *my_id,
         }
         pid_t p = fork();
         if (p == 0) {
-            p2p_onion_route_handle(m, my_id, master, cfd);
+            p2p_onion_route_handle(m, my_id, sk, cfd);
             close(cfd);
             _exit(0);
         }

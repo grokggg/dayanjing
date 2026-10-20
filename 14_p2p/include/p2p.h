@@ -18,6 +18,7 @@
 #define P2P_ALIAS_LEN     32
 #define P2P_HOST_LEN      64
 #define P2P_MAX_HOPS      16
+#define P2P_PUBKEY_LEN    32   /* X25519 静态公钥，洋葱层密钥协商用 */
 
 /* 电路建立头（endpoint 发给首跳，每跳按自身 mesh 解析下一跳）：
  *   n_ids(u8) || ids[n_ids][16] || final_port(u16 LE) || host_len(u8) || host
@@ -62,6 +63,12 @@ typedef struct {
     uint32_t  nbr_bw[P2P_MAX_NEIGHBORS];        /* 带宽 kbps，0 = 未知 */
     uint32_t  nbr_ok[P2P_MAX_NEIGHBORS];        /* 成功计数 */
     uint32_t  nbr_fail[P2P_MAX_NEIGHBORS];      /* 失败计数（丢包惩罚依据） */
+
+    /* 洋葱层密钥用的静态 X25519 公钥（私钥不进 mesh，只留在本跳本地）。
+     * 层密钥 = HKDF(salt, IKM = X25519(sk_i, eph_pub_i) || my_id, ...)
+     * —— 不再存在全网共享的 master，攻破一跳解不出其他跳。 */
+    uint8_t   pub[P2P_PUBKEY_LEN];
+    int       has_pub;
 } p2p_node_t;
 
 /* ---- QoS 代价模型参数 ----
@@ -76,7 +83,10 @@ typedef struct {
 #define P2P_QOS_HOP_BASE      100
 #define P2P_QOS_FAIL_PENALTY  500
 #define P2P_QOS_JITTER_W        4   /* 抖动权重：抖动比均值更影响交互体验 */
-#define P2P_QOS_BW_REF      10000   /* cost += BW_REF / bw_kbps */
+/* 带宽项：传 P2P_QOS_BW_REF_BYTES 字节所需毫秒 = bytes*8 / bw_kbps。
+ * 用物理量纲而不是无量纲常数，原因是整数除法会把高速链路的带宽项抹成 0：
+ * 旧式 BW_REF/bw 在回环（百万 kbps 级）下恒为 0，快慢链路完全区分不出来。 */
+#define P2P_QOS_BW_REF_BYTES 65536  /* 参考负载 64KB（典型命令+回传结果量级） */
 #define P2P_QOS_BW_UNKNOWN    300   /* 带宽未知时的固定惩罚 */
 
 /* EWMA 平滑系数 alpha = 1/8（定点 x16 下：new = old*7/8 + rtt*2） */
@@ -99,10 +109,32 @@ int  p2p_node_mark_dead(p2p_mesh_t *m, const uint8_t *id);
 int  p2p_node_mark_alive(p2p_mesh_t *m, const uint8_t *id);
 int  p2p_node_count(const p2p_mesh_t *m, p2p_role_t role);
 
+/* ---- 静态公钥（洋葱层密钥协商用） ----
+ * set 只登记公钥；私钥由各跳本地持有，不进 mesh、不跨节点传输。 */
+int  p2p_node_set_pub(p2p_mesh_t *m, const uint8_t *id,
+                      const uint8_t pub[P2P_PUBKEY_LEN]);
+int  p2p_node_get_pub(const p2p_mesh_t *m, const uint8_t *id,
+                      uint8_t out[P2P_PUBKEY_LEN]);
+
 /* ---- 邻居关系（无向，双向写入） ---- */
 int  p2p_neighbor_link(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b);
 int  p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b);
 int  p2p_neighbor_has(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b);
+
+/* ---- 主动带宽探测 ----
+ *
+ * 测量方式：连上邻跳 -> 全量写出 bytes 字节 -> shutdown(SHUT_WR)
+ *           -> 等对端 1 字节回执 -> 用总耗时算吞吐。
+ * 必须对端回执，否则测到的是"本地发送缓冲区有多大"，不是链路带宽
+ * （回环上 256KB 常常瞬间写进缓冲，不回执的话两者都快得测不出差异）。
+ *
+ * acked=0 表示超时未收到回执，此时 bw 只是**写侧估计**，可信度低于 acked=1。 */
+int  p2p_probe_bandwidth(const char *host, uint16_t port, size_t bytes,
+                         uint32_t *bw_kbps, int *acked);
+
+/* 探测 a->b 的带宽并写入边度量（同时用于 QoS 代价模型的 1/bw 项） */
+int  p2p_link_probe_bw(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                       size_t bytes, uint32_t *bw_kbps);
 
 /* ---- 路由：BFS 最短路径，跳过故障节点 ----
  * path[] 输出从 from 的下一跳开始（不含 from），长度写入 n_hop。
@@ -208,17 +240,16 @@ int  p2p_route_open(const p2p_mesh_t *m, const uint8_t *from, const uint8_t *dst
 int  p2p_onion_route_open(const p2p_mesh_t *m, const uint8_t *from,
                           const uint8_t *dst,
                           const char *final_host, uint16_t final_port,
-                          const uint8_t master[P2P_ONION_MASTER_LEN],
                           const uint8_t salt[P2P_ONION_SALT_LEN],
                           int *out_fd);
 
 /* 中继一跳：剥开自己那层 -> 连下一跳（或最终目标）-> 转发剩余洋葱 -> 双工中继 */
 int  p2p_onion_route_handle(const p2p_mesh_t *m, const uint8_t *my_id,
-                            const uint8_t master[P2P_ONION_MASTER_LEN], int cfd);
+                            const uint8_t sk[P2P_ONION_SK_LEN], int cfd);
 
 /* 洋葱版监听循环 */
 void p2p_onion_route_serve(const p2p_mesh_t *m, const uint8_t *my_id,
-                           const uint8_t master[P2P_ONION_MASTER_LEN],
+                           const uint8_t sk[P2P_ONION_SK_LEN],
                            int listen_fd);
 
 #endif /* P2P_H */

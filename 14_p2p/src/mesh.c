@@ -7,6 +7,7 @@
 #include <time.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
 
 const char *p2p_errstr(int e) {
     switch (e) {
@@ -132,6 +133,26 @@ int p2p_node_count(const p2p_mesh_t *m, p2p_role_t role) {
     for (int i = 0; i < m->n_nodes; i++)
         if (m->nodes[i].role == role) c++;
     return c;
+}
+
+int p2p_node_set_pub(p2p_mesh_t *m, const uint8_t *id,
+                     const uint8_t pub[P2P_PUBKEY_LEN]) {
+    if (!m || !id || !pub) return P2P_ERR_ARGS;
+    int i = node_idx(m, id);
+    if (i < 0) return P2P_ERR_NOTFOUND;
+    memcpy(m->nodes[i].pub, pub, P2P_PUBKEY_LEN);
+    m->nodes[i].has_pub = 1;
+    return P2P_OK;
+}
+
+int p2p_node_get_pub(const p2p_mesh_t *m, const uint8_t *id,
+                     uint8_t out[P2P_PUBKEY_LEN]) {
+    if (!m || !id || !out) return P2P_ERR_ARGS;
+    int i = node_idx(m, id);
+    if (i < 0) return P2P_ERR_NOTFOUND;
+    if (!m->nodes[i].has_pub) return P2P_ERR_NOTFOUND;
+    memcpy(out, m->nodes[i].pub, P2P_PUBKEY_LEN);
+    return P2P_OK;
 }
 
 int p2p_neighbor_link(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
@@ -400,7 +421,7 @@ static uint32_t qos_cost_local(uint32_t rtt_ewma_x16, uint32_t jitter_x16,
     c += (uint64_t)rtt_ewma_x16 >> 4;                        /* EWMA RTT (ms) */
     c += ((uint64_t)jitter_x16 >> 4) * P2P_QOS_JITTER_W;     /* 抖动 */
     c += (uint64_t)fail_count * P2P_QOS_FAIL_PENALTY;        /* 丢包惩罚 */
-    if (bw_kbps > 0) c += (uint64_t)P2P_QOS_BW_REF / bw_kbps;
+    if (bw_kbps > 0) c += ((uint64_t)P2P_QOS_BW_REF_BYTES * 8ull) / bw_kbps;
     else             c += P2P_QOS_BW_UNKNOWN;
     if (c > 0xffffffffu) c = 0xffffffffu;
     return (uint32_t)c;
@@ -526,6 +547,93 @@ static int tcp_probe(const char *host, uint16_t port, uint32_t *rtt_ms) {
     uint32_t t1 = now_ms();
     if (rtt_ms) *rtt_ms = (t1 >= t0) ? (t1 - t0) : 1;
     return 0;
+}
+
+/* 带宽探测：连上 -> 写满 bytes -> 半关闭 -> 等对端回执 -> 计时 */
+static int bw_probe(const char *host, uint16_t port, size_t bytes,
+                    uint32_t *bw_kbps, int *acked) {
+    if (!host || !port || bytes == 0) return -1;
+
+    struct addrinfo hints, *res = NULL;
+    char portstr[8];
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(portstr, sizeof portstr, "%u", (unsigned)port);
+    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
+
+    int fd = -1;
+    for (struct addrinfo *p = res; p; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return -1;
+
+    /* 收回执最多等 5 秒 */
+    struct timeval tv;
+    tv.tv_sec = 5; tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
+    uint8_t chunk[4096];
+    memset(chunk, 0xa5, sizeof chunk);
+
+    uint32_t t0 = now_ms();
+    size_t sent = 0;
+    while (sent < bytes) {
+        size_t n = bytes - sent;
+        if (n > sizeof chunk) n = sizeof chunk;
+        ssize_t w = send(fd, chunk, n, MSG_NOSIGNAL);
+        if (w <= 0) break;
+        sent += (size_t)w;
+    }
+    if (sent == 0) { close(fd); return -1; }
+
+    shutdown(fd, SHUT_WR);
+    uint8_t ack = 0;
+    ssize_t r = recv(fd, &ack, 1, 0);
+    uint32_t t1 = now_ms();
+    close(fd);
+
+    uint32_t elapsed = (t1 > t0) ? (t1 - t0) : 1;
+    if (elapsed == 0) elapsed = 1;
+    /* kbit/s = bytes * 8 / ms */
+    uint64_t kbps = ((uint64_t)sent * 8ull) / (uint64_t)elapsed;
+    if (kbps > 0xffffffffull) kbps = 0xffffffffull;
+    if (bw_kbps) *bw_kbps = (uint32_t)kbps;
+    if (acked)   *acked   = (r == 1) ? 1 : 0;
+    return 0;
+}
+
+int p2p_probe_bandwidth(const char *host, uint16_t port, size_t bytes,
+                        uint32_t *bw_kbps, int *acked) {
+    if (!host || !port || bytes == 0) return P2P_ERR_ARGS;
+    if (bw_probe(host, port, bytes, bw_kbps, acked) != 0) return P2P_ERR_UNREACH;
+    return P2P_OK;
+}
+
+int p2p_link_probe_bw(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                      size_t bytes, uint32_t *bw_kbps) {
+    if (!m || !a || !b || bytes == 0) return P2P_ERR_ARGS;
+    int y = p2p_node_find(m, b);
+    if (y < 0) return P2P_ERR_NOTFOUND;
+    if (p2p_node_find(m, a) < 0) return P2P_ERR_NOTFOUND;
+    if (!p2p_neighbor_has(m, a, b)) return P2P_ERR_NOLINK;
+
+    uint32_t bw = 0;
+    int acked = 0;
+    if (bw_probe(m->nodes[y].host, m->nodes[y].port, bytes, &bw, &acked) != 0) {
+        p2p_link_note(m, a, b, 0);
+        return P2P_ERR_UNREACH;
+    }
+    if (bw == 0) bw = 1;
+    int rc = p2p_link_set_bw(m, a, b, bw);
+    if (rc != P2P_OK) return rc;
+    if (bw_kbps) *bw_kbps = bw;
+    return P2P_OK;
 }
 
 int p2p_link_probe(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,

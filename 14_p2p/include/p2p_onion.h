@@ -1,52 +1,41 @@
 /*
  * DAYANJING v4 — p2p_onion.h
  *
- * 洋葱路由分层加密（Onion Routing）—— 解除"电路头对中间跳可见"的限制。
+ * 洋葱路由分层加密（Onion Routing）—— 每跳只解出「下一跳是谁」。
  *
  * ====================================================================
  * 解决的问题
  * ====================================================================
- * 旧电路头（route.h）格式：
- *     n_ids || ids[0..n] || final_port || host_len || host
- * 每一跳都能看到**整条路径**和**最终目标 host:port**。
- * 中间跳因此知道链路形状——谁在为谁转发、最终打向哪里。
+ * 旧电路头（route.h）：n_ids || ids[] || final_port || host，
+ * 每一跳都能看到**整条路径**和**最终目标** —— 中间跳知道链路形状。
  *
- * 洋葱路由后：
- *   - 每跳只能解出**自己的那一层**
- *   - 解出的内容只有「下一跳是谁」，或者「我是最后一跳，最终目标是 X」
- *   - 剩余部分是**不透明密文**，原样转发，本跳无法解密
- *
- * 于是中间跳（非最后一跳）**既不知道自己在第几跳，也不知道最终目标**。
- * 这是与旧方案的本质区别。
+ * 洋葱后：每跳只能解开自己那一层，解出的内容只有「下一跳是谁」
+ * （或「我是最后一跳，最终目标 X」），其余为不透明密文原样转发。
+ * 中间跳**既不知道自己在第几跳，也不知道最终目标**。
  *
  * ====================================================================
- * 分层构造（endpoint 侧，从最后一跳往前逐层加密）
+ * 层密钥：X25519 ephemeral-static（Tor ntor 同构）—— 无共享主密钥
  * ====================================================================
- *   第 n 层（最后一跳）明文：{final=1, host, port, inner=空}
- *       -> 用 K[n] 加密得 C[n]
- *   第 i 层（中间跳）明文：{final=0, next_id=hop[i+1], inner=C[i+1]}
- *       -> 用 K[i] 加密得 C[i]
- *   第 0 层（首跳）明文：{final=0, next_id=hop[1], inner=C[1]}
- *       -> 用 K[0] 加密得 C[0]
+ * 早期版本：K[i] = HKDF(salt, IKM=master, ...) —— master 全网共享，
+ *           任一跳被攻破即能推导所有跳的层密钥（只要知道路径）。
  *
- *   线上电路头 = version || salt(16) || onion_len(u16 LE) || C[0]
+ * 现在：
+ *   每跳持有自己的静态密钥对 (sk_i, pk_i)，私钥不进 mesh、不外传
+ *   建电路方为每跳生成临时密钥对 (e_i, E_i)
+ *     ss_i = X25519(e_i, pk_i) = X25519(sk_i, E_i)
+ *     K[i] = HKDF(salt, IKM = ss_i || hop_id[i], info="p2p:onion:layer:v2")
+ *   临时公钥 E_i 以**明文**随本层携带（解密前必须能拿到它）
  *
- * 每跳处理：
- *   1. 用自己的层密钥解密收到的 onion
- *   2. final=1 -> 连最终目标，relay
- *      final=0 -> 连 next_id，把 **inner 原样**转发（不解密）
+ * 线上每层：eph_pub(32) || iv(12) || tag(16) || ct(n)
  *
- * ====================================================================
- * 密钥派生
- * ====================================================================
- *   K[i] = HKDF-SHA256(salt=onion_salt, IKM=master,
- *                      info="p2p:onion:layer:v1" || hop_id[i], L=16)
+ * 性质与边界（不夸大）：
+ *   1. 无全网共享密钥 —— 拿到一跳私钥只能解该跳的层，解不出其他层
+ *   2. 临时密钥每电路随机 —— 同一跳在不同电路上层密钥不同
+ *   3. 边界：ephemeral-static 不等于完全前向保密。若某跳静态私钥泄露
+ *      且攻击者完整录制了电路建立报文，可离线还原该跳那一层
+ *      （与 Tor ntor 同级；完全 PFS 需静态密钥定期轮换）
  *
- * master 为洋葱主密钥（配置分发一个即可，无需为每跳单独配密钥）。
- * onion_salt 每条电路随机生成，明文携带 —— salt 不需要保密，
- * 作用是让同一主密钥在不同电路上派生出不同的层密钥。
- *
- * 密码学复用 00_crypto（AES-128-GCM + HKDF-SHA256），不自研第二套。
+ * 密码学复用 00_crypto：X25519 + HKDF-SHA256 + AES-128-GCM，不自研第二套。
  */
 
 #ifndef DAYANJING_P2P_ONION_H
@@ -54,75 +43,70 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define P2P_ONION_MASTER_LEN 16   /* 洋葱主密钥 */
-#define P2P_ONION_SALT_LEN   16   /* 每条电路的随机 salt */
+#define P2P_ONION_SALT_LEN   16   /* 每条电路的随机 salt，明文携带 */
 #define P2P_ONION_KEY_LEN    16   /* 每跳层密钥（AES-128） */
 #define P2P_ONION_IV_LEN     12   /* GCM IV */
 #define P2P_ONION_TAG_LEN    16   /* GCM tag */
 #define P2P_ONION_MAX_LAYERS 16   /* 最大层数，须 <= P2P_MAX_HOPS */
 
-/* 层密文 = iv(12) || tag(16) || ct(n)，故每层的固定开销 */
+/* 层密文 = iv(12) || tag(16) || ct(n)；层线上 = eph_pub(32) || 层密文 */
 #define P2P_ONION_LAYER_OVH  (P2P_ONION_IV_LEN + P2P_ONION_TAG_LEN)
+#define P2P_ONION_EPH_LEN     32   /* X25519 临时公钥，明文随层携带 */
+#define P2P_ONION_SK_LEN      32   /* 本跳静态私钥 */
 
 /* 层明文头（固定 22 字节）：
  *   u8  final_flag      1 = 本跳即最后一跳
- *   u8  host_len        最终目标主机名长度（final_flag=1 时有效）
- *   u16 port LE         最终目标端口（final_flag=1 时有效）
- *   u8  next_id[16]     下一跳 ID（final_flag=0 时有效）
- *   u16 inner_len LE    内层洋葱长度（0 = 无内层，即本跳为最后一跳）
+ *   u8  host_len        最终目标主机名长度（final 时有效）
+ *   u16 port LE         最终目标端口（final 时有效）
+ *   u8  next_id[16]     下一跳 ID（非 final 时有效）
+ *   u16 inner_len LE    内层洋葱长度（0 = 无内层）
  * 其后紧跟 inner[inner_len] 与 host[host_len]。 */
 #define P2P_ONION_HDR_LEN    22
 #define P2P_ONION_ID_LEN     16
 
-/* ---- 返回值（沿用 p2p 错误码语义） ---- */
 #define P2P_ONION_OK         0
 #define P2P_ONION_ERR_ARG   -1
 #define P2P_ONION_ERR_LEN   -2   /* 缓冲区不足 */
-#define P2P_ONION_ERR_AUTH  -3   /* 层验签失败（不是给我的洋葱 / 被篡改） */
+#define P2P_ONION_ERR_AUTH  -3   /* 层验签失败（不是给我的 / 被篡改） */
 #define P2P_ONION_ERR_FMT   -4   /* 格式错误 */
 
 /*
- * 派生某一跳的层密钥。
- *   K = HKDF(salt=onion_salt, IKM=master,
- *            info="p2p:onion:layer:v1" || hop_id, L=16)
- * 供测试直接调用以验证派生确定性；实现内部也走这一路径。
+ * 派生某一跳的层密钥：
+ *   ss = X25519(sk, eph_pub)          （sk 为本跳静态私钥 / 建电路方临时私钥）
+ *   K  = HKDF(salt, IKM = ss || my_id, info="p2p:onion:layer:v2", L=16)
+ *
+ * 建电路方用 (临时私钥, 对端静态公钥)，解层方用 (本跳静态私钥, 层内临时公钥)，
+ * 两边算出同一个 ss —— 这就是 X25519 的双向性。
  */
-int p2p_onion_layer_key(const uint8_t master[P2P_ONION_MASTER_LEN],
+int p2p_onion_layer_key(const uint8_t sk[P2P_ONION_SK_LEN],
+                        const uint8_t eph_pub[P2P_ONION_EPH_LEN],
                         const uint8_t salt[P2P_ONION_SALT_LEN],
-                        const uint8_t hop_id[P2P_ONION_ID_LEN],
+                        const uint8_t my_id[P2P_ONION_ID_LEN],
                         uint8_t out[P2P_ONION_KEY_LEN]);
 
 /*
- * 构建洋葱（endpoint 侧）。
+ * 构建洋葱（endpoint 侧，从最后一跳往前逐层包裹）。
  *
- * hops_flat : n_hops 个节点 ID 的连续缓冲（含首跳），从首跳到最后一跳
- * out       : 可为 NULL，仅探测所需长度
- *
- * 返回 P2P_ONION_OK 时 *out_len 写入洋葱总长（含 IV/TAG 开销）。
+ * hops_flat     : n_hops 个节点 ID 连续缓冲（首跳 -> 最后一跳）
+ * hop_pub_flat  : n_hops 个对应跳的静态 X25519 公钥（32 字节/跳）
+ * out           : 可为 NULL，仅探测所需长度
  */
-int p2p_onion_build(const uint8_t master[P2P_ONION_MASTER_LEN],
+int p2p_onion_build(const uint8_t *hops_flat, int n_hops,
+                    const uint8_t *hop_pub_flat,
                     const uint8_t salt[P2P_ONION_SALT_LEN],
-                    const uint8_t *hops_flat, int n_hops,
                     const char *final_host, uint16_t final_port,
                     uint8_t *out, size_t cap, size_t *out_len);
 
 /*
- * 剥开一层（每跳侧）。只有本跳的层密钥能解开；解不开返回 P2P_ONION_ERR_AUTH。
- *
- * 输出：
- *   final_flag : 1 = 本跳即最后一跳（此时填 final_host/final_port）
- *                0 = 需转发（此时填 next_id）
- *   inner      : 剩余洋葱（不透明，本跳不解密），可为 NULL 仅探测长度
- *
- * 注意：inner_len 为 0 且 final_flag=0 属格式错误，返回 P2P_ONION_ERR_FMT。
+ * 剥开一层（每跳侧，需要本跳静态私钥）。
+ * 层密钥不对 -> P2P_ONION_ERR_AUTH（统一表现，不区分"不是给我的"与"被篡改"）。
  */
-int p2p_onion_peel(const uint8_t master[P2P_ONION_MASTER_LEN],
+int p2p_onion_peel(const uint8_t sk[P2P_ONION_SK_LEN],
                    const uint8_t salt[P2P_ONION_SALT_LEN],
                    const uint8_t my_id[P2P_ONION_ID_LEN],
                    const uint8_t *onion, size_t onion_len,
@@ -131,29 +115,20 @@ int p2p_onion_peel(const uint8_t master[P2P_ONION_MASTER_LEN],
                    char *final_host, size_t host_cap, uint16_t *final_port,
                    uint8_t *inner, size_t inner_cap, size_t *inner_len);
 
-/*
- * 构造完整电路头：version || salt || onion_len || onion
- * out 可为 NULL 仅探测长度。
- */
-int p2p_onion_build_hdr(const uint8_t master[P2P_ONION_MASTER_LEN],
+/* 完整电路头：version || salt || onion_len(u16 LE) || onion */
+int p2p_onion_build_hdr(const uint8_t *hops_flat, int n_hops,
+                        const uint8_t *hop_pub_flat,
                         const uint8_t salt[P2P_ONION_SALT_LEN],
-                        const uint8_t *hops_flat, int n_hops,
                         const char *final_host, uint16_t final_port,
                         uint8_t *out, size_t cap, size_t *out_len);
 
-/*
- * 解析电路头，取出 salt 与洋葱（不解密）。
- * onion_out 指向 out 内部的偏移，不额外拷贝；out 的生命周期需覆盖使用期。
- */
 int p2p_onion_parse_hdr(const uint8_t *in, size_t len,
                         uint8_t salt_out[P2P_ONION_SALT_LEN],
                         const uint8_t **onion_out, size_t *onion_len);
 
-/* 中间跳转发剩余洋葱时的封装：u16 LE inner_len || inner */
+/* 中间跳转发剩余洋葱：u16 LE inner_len || inner */
 int p2p_onion_build_fwd(const uint8_t *inner, size_t inner_len,
                         uint8_t *out, size_t cap, size_t *out_len);
-
-/* 解析上一步的转发封装 */
 int p2p_onion_parse_fwd(const uint8_t *in, size_t len,
                         const uint8_t **inner_out, size_t *inner_len);
 
