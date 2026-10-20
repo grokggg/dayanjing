@@ -6,14 +6,14 @@ CFLAGS  += -Iinclude -D_GNU_SOURCE
 LDFLAGS ?=
 
 BUILD   := build
-SRC     := src/crypto_gcm.c src/crypto_hash.c
-HDR     := include/crypto_gcm.h include/crypto_hash.h
+SRC     := src/crypto_gcm.c src/crypto_hash.c src/crypto_x25519.c
+HDR     := include/crypto_gcm.h include/crypto_hash.h include/crypto_x25519.h
 
-OBJS    := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o
+OBJS    := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
 
 .PHONY: all clean test mkdirs inspect
 
-all: mkdirs $(BUILD)/test_gcm $(BUILD)/test_hash
+all: mkdirs $(BUILD)/test_gcm $(BUILD)/test_hash $(BUILD)/test_x25519
 
 mkdirs:
 	@mkdir -p $(BUILD)
@@ -27,9 +27,14 @@ $(BUILD)/test_gcm: $(BUILD)/crypto_gcm.o tests/test_gcm.c $(HDR) | mkdirs
 $(BUILD)/test_hash: $(BUILD)/crypto_hash.o tests/test_hash.c $(HDR) | mkdirs
 	$(CC) $(CFLAGS) tests/test_hash.c $(BUILD)/crypto_hash.o -o $@ $(LDFLAGS)
 
+# X25519：权威向量由 Python cryptography 生成，随测试一起编译（tests/x25519_vectors.h）
+$(BUILD)/test_x25519: $(BUILD)/crypto_x25519.o tests/test_x25519.c tests/x25519_vectors.h | mkdirs
+	$(CC) $(CFLAGS) -Itests tests/test_x25519.c $(BUILD)/crypto_x25519.o -o $@ $(LDFLAGS)
+
 test: all
 	./$(BUILD)/test_gcm
 	./$(BUILD)/test_hash
+	./$(BUILD)/test_x25519
 
 inspect: all
 	@echo "== 敏感字符串扫描（应为空） =="
