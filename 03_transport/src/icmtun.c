@@ -41,6 +41,14 @@ static void put_be32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
     p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
 }
+static void put_be16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
+}
+
+static uint16_t get_be16(const uint8_t *p) {
+    return (uint16_t)((p[0] << 8) | p[1]);
+}
+
 static uint32_t get_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
          | ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
@@ -51,7 +59,7 @@ size_t tx_icmp_build_echo(uint16_t id, uint16_t eseque,
                           const uint8_t *data, size_t len,
                           uint8_t *out, size_t cap) {
     if (!out || cap < TX_ICMP_HDR + TX_ICMTUN_HDR) return 0;
-    if (len > TX_ICMTUN_CHUNK) return 0;
+    if (len > TX_ICMTUN_CHUNK || len > 0xFFFFu) return 0;
     if (len > 0 && !data) return 0;
     size_t total = TX_ICMP_HDR + TX_ICMTUN_HDR + len;
     if (total > cap) return 0;
@@ -69,7 +77,8 @@ size_t tx_icmp_build_echo(uint16_t id, uint16_t eseque,
     put_be32(p + 4, tseq);
     put_be32(p + 8, tack);
     p[12] = flags;
-    p[13] = (uint8_t)len;
+    put_be16(p + 13, (uint16_t)len);
+    p[15] = 0; /* rsv */
     if (len) memcpy(p + TX_ICMTUN_HDR, data, len);
 
     ic->checksum = icmp_cksum((const uint16_t *)out, (int)total);
@@ -98,7 +107,7 @@ int tx_icmp_parse_echo(const uint8_t *pkt, size_t len,
     if (memcmp(p, ICMTUN_MAGIC, 4) != 0) return TX_ICMTUN_ERR_PROTO;
 
     uint8_t fl = p[12];
-    size_t n = p[13];
+    size_t n = get_be16(p + 13);
     size_t avail = len - (size_t)(p + TX_ICMTUN_HDR - pkt);
     if (n > avail) return TX_ICMTUN_ERR_PROTO;
     if (n > cap) return TX_ICMTUN_ERR_NOSPACE;

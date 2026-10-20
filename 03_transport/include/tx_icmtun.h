@@ -8,8 +8,8 @@
    SOCK_RAW 已实测可用（回环真收发通）。
 
    载荷布局（紧跟 8 字节 ICMP 头之后）:
-     magic 4B | tseq 4B(BE) | tack 4B(BE) | flags 1B | len 1B | data
-   头部共 14 字节。
+     magic 4B | tseq 4B(BE) | tack 4B(BE) | flags 1B | len 2B(BE) | rsv 1B | data
+   头部共 16 字节（len 为 2 字节大端，可承载 >255 的分片）。
 
    flags: bit0=FIN(最后一片) bit1=SRV(服务端构造，区别于内核自动回显)
           bit2=ACKV(tack 字段有效)
@@ -18,8 +18,8 @@
    必须靠 SRV 位过滤，否则会把回显误当服务端应答。 */
 
 #define TX_ICMP_HDR     8
-#define TX_ICMTUN_HDR   14
-#define TX_ICMTUN_CHUNK 256     /* 默认单片净荷，公网 MTU 友好 */
+#define TX_ICMTUN_HDR   16
+#define TX_ICMTUN_CHUNK 1000    /* 默认单片净荷；公网实测 1000B 原样往返，MTU 友好 */
 #define TX_ICMTUN_MAXPKT 1500
 
 #define TX_ICMTUN_FIN   0x01
