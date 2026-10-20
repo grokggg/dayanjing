@@ -10,7 +10,7 @@ C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/cryp
 
 all: $(BUILD)/libp2p.a
 
-$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o
+$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o
 	ar rcs $@ $^
 
 $(BUILD)/mesh.o: src/mesh.c include/p2p.h | $(BUILD)
@@ -35,6 +35,14 @@ $(BUILD)/cell.o: src/cell.c include/p2p_cell.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/crypto.o: src/crypto.c include/p2p_crypto.h ../02_c2/include/c2_frame.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 跳静态密钥轮换：把 ephemeral-static 补成真前向保密（epoch 轮换 + 私钥安全擦除）
+$(BUILD)/hopkey.o: src/hopkey.c include/p2p_hopkey.h include/p2p_onion.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 混时序：时间片内跨流交错（保流内序）+ 每片恒定输出（不足补覆盖）
+$(BUILD)/mix.o: src/mix.c include/p2p_mix.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/c2_frame.o: ../02_c2/src/c2_frame.c | $(BUILD)
@@ -84,7 +92,19 @@ $(BUILD):
 $(BUILD)/test_onion: tests/test_onion.c $(BUILD)/libp2p.a $(C2OBJS)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw
+# 跳静态密钥轮换 / 前向保密
+$(BUILD)/test_hopkey: tests/test_hopkey.c $(BUILD)/libp2p.a $(C2OBJS)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+
+# 混时序
+$(BUILD)/test_mix: tests/test_mix.c $(BUILD)/libp2p.a $(C2OBJS)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+
+# 探测调度：低频 + 错峰（含真实回环 listener 探测）
+$(BUILD)/test_probesched: tests/test_probesched.c $(BUILD)/libp2p.a
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+
+test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_probesched
 	./$(BUILD)/test_mesh
 	./$(BUILD)/test_qos
 	./$(BUILD)/test_chain
@@ -93,6 +113,9 @@ test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2e
 	./$(BUILD)/test_onion
 	./$(BUILD)/test_cell
 	./$(BUILD)/test_bw
+	./$(BUILD)/test_hopkey
+	./$(BUILD)/test_mix
+	./$(BUILD)/test_probesched
 
 inspect: all
 	@echo "== 符号表（14_p2p 公开接口） =="

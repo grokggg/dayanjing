@@ -91,6 +91,8 @@ int p2p_node_del(p2p_mesh_t *m, const uint8_t *id) {
                 o->nbr_bw[j]       = o->nbr_bw[last];
                 o->nbr_ok[j]       = o->nbr_ok[last];
                 o->nbr_fail[j]     = o->nbr_fail[last];
+                o->nbr_lastprobe[j] = o->nbr_lastprobe[last];
+                o->nbr_pbackoff[j]  = o->nbr_pbackoff[last];
                 o->n_neighbors--;
                 j--;
             }
@@ -174,6 +176,8 @@ int p2p_neighbor_link(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
     A->nbr_bw[ka]       = 0;
     A->nbr_ok[ka]       = 0;
     A->nbr_fail[ka]     = 0;
+    A->nbr_lastprobe[ka] = 0;
+    A->nbr_pbackoff[ka]  = 0;
 
     int kb = B->n_neighbors;
     memcpy(B->neighbors[B->n_neighbors++], a, P2P_NODE_ID_LEN);
@@ -183,6 +187,8 @@ int p2p_neighbor_link(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
     B->nbr_bw[kb]       = 0;
     B->nbr_ok[kb]       = 0;
     B->nbr_fail[kb]     = 0;
+    B->nbr_lastprobe[kb] = 0;
+    B->nbr_pbackoff[kb]  = 0;
     return P2P_OK;
 }
 
@@ -203,6 +209,8 @@ int p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
             A->nbr_bw[i]       = A->nbr_bw[last];
             A->nbr_ok[i]       = A->nbr_ok[last];
             A->nbr_fail[i]     = A->nbr_fail[last];
+            A->nbr_lastprobe[i] = A->nbr_lastprobe[last];
+            A->nbr_pbackoff[i]  = A->nbr_pbackoff[last];
             A->n_neighbors--; found = 1; break;
         }
     }
@@ -216,6 +224,8 @@ int p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
             B->nbr_bw[i]       = B->nbr_bw[last];
             B->nbr_ok[i]       = B->nbr_ok[last];
             B->nbr_fail[i]     = B->nbr_fail[last];
+            B->nbr_lastprobe[i] = B->nbr_lastprobe[last];
+            B->nbr_pbackoff[i]  = B->nbr_pbackoff[last];
             B->n_neighbors--; break;
         }
     }
@@ -672,5 +682,133 @@ int p2p_link_probe_all(p2p_mesh_t *m, const uint8_t *a, int *n_probed) {
         if (p2p_link_probe(m, a, snapshot[i], NULL) == P2P_OK) ok++;
     }
     if (n_probed) *n_probed = ok;
+    return P2P_OK;
+}
+
+/* ====================================================================
+ * 探测调度：低频 + 抖动 + 错峰 + 失败退避
+ * ====================================================================
+ * 主动探测本身要发包，若周期性全图扫描，这些包就是可识别指纹。
+ * 调度器把探测从"每轮全扫"改成"到期才探、随机顺序、失败退避"。
+ */
+
+/* 取 a->b 在 a 的邻居表中的下标 */
+static int edge_idx_a(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                      int *ia, int *ka) {
+    int x = p2p_node_find(m, a);
+    if (x < 0) return P2P_ERR_NOTFOUND;
+    for (int i = 0; i < m->nodes[x].n_neighbors; i++) {
+        if (memcmp(m->nodes[x].neighbors[i], b, P2P_NODE_ID_LEN) == 0) {
+            if (ia) *ia = x;
+            if (ka) *ka = i;
+            return P2P_OK;
+        }
+    }
+    return P2P_ERR_NOLINK;
+}
+
+int p2p_probesched_init(p2p_probesched_t *ps, uint32_t seed,
+                        uint32_t base_ms, uint32_t jitter_ms,
+                        uint32_t max_backoff_ms) {
+    if (!ps) return P2P_ERR_ARGS;
+    memset(ps, 0, sizeof *ps);
+    ps->s = seed ? seed : 0x9e3779b9u;
+    ps->base_ms        = base_ms;
+    ps->jitter_ms      = jitter_ms;
+    ps->max_backoff_ms = max_backoff_ms;
+    return P2P_OK;
+}
+
+static uint32_t ps_rand(p2p_probesched_t *ps) {
+    uint32_t x = ps->s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    ps->s = x;
+    return x;
+}
+
+int p2p_probe_due(p2p_probesched_t *ps, const p2p_mesh_t *m,
+                  const uint8_t *a, const uint8_t *b, uint32_t now_ms) {
+    if (!ps || !m || !a || !b) return P2P_ERR_ARGS;
+    int x = 0, k = 0;
+    int rc = edge_idx_a(m, a, b, &x, &k);
+    if (rc != P2P_OK) return rc;
+
+    uint32_t last = m->nodes[x].nbr_lastprobe[k];
+    if (last == 0) return 1;                 /* 从未探测过 */
+    if (now_ms < last) return 1;              /* 时钟异常回绕：宁可多探不可卡死 */
+
+    uint32_t jitter = 0;
+    if (ps->jitter_ms) jitter = ps_rand(ps) % ps->jitter_ms;
+    uint32_t need = ps->base_ms + m->nodes[x].nbr_pbackoff[k] + jitter;
+    return ((now_ms - last) >= need) ? 1 : 0;
+}
+
+int p2p_probe_mark(p2p_probesched_t *ps, p2p_mesh_t *m,
+                   const uint8_t *a, const uint8_t *b,
+                   uint32_t now_ms, int ok) {
+    if (!ps || !m || !a || !b) return P2P_ERR_ARGS;
+    int x = 0, k = 0, y = 0, k2 = 0;
+    int rc = edge_idx_a(m, a, b, &x, &k);
+    if (rc != P2P_OK) return rc;
+    rc = edge_idx_a(m, b, a, &y, &k2);
+    if (rc != P2P_OK) return rc;
+
+    m->nodes[x].nbr_lastprobe[k]   = now_ms;
+    m->nodes[y].nbr_lastprobe[k2]  = now_ms;   /* 无向边：双向一致 */
+
+    uint32_t nb;
+    if (ok) {
+        nb = 0;
+    } else {
+        uint32_t cur = m->nodes[x].nbr_pbackoff[k];
+        nb = (cur == 0) ? ps->base_ms : cur * 2;
+        if (nb < cur) nb = cur;                 /* 溢出保护：停在 uint32 上限 */
+        if (ps->max_backoff_ms && nb > ps->max_backoff_ms)
+            nb = ps->max_backoff_ms;
+    }
+    m->nodes[x].nbr_pbackoff[k]  = nb;
+    m->nodes[y].nbr_pbackoff[k2] = nb;
+    return P2P_OK;
+}
+
+int p2p_probe_all_staggered(p2p_probesched_t *ps, p2p_mesh_t *m,
+                            const uint8_t *a, uint32_t now_ms,
+                            int *n_probed, int *n_skipped) {
+    if (!ps || !m || !a) return P2P_ERR_ARGS;
+    int x = p2p_node_find(m, a);
+    if (x < 0) return P2P_ERR_NOTFOUND;
+
+    int nn = m->nodes[x].n_neighbors;
+    uint8_t snap[P2P_MAX_NEIGHBORS][P2P_NODE_ID_LEN];
+    for (int i = 0; i < nn; i++)
+        memcpy(snap[i], m->nodes[x].neighbors[i], P2P_NODE_ID_LEN);
+
+    /*
+     * 错峰：Fisher-Yates 打乱遍历顺序。
+     * 不打乱的话每轮都是同一固定序列，探测时刻虽抖动但**顺序固定**，
+     * 观察者仍可对邻居身份做关联。打乱后顺序本身不可预测。
+     */
+    for (int i = nn - 1; i > 0; i--) {
+        int j = (int)(ps_rand(ps) % (uint32_t)(i + 1));
+        if (i != j) {
+            uint8_t t[P2P_NODE_ID_LEN];
+            memcpy(t, snap[i], P2P_NODE_ID_LEN);
+            memcpy(snap[i], snap[j], P2P_NODE_ID_LEN);
+            memcpy(snap[j], t, P2P_NODE_ID_LEN);
+        }
+    }
+
+    int probed = 0, skipped = 0;
+    for (int i = 0; i < nn; i++) {
+        if (p2p_probe_due(ps, m, a, snap[i], now_ms) != 1) { skipped++; continue; }
+        uint32_t rtt = 0;
+        int rc = p2p_link_probe(m, a, snap[i], &rtt);
+        p2p_probe_mark(ps, m, a, snap[i], now_ms, rc == P2P_OK);
+        if (rc == P2P_OK) probed++;
+    }
+    if (n_probed)  *n_probed  = probed;
+    if (n_skipped) *n_skipped = skipped;
     return P2P_OK;
 }

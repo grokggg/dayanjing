@@ -64,6 +64,10 @@ typedef struct {
     uint32_t  nbr_ok[P2P_MAX_NEIGHBORS];        /* 成功计数 */
     uint32_t  nbr_fail[P2P_MAX_NEIGHBORS];      /* 失败计数（丢包惩罚依据） */
 
+    /* 探测调度状态：与邻居边同下标，增删边时必须同步维护（同上） */
+    uint32_t  nbr_lastprobe[P2P_MAX_NEIGHBORS]; /* 上次探测时刻（ms，单调时钟） */
+    uint32_t  nbr_pbackoff[P2P_MAX_NEIGHBORS];  /* 探测退避（ms），失败指数增长 */
+
     /* 洋葱层密钥用的静态 X25519 公钥（私钥不进 mesh，只留在本跳本地）。
      * 层密钥 = HKDF(salt, IKM = X25519(sk_i, eph_pub_i) || my_id, ...)
      * —— 不再存在全网共享的 master，攻破一跳解不出其他跳。 */
@@ -175,6 +179,56 @@ int  p2p_link_probe(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
 
 /* 全图探测：对 a 的所有邻居逐个 p2p_link_probe，返回成功探测数 */
 int  p2p_link_probe_all(p2p_mesh_t *m, const uint8_t *a, int *n_probed);
+
+/* ====================================================================
+ * 探测调度：低频 + 错峰（解除"带宽探测主动发包本身可观测"的限制）
+ * ====================================================================
+ * 主动探测必然产生额外流量。若周期性对全图探测，这些流量本身就成为
+ * 可识别的行为指纹（"每 N 秒一轮连接"）。调度器从三处削弱可观测性：
+ *
+ *   1. 低频：每条边有最小探测间隔 base_ms，未到期不探测
+ *   2. 抖动：到期判定叠加 [0, jitter_ms) 随机量，探测时刻不再是等间距
+ *   3. 错峰：一轮内按**随机顺序**遍历邻居，不按固定序列逐个探测
+ *   4. 退避：失败的边指数退避（上限 max_backoff_ms），不再高频重试不可达边
+ *
+ * 边界：低频意味着度量新鲜度下降，抖动意味着探测时刻不可预测 ——
+ * 这是"可观测性"与"度量时效"的显式取舍，不是免费的。
+ */
+typedef struct {
+    uint32_t s;                 /* xorshift32 状态 */
+    uint32_t base_ms;           /* 每条边最小探测间隔 */
+    uint32_t jitter_ms;         /* 到期判定附加随机量上限 */
+    uint32_t max_backoff_ms;    /* 失败退避上限 */
+} p2p_probesched_t;
+
+int  p2p_probesched_init(p2p_probesched_t *ps, uint32_t seed,
+                         uint32_t base_ms, uint32_t jitter_ms,
+                         uint32_t max_backoff_ms);
+
+/*
+ * 该边此刻是否到期可探测。
+ * 判据：now - last >= base + 该边退避 + rand[0, jitter)
+ * 从未探测过的边（last == 0）总是到期。
+ */
+int  p2p_probe_due(p2p_probesched_t *ps, const p2p_mesh_t *m,
+                   const uint8_t *a, const uint8_t *b, uint32_t now_ms);
+
+/*
+ * 记录一次探测结果：更新 last，成功则清零退避，失败则退避翻倍
+ * （上限取 ps->max_backoff_ms）。
+ */
+int  p2p_probe_mark(p2p_probesched_t *ps, p2p_mesh_t *m,
+                    const uint8_t *a, const uint8_t *b,
+                    uint32_t now_ms, int ok);
+
+/*
+ * 错峰全图探测：按随机顺序遍历 a 的邻居，只探测到期的那些。
+ * 返回 P2P_OK，n_probed 为本轮实际探测成功的边数，n_skipped 为本轮跳过的
+ * （未到期）边数 —— 跳过是正常行为，正是"低频"的体现。
+ */
+int  p2p_probe_all_staggered(p2p_probesched_t *ps, p2p_mesh_t *m,
+                             const uint8_t *a, uint32_t now_ms,
+                             int *n_probed, int *n_skipped);
 
 /* 给定度量计算 QoS 代价（供测试直接对照代价模型） */
 uint32_t p2p_qos_cost(uint32_t rtt_ewma_x16, uint32_t jitter_x16,

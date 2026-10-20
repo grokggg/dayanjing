@@ -38,7 +38,7 @@ bash scripts/run_all_tests.sh
 | 11 | `11_edr_bypass` | direct_syscall + PE 解析 | 11/11 |
 | 12 | `12_exploit` | 载荷注册表 + 载荷生成模板 + CVE 指纹匹配 + 攻击链编排 | 28/28 |
 | 13 | `13_c2_server` | Python 服务端参考实现 | 19/19 |
-| 14 | `14_p2p` | 节点表+邻居图+BFS 路由 + 数据面双工中继 + **端点侧 E2EE 隧道**（复用 `02_c2` AEAD，中间跳只转发密文） | 51/51 + 11/11 + 42/42 |
+| 14 | `14_p2p` | 节点表+邻居图 + QoS(Dijkstra, EWMA/抖动/带宽/主动探测) + 数据面双工中继 + **洋葱分层加密**(X25519 ephemeral-static + epoch 轮换→PFS) + **定长信元**(512B) + **混时序**(时间片跨流交错、恒定输出) + **探测低频错峰** + **E2EE 与动态路由联动** | mesh 51 + qos 62 + chain 11 + e2ee 78 + route 12 + onion 42 + cell 36 + bw 18 + hopkey 34 + mix 22 + probesched 24 = **390/390** |
 | — | `agent_windows` | 摄像头采集/转码/密封（Windows 后端已编译检查） | 17/17 + 43/43 |
 
 ## 模块依赖图
@@ -85,4 +85,13 @@ agent_windows 采集 JPEG → 02_c2 加密成帧 → 03_transport 选载体包�
 
 - `09_persistence` 的内核态（LKM/eBPF/UEFI）部分在沙盒内**无法编译验证**，仅保留接口/文本生成，标记 `UNVERIFIED_KERNEL`。
 - `agent_windows` 的 `cam_mf.cpp`（Media Foundation）后端依赖 Windows SDK，Linux 下由 `#ifdef _WIN32` 排除，已做编译期符号检查；Linux 侧测试基于 `cam_jpeg` / `cam_mock` 与 MJPEG 直通路径。
-- 推送方式：`github.com` 的 git 协议与网页在部分网络环境下被拦截，改用 GitHub **Git Data API**（HTTPS + token）重放提交，脚本见 `push_v4.py`。
+- 推送方式：`github.com` 的 git 协议与网页在部分网络环境下被拦截，改用 GitHub **Git Data API**（HTTPS + token）重放提交，脚本见 `push_v4.py` / `push_v4_exact.py`（后者保留原始 committer 时间戳，使远程 commit SHA 与本地一致）。
+
+## 已知限制（不夸大能力）
+
+- **洋葱**：分层加密只在**建电路阶段**生效；电路建好后是 E2EE 密文流经定长信元传输。中间跳不知道路径与最终目标，但**知道上一跳与下一跳**（非洋葱无法转发）。
+- **PFS 是有窗口的**：跳静态私钥按 epoch 轮换，保留窗口 `P2P_HOPKEY_RETAIN=2`。录制报文必须在 epoch 滚出窗口前拿到私钥才可解；滚出后永久不可解。完全无窗口需把窗口设为 1（代价：在途电路可能剥不开）。
+- **混时序只到单跳**：混的是本节点出口多条**链路之间**的顺序与速率。每条链路内部信元仍按序（信元层 IV 为隐式计数器，乱序会被判重放）。全局被动观察者若同时监视入口与出口，仍可能通过总字节数做统计关联。
+- **信元只整形长度，不做端到端覆盖调度**：覆盖流量由调用方按 `p2p_cell_cover_due` 的建议产生，未在信元层内置定时器。
+- **QoS 的带宽仍需外部触发测量**：已实现主动带宽探测（真连 + 等对端回执计时），但探测本身发包，故走低频错峰调度（最小间隔 + 抖动 + 失败退避），代价是度量新鲜度下降。
+- **远程 commit SHA**：`push_v4_exact.py` 已通过保留原始 committer 时间戳使 SHA 与本地一致；若改用 `push_v4.py` 重放，内容相同但 SHA 会变（GitHub 用当前时间填充）。
