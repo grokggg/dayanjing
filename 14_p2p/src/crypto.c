@@ -8,9 +8,21 @@
  */
 
 #include "p2p_crypto.h"
+#include "p2p.h"
 #include "c2_frame.h"
+#include "crypto_hash.h"
 
 #include <string.h>
+
+/* 两个 ID 长度常量必须一致，否则方向判定与 info 拼接会错位 */
+_Static_assert(P2P_C_ID_LEN == P2P_NODE_ID_LEN,
+               "P2P_C_ID_LEN must match P2P_NODE_ID_LEN");
+
+/* 派生标签：改动即视为协议版本变更，会破坏与既有对端的互通 */
+static const uint8_t P2P_TUNNEL_SALT[] = "dayanjing:p2p:tunnel:v1";
+static const uint8_t P2P_TUNNEL_LABEL[] = "p2p:tunnel:keys:v1";
+
+#define P2P_TUNNEL_OKM_LEN  (P2P_KEY_LEN * 2 + P2P_NONCE_PFX_LEN)  /* 40 */
 
 const char *p2p_c_errstr(int e) {
     switch (e) {
@@ -46,6 +58,65 @@ int p2p_tunnel_init(p2p_tunnel_t *t,
     t->highest = 0;
     t->bitmap = 0;
     return P2P_C_OK;
+}
+
+int p2p_tunnel_init_from_session(p2p_tunnel_t *t,
+                                 const uint8_t k_c2s[P2P_KEY_LEN],
+                                 const uint8_t k_s2c[P2P_KEY_LEN],
+                                 const uint8_t local_id[P2P_C_ID_LEN],
+                                 const uint8_t peer_id[P2P_C_ID_LEN]) {
+    if (!t || !k_c2s || !k_s2c || !local_id || !peer_id) return P2P_C_ERR_ARG;
+    /* 与自身建隧道没有意义，且会让方向判定退化 */
+    if (memcmp(local_id, peer_id, P2P_C_ID_LEN) == 0) return P2P_C_ERR_ARG;
+    /* 会话密钥退化（单向分离失效）时不应派生出隧道密钥 */
+    if (memcmp(k_c2s, k_s2c, P2P_KEY_LEN) == 0) return P2P_C_ERR_ARG;
+
+    /* IKM = k_c2s || k_s2c，两个方向共同贡献熵 */
+    uint8_t ikm[P2P_KEY_LEN * 2];
+    memcpy(ikm, k_c2s, P2P_KEY_LEN);
+    memcpy(ikm + P2P_KEY_LEN, k_s2c, P2P_KEY_LEN);
+
+    /*
+     * info 必须用规范序（min || max）拼接。
+     * 若用 local || peer，两端得到的 info 不同 -> OKM 不同 -> 密钥对不上。
+     */
+    const uint8_t *lo = local_id, *hi = peer_id;
+    if (memcmp(local_id, peer_id, P2P_C_ID_LEN) > 0) { lo = peer_id; hi = local_id; }
+
+    uint8_t info[sizeof(P2P_TUNNEL_LABEL) - 1 + P2P_C_ID_LEN * 2];
+    size_t off = 0;
+    memcpy(info + off, P2P_TUNNEL_LABEL, sizeof(P2P_TUNNEL_LABEL) - 1);
+    off += sizeof(P2P_TUNNEL_LABEL) - 1;
+    memcpy(info + off, lo, P2P_C_ID_LEN); off += P2P_C_ID_LEN;
+    memcpy(info + off, hi, P2P_C_ID_LEN); off += P2P_C_ID_LEN;
+
+    uint8_t okm[P2P_TUNNEL_OKM_LEN];
+    if (hkdf(P2P_TUNNEL_SALT, sizeof(P2P_TUNNEL_SALT) - 1,
+             ikm, sizeof(ikm),
+             info, sizeof(info),
+             okm, sizeof(okm)) != 0) {
+        memset(ikm, 0, sizeof(ikm));
+        return P2P_C_ERR_ARG;
+    }
+
+    const uint8_t *k_forward = okm;                       /* lo -> hi */
+    const uint8_t *k_reverse = okm + P2P_KEY_LEN;         /* hi -> lo */
+    const uint8_t *np        = okm + P2P_KEY_LEN * 2;
+
+    const uint8_t *k_send, *k_recv;
+    if (memcmp(local_id, peer_id, P2P_C_ID_LEN) < 0) {
+        k_send = k_forward; k_recv = k_reverse;   /* local 是 lo */
+    } else {
+        k_send = k_reverse; k_recv = k_forward;   /* local 是 hi */
+    }
+
+    int rc = p2p_tunnel_init(t, k_send, k_recv, np);
+
+    /* 擦除栈上的临时密钥材料 */
+    memset(ikm, 0, sizeof(ikm));
+    memset(okm, 0, sizeof(okm));
+    memset(info, 0, sizeof(info));
+    return rc;
 }
 
 void p2p_tunnel_wipe(p2p_tunnel_t *t) {

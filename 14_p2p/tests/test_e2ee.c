@@ -453,10 +453,105 @@ static void test_chain_e2ee(void) {
     if (r_core  > 0) waitpid(r_core,  &st, 0);
 }
 
+/* ====================================================================
+ * 会话密钥派生隧道（生产路径）
+ *
+ * 核心性质：两端各自独立派生，无需交换角色字节，就能得出互补的方向密钥。
+ * 这是 init_from_session 相比 init 的关键收益，必须实测而非推演。
+ * ==================================================================== */
+static void test_session_derive(void) {
+    printf("\n--- 会话派生隧道密钥 ---\n");
+
+    uint8_t id_a[16], id_b[16], id_c[16];
+    memset(id_a, 0xAA, sizeof(id_a));
+    memset(id_b, 0xBB, sizeof(id_b));
+    memset(id_c, 0xCC, sizeof(id_c));
+
+    /* 1. 方向互补：A 的 send 必须等于 B 的 recv，反之亦然 */
+    p2p_tunnel_t ta, tb;
+    CK(p2p_tunnel_init_from_session(&ta, K_CS, K_SC, id_a, id_b) == P2P_C_OK,
+       "A 侧从会话密钥派生成功");
+    CK(p2p_tunnel_init_from_session(&tb, K_CS, K_SC, id_b, id_a) == P2P_C_OK,
+       "B 侧从会话密钥派生成功");
+    CK(memcmp(ta.k_send, tb.k_recv, P2P_KEY_LEN) == 0,
+       "方向互补: A.k_send == B.k_recv");
+    CK(memcmp(ta.k_recv, tb.k_send, P2P_KEY_LEN) == 0,
+       "方向互补: A.k_recv == B.k_send");
+    CK(memcmp(ta.k_send, ta.k_recv, P2P_KEY_LEN) != 0,
+       "单向分离: 同侧 send != recv");
+    CK(memcmp(ta.nonce_pfx, tb.nonce_pfx, P2P_NONCE_PFX_LEN) == 0,
+       "两端 nonce 前缀一致（同一隧道）");
+
+    /* 2. 真能互通：A wrap -> B unwrap */
+    const char *msg = "session-derived-tunnel";
+    size_t wlen = 0;
+    uint8_t wire[512];
+    CK(p2p_tunnel_wrap(&ta, MSG_REQ, (const uint8_t *)msg, strlen(msg),
+                       wire, sizeof(wire), &wlen) == P2P_C_OK,
+       "A 侧封装成功");
+    uint8_t out[512]; size_t olen = 0;
+    uint64_t seq = 0; uint32_t mt = 0;
+    CK(p2p_tunnel_unwrap(&tb, wire, wlen, &seq, &mt, out, sizeof(out), &olen) == P2P_C_OK,
+       "B 侧解封成功（派生密钥真能互通）");
+    CK(olen == strlen(msg) && memcmp(out, msg, olen) == 0,
+       "解封内容与原文字节级一致");
+
+    /* 3. 对端隔离：同一本地节点对不同对端，密钥必须不同 */
+    p2p_tunnel_t tc;
+    CK(p2p_tunnel_init_from_session(&tc, K_CS, K_SC, id_a, id_c) == P2P_C_OK,
+       "A 对 C 派生成功");
+    CK(memcmp(ta.k_send, tc.k_send, P2P_KEY_LEN) != 0,
+       "对端隔离: A->B 与 A->C 密钥不同（防跨会话串用）");
+
+    /* 4. B 用错对端的隧道去解 A->B 的帧，应当失败 */
+    uint8_t wire2[512]; size_t wlen2 = 0;
+    p2p_tunnel_t ta2;
+    p2p_tunnel_init_from_session(&ta2, K_CS, K_SC, id_a, id_b);
+    p2p_tunnel_wrap(&ta2, MSG_REQ, (const uint8_t *)msg, strlen(msg),
+                    wire2, sizeof(wire2), &wlen2);
+    uint8_t out2[512]; size_t olen2 = 0;
+    CK(p2p_tunnel_unwrap(&tc, wire2, wlen2, &seq, &mt, out2, sizeof(out2), &olen2)
+       == P2P_C_ERR_AUTH,
+       "错对端解封被拒 AUTH（对端隔离生效）");
+
+    /* 5. 参数校验 */
+    p2p_tunnel_t tz;
+    CK(p2p_tunnel_init_from_session(NULL, K_CS, K_SC, id_a, id_b) == P2P_C_ERR_ARG,
+       "NULL 隧道结构被拒");
+    CK(p2p_tunnel_init_from_session(&tz, NULL, K_SC, id_a, id_b) == P2P_C_ERR_ARG,
+       "NULL k_c2s 被拒");
+    CK(p2p_tunnel_init_from_session(&tz, K_CS, NULL, id_a, id_b) == P2P_C_ERR_ARG,
+       "NULL k_s2c 被拒");
+    CK(p2p_tunnel_init_from_session(&tz, K_CS, K_SC, NULL, id_b) == P2P_C_ERR_ARG,
+       "NULL local_id 被拒");
+    CK(p2p_tunnel_init_from_session(&tz, K_CS, K_SC, id_a, NULL) == P2P_C_ERR_ARG,
+       "NULL peer_id 被拒");
+    CK(p2p_tunnel_init_from_session(&tz, K_CS, K_SC, id_a, id_a) == P2P_C_ERR_ARG,
+       "与自身建隧道被拒");
+    CK(p2p_tunnel_init_from_session(&tz, K_CS, K_CS, id_a, id_b) == P2P_C_ERR_ARG,
+       "会话密钥退化(k_c2s==k_s2c)被拒");
+
+    /* 6. 信息绑定：改变会话密钥 -> 隧道密钥必须变 */
+    p2p_tunnel_t td;
+    uint8_t k_cs2[16];
+    memcpy(k_cs2, K_CS, 16);
+    k_cs2[0] ^= 0x01;
+    p2p_tunnel_init_from_session(&td, k_cs2, K_SC, id_a, id_b);
+    CK(memcmp(ta.k_send, td.k_send, P2P_KEY_LEN) != 0,
+       "会话密钥变更 -> 隧道密钥随之变更");
+
+    p2p_tunnel_wipe(&ta);
+    p2p_tunnel_wipe(&tb);
+    p2p_tunnel_wipe(&tc);
+    p2p_tunnel_wipe(&td);
+    p2p_tunnel_wipe(&ta2);
+}
+
 int main(void) {
     printf("=== 14_p2p E2EE 测试 ===\n");
     signal(SIGPIPE, SIG_IGN);
     test_units();
+    test_session_derive();
     test_chain_e2ee();
     printf("\ntotal=%d pass=%d fail=%d\n", pass + fail, pass, fail);
     return fail ? 1 : 0;

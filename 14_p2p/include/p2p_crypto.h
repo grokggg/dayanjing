@@ -30,6 +30,7 @@ extern "C" {
 #define P2P_KEY_LEN        16
 #define P2P_NONCE_PFX_LEN   8
 #define P2P_REPLAY_WINDOW  64   /* 滑动窗口宽度（按 seq 计） */
+#define P2P_C_ID_LEN       16   /* 节点 ID 长度，须与 p2p.h 的 P2P_NODE_ID_LEN 一致 */
 
 /* ---- 返回值 ---- */
 #define P2P_C_OK        0
@@ -61,6 +62,35 @@ int p2p_tunnel_init(p2p_tunnel_t *t,
                     const uint8_t k_send[P2P_KEY_LEN],
                     const uint8_t k_recv[P2P_KEY_LEN],
                     const uint8_t nonce_pfx[P2P_NONCE_PFX_LEN]);
+
+/*
+ * 从 02_c2 会话密钥派生隧道密钥（生产路径）。
+ *
+ * 与 p2p_tunnel_init 的区别：
+ *   p2p_tunnel_init           —— 直接传入 16 字节裸密钥（测试/外部 KMS 场景）
+ *   p2p_tunnel_init_from_session —— 由握手产出的会话密钥派生（生产路径）
+ *
+ * 派生方式：HKDF-SHA256（RFC 5869，复用 00_crypto，不自研第二套）
+ *   salt = "dayanjing:p2p:tunnel:v1"
+ *   IKM  = k_c2s || k_s2c            （32 字节，两个方向密钥共同贡献熵）
+ *   info = "p2p:tunnel:keys:v1" || local_id || peer_id
+ *   OKM  = k_forward(16) || k_reverse(16) || nonce_pfx(8)
+ *
+ * 方向由两端 ID 的规范序（memcmp）决定，而不是由"谁先发起"决定：
+ *   local_id < peer_id  -> k_send = k_forward, k_recv = k_reverse
+ *   local_id > peer_id  -> k_send = k_reverse, k_recv = k_forward
+ *
+ * 这样双方各自独立计算即可得出同一组方向密钥，无需额外交换角色字节，
+ * 也避免"两端都认为自己是 initiator"导致的密钥方向错位。
+ *
+ * local_id == peer_id 返回 P2P_C_ERR_ARG（禁止与自身建隧道）。
+ * k_c2s == k_s2c 返回 P2P_C_ERR_ARG（会话密钥已退化，不派生）。
+ */
+int p2p_tunnel_init_from_session(p2p_tunnel_t *t,
+                                 const uint8_t k_c2s[P2P_KEY_LEN],
+                                 const uint8_t k_s2c[P2P_KEY_LEN],
+                                 const uint8_t local_id[P2P_C_ID_LEN],
+                                 const uint8_t peer_id[P2P_C_ID_LEN]);
 
 /* 清零密钥材料（进程退出前调用，避免密钥滞留内存/核心转储） */
 void p2p_tunnel_wipe(p2p_tunnel_t *t);
