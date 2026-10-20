@@ -45,6 +45,11 @@ typedef struct {
     int       alive;                                  /* 0 = 故障，不参与路由 */
     uint8_t   neighbors[P2P_MAX_NEIGHBORS][P2P_NODE_ID_LEN];
     int       n_neighbors;
+
+    /* 链路质量：与 neighbors[k] 一一对应的边度量（无向边，双向同步写入） */
+    uint32_t  nbr_rtt[P2P_MAX_NEIGHBORS];    /* RTT 毫秒，0 = 未测量 */
+    uint32_t  nbr_ok[P2P_MAX_NEIGHBORS];     /* 成功计数 */
+    uint32_t  nbr_fail[P2P_MAX_NEIGHBORS];   /* 失败计数（丢包惩罚依据） */
 } p2p_node_t;
 
 typedef struct {
@@ -74,6 +79,20 @@ int  p2p_neighbor_has(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b);
  * 返回 P2P_OK 或 P2P_ERR_NOROUTE。 */
 int  p2p_route_path(const p2p_mesh_t *m, const uint8_t *from, const uint8_t *dst,
                     uint8_t path[][P2P_NODE_ID_LEN], int max_hops, int *n_hop);
+
+/* ---- 链路质量度量（按邻居边，无向，双向同步） ----
+ * rtt_ms 为往返时延；ok/fail 为成功/失败计数，供丢包惩罚。
+ * 度量数组与 neighbors[k] 同下标，任何增删边都必须同步维护三者。 */
+int  p2p_link_set_rtt(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b, uint32_t rtt_ms);
+int  p2p_link_note(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b, int ok);
+int  p2p_link_metrics(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                      uint32_t *rtt_ms, uint32_t *ok, uint32_t *fail);
+
+/* ---- 路由：Dijkstra 按链路质量选路（RTT + 失败惩罚） ----
+ * 与 p2p_route_path（BFS 最少跳数）并存：
+ *   代价相同时 QoS 退化为最少跳；时延/丢包差异大时 QoS 会绕开劣质链路。 */
+int  p2p_route_path_qos(const p2p_mesh_t *m, const uint8_t *from, const uint8_t *dst,
+                        uint8_t path[][P2P_NODE_ID_LEN], int max_hops, int *n_hop);
 
 /* ---- 数据面：委托 08_lateral 的 poll 双工中继 ----
  * idle_ms <= 0 表示无超时。 */

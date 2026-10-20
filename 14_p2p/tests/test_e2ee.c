@@ -27,6 +27,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include "c2.h"     /* 02_c2 握手状态机 + 会话密钥派生（握手接入需要） */
+
 static int pass = 0, fail = 0;
 #define CK(c, m) do { if (c) { pass++; printf("[PASS] %s\n", m); } \
                       else { fail++; printf("[FAIL] %s\n", m); } } while (0)
@@ -39,6 +41,86 @@ static const uint8_t K_SC[16] = { 0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,
 static const uint8_t K_X[16]  = { 0xde,0xad,0xbe,0xef,0xde,0xad,0xbe,0xef,
                                   0xde,0xad,0xbe,0xef,0xde,0xad,0xbe,0xef };
 static const uint8_t PFX[8]   = { 0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88 };
+
+/* ====================================================================
+ * 握手接入：用 02_c2 真实握手派生会话密钥，替代上面的固定常量。
+ *
+ * 生产路径：注册派生(PSK+salt) -> 握手 transcript -> 会话密钥(k_c2s/k_s2c)
+ *           -> p2p_tunnel_init_from_session -> P2P 隧道方向密钥
+ * 两端喂同样的握手消息、用同样的注册向量，各自独立算出同一组会话密钥。
+ * ==================================================================== */
+
+/* 注册向量：与 02_c2/tests/test_c2.c 同源（由 Python key_derivation.py 真值产生） */
+static const char *HS_PSK_HEX  = "02070c11161b20252a2f34393e43484d52575c61666b70757a7f84898e93989d";
+static const char *HS_SALT_HEX = "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f";
+static const char *HS_SID_HEX  = "202122232425262728292a2b2c2d2e2f";
+static const char *HS_HELLO    = "HELLO|v1|nonce12345678";
+static const char *HS_WELCOME  = "WELCOME|v1|sid";
+static const char *HS_FIN      = "FIN|prefix";
+
+/* 端点/对端节点 ID：memcmp 规范序决定隧道方向（0xAA < 0xBB -> 端点为 lo） */
+static uint8_t ID_EP[16], ID_PEER[16];
+
+/* 握手派生出的会话密钥（全局，fork 后子进程继承） */
+static uint8_t G_K_C2S[16], G_K_S2C[16];
+static int g_hs_ready = 0;
+
+static int hs_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static size_t hs_hex2bin(const char *hex, uint8_t *out, size_t cap) {
+    size_t n = strlen(hex), i;
+    if (n % 2) return 0;
+    for (i = 0; i < n / 2; i++) {
+        int hi = hs_hexval(hex[i * 2]), lo = hs_hexval(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        if (i >= cap) return 0;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return n / 2;
+}
+
+/*
+ * 跑完一次完整握手并派生会话密钥。
+ * 任一端（端点/对端视角）用同样输入调用，结果必须一致。
+ */
+static void hs_side(uint8_t th_out[32], uint8_t k_c2s[16], uint8_t k_s2c[16]) {
+    uint8_t psk[32], salt[32], sid[16];
+    hs_hex2bin(HS_PSK_HEX, psk, sizeof psk);
+    hs_hex2bin(HS_SALT_HEX, salt, sizeof salt);
+    hs_hex2bin(HS_SID_HEX, sid, sizeof sid);
+
+    c2_handshake_t h;
+    c2_hs_init(&h);
+    c2_hs_step(&h, C2_HS_HELLO,    (const uint8_t *)HS_HELLO,   strlen(HS_HELLO));
+    c2_hs_step(&h, C2_HS_WELCOME,  (const uint8_t *)HS_WELCOME, strlen(HS_WELCOME));
+    c2_hs_step(&h, C2_HS_FINISHED, (const uint8_t *)HS_FIN,     strlen(HS_FIN));
+    c2_hs_transcript(&h, th_out);
+
+    /* 注册派生出 master（k_server_hold） */
+    c2_keymat_t km;
+    c2_derive_pair(psk, sizeof psk, salt, &km);
+
+    c2_session_keys_t sk;
+    c2_derive_session(km.k_server_hold, th_out, sid, "implant-alpha-01", 7, &sk);
+    memcpy(k_c2s, sk.k_c2s, 16);
+    memcpy(k_s2c, sk.k_s2c, 16);
+
+    c2_hs_free(&h);
+}
+
+/* main 开头调用：把握手派生的会话密钥装进全局，供 mk_client/mk_peer 使用 */
+static void handshake_setup(void) {
+    uint8_t th[32];
+    memset(ID_EP,   0xAA, sizeof ID_EP);
+    memset(ID_PEER, 0xBB, sizeof ID_PEER);
+    hs_side(th, G_K_C2S, G_K_S2C);
+    g_hs_ready = 1;
+}
 
 #define MSG_REQ 0x21u
 #define MSG_RSP 0x22u
@@ -55,13 +137,19 @@ static const uint8_t *find_bytes(const uint8_t *hay, size_t hlen,
     return NULL;
 }
 
-/* 客户端视角：send=K_CS, recv=K_SC */
+/* 客户端（端点）视角：由握手会话密钥 + 节点 ID 规范序定方向 */
 static void mk_client(p2p_tunnel_t *t) {
-    p2p_tunnel_init(t, K_CS, K_SC, PFX);
+    if (g_hs_ready)
+        p2p_tunnel_init_from_session(t, G_K_C2S, G_K_S2C, ID_EP, ID_PEER);
+    else
+        p2p_tunnel_init(t, K_CS, K_SC, PFX);
 }
-/* 对端视角：方向相反 */
+/* 对端视角：local/peer 互换，得到互补方向密钥 */
 static void mk_peer(p2p_tunnel_t *t) {
-    p2p_tunnel_init(t, K_SC, K_CS, PFX);
+    if (g_hs_ready)
+        p2p_tunnel_init_from_session(t, G_K_C2S, G_K_S2C, ID_PEER, ID_EP);
+    else
+        p2p_tunnel_init(t, K_SC, K_CS, PFX);
 }
 
 /* ===================== 网络辅助 ===================== */
@@ -424,7 +512,7 @@ static void test_chain_e2ee(void) {
             CK(p2p_tunnel_unwrap(&sniffer_wrong, tap, fl, NULL, NULL, so, sizeof so, &sol) == P2P_C_ERR_AUTH,
                "抓包用错误密钥解不开 AUTH");
 
-            p2p_tunnel_init(&sniffer_right, K_SC, K_CS, PFX);   /* recv = K_CS */
+            mk_peer(&sniffer_right);   /* 对端视角：k_recv = 端点->对端方向密钥 */
             CK(p2p_tunnel_unwrap(&sniffer_right, tap, fl, NULL, NULL, so, sizeof so, &sol) == P2P_C_OK &&
                sol == rlen && memcmp(so, req, rlen) == 0, "抓包用端点密钥可还原（证明转发的确是该帧）");
 
@@ -547,11 +635,70 @@ static void test_session_derive(void) {
     p2p_tunnel_wipe(&ta2);
 }
 
+/* ====================================================================
+ * 握手接入验证：02_c2 真实握手 -> 会话密钥 -> P2P 隧道
+ * 与 test_session_derive（固定常量单元）互补：这里走完整生产路径。
+ * ==================================================================== */
+static void test_handshake_integration(void) {
+    printf("\n--- 握手接入：02_c2 真实握手 -> 会话密钥 -> P2P 隧道 ---\n");
+
+    uint8_t th1[32], th2[32], kc1[16], ks1[16], kc2[16], ks2[16];
+    hs_side(th1, kc1, ks1);     /* 端点侧跑一遍 */
+    hs_side(th2, kc2, ks2);     /* 对端侧跑一遍（同样输入） */
+
+    CK(memcmp(th1, th2, 32) == 0, "两端握手 transcript 一致（可复现）");
+    CK(memcmp(kc1, kc2, 16) == 0, "两端 k_c2s 一致");
+    CK(memcmp(ks1, ks2, 16) == 0, "两端 k_s2c 一致");
+    CK(memcmp(kc1, ks1, 16) != 0, "k_c2s != k_s2c（方向密钥分离）");
+
+    /* 关键：证明确实换了握手派生，而不是沿用旧的固定测试常量 */
+    CK(memcmp(kc1, K_CS, 16) != 0, "握手派生 k_c2s != 固定常量 K_CS（接入生效）");
+    CK(memcmp(ks1, K_SC, 16) != 0, "握手派生 k_s2c != 固定常量 K_SC（接入生效）");
+
+    /* 建隧道：ID 规范序定方向（0xAA < 0xBB -> 端点为 lo） */
+    p2p_tunnel_t te, tp;
+    CK(p2p_tunnel_init_from_session(&te, kc1, ks1, ID_EP,   ID_PEER) == P2P_C_OK,
+       "端点隧道由握手会话密钥建立");
+    CK(p2p_tunnel_init_from_session(&tp, kc1, ks1, ID_PEER, ID_EP)   == P2P_C_OK,
+       "对端隧道由握手会话密钥建立");
+    CK(memcmp(te.k_send, tp.k_recv, P2P_KEY_LEN) == 0,
+       "方向互补: 端 send == 对端 recv");
+    CK(memcmp(te.k_recv, tp.k_send, P2P_KEY_LEN) == 0,
+       "方向互补: 端 recv == 对端 send");
+    CK(memcmp(te.k_send, te.k_recv, P2P_KEY_LEN) != 0,
+       "单向分离: 同侧 send != recv");
+
+    /* 真能互通（两个方向各一次） */
+    const char *msg = "handshake-derived-p2p";
+    size_t mlen = strlen(msg);
+    uint8_t wire[512]; size_t wl = 0;
+    CK(p2p_tunnel_wrap(&te, MSG_REQ, (const uint8_t *)msg, mlen, wire, sizeof wire, &wl) == P2P_C_OK,
+       "端点封装请求");
+    uint8_t out[512]; size_t ol = 0;
+    CK(p2p_tunnel_unwrap(&tp, wire, wl, NULL, NULL, out, sizeof out, &ol) == P2P_C_OK &&
+       ol == mlen && memcmp(out, msg, ol) == 0,
+       "对端解封成功（握手密钥真能互通）");
+
+    uint8_t wire2[512]; size_t wl2 = 0;
+    CK(p2p_tunnel_wrap(&tp, MSG_RSP, (const uint8_t *)"R", 1, wire2, sizeof wire2, &wl2) == P2P_C_OK,
+       "对端封装响应");
+    CK(p2p_tunnel_unwrap(&te, wire2, wl2, NULL, NULL, out, sizeof out, &ol) == P2P_C_OK,
+       "端点解封响应（反向互通）");
+
+    /* 用旧的固定常量隧道去解握手帧，必须失败（证明密钥确实换了） */
+    p2p_tunnel_t old;
+    p2p_tunnel_init(&old, K_SC, K_CS, PFX);   /* 旧固定密钥，recv = K_CS */
+    CK(p2p_tunnel_unwrap(&old, wire, wl, NULL, NULL, out, sizeof out, &ol) == P2P_C_ERR_AUTH,
+       "旧固定密钥解不开握手派生的帧（AUTH）");
+}
+
 int main(void) {
     printf("=== 14_p2p E2EE 测试 ===\n");
     signal(SIGPIPE, SIG_IGN);
+    handshake_setup();          /* 先跑握手：后续隧道全部改用握手派生密钥 */
     test_units();
     test_session_derive();
+    test_handshake_integration();
     test_chain_e2ee();
     printf("\ntotal=%d pass=%d fail=%d\n", pass + fail, pass, fail);
     return fail ? 1 : 0;

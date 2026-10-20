@@ -6,7 +6,7 @@ BUILD   := build
 
 # 02_c2 的帧层 AEAD + 00_crypto 的 GCM/SHA（E2EE 隧道依赖，密码学只此一处实现）
 # crypto_hash.o 提供 HKDF，供 p2p_tunnel_init_from_session 从会话密钥派生隧道密钥
-C2OBJS  := $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o
+C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o
 
 all: $(BUILD)/libp2p.a
 
@@ -31,6 +31,10 @@ $(BUILD)/crypto_gcm.o: ../00_crypto/src/crypto_gcm.c | $(BUILD)
 $(BUILD)/crypto_hash.o: ../00_crypto/src/crypto_hash.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 02_c2 握手状态机 + 会话密钥派生（test_e2ee 的握手接入需要）
+$(BUILD)/c2.o: ../02_c2/src/c2.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/test_mesh: tests/test_mesh.c $(BUILD)/libp2p.a
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
 
@@ -40,11 +44,15 @@ $(BUILD)/test_chain: tests/test_chain.c $(BUILD)/libp2p.a
 $(BUILD)/test_e2ee: tests/test_e2ee.c $(BUILD)/libp2p.a $(C2OBJS)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
 
+$(BUILD)/test_qos: tests/test_qos.c $(BUILD)/libp2p.a
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
-test: $(BUILD)/test_mesh $(BUILD)/test_chain $(BUILD)/test_e2ee
+test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee
 	./$(BUILD)/test_mesh
+	./$(BUILD)/test_qos
 	./$(BUILD)/test_chain
 	./$(BUILD)/test_e2ee
 
