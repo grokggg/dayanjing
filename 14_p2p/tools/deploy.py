@@ -36,6 +36,11 @@ ROOT = os.path.dirname(os.path.dirname(HERE))   # .../dayanjing
 DEFAULT_BINARY = os.path.join(ROOT, "14_p2p", "static", "p2p_node")
 
 
+def _wrap(ns, cmd):
+    """把命令放进指定网络命名空间执行（跨主机等价验证）"""
+    return ["ip", "netns", "exec", ns] + cmd if ns else cmd
+
+
 def pick_free_port(host="127.0.0.1"):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((host, 0))
@@ -86,10 +91,11 @@ def write_conf(path, alias, nid, role, host, port, statedir, keyfile,
         f.write("\n".join(lines) + "\n")
 
 
-def run_once(binary, conf):
-    """跑一次 node --once：生成密钥并把公钥打印到 stderr"""
-    r = subprocess.run([binary, "--config", conf, "--once"],
-                       capture_output=True, text=True, timeout=60)
+def run_once(binary, conf, ns=None):
+    """跑一次 node --once：生成密钥并把公钥打印到 stderr。
+       跨栈部署时必须放进该节点自己的 netns，否则绑定地址不存在。"""
+    cmd = _wrap(ns, [binary, "--config", conf, "--once"])
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     for line in (r.stderr or "").splitlines():
         if " pk=" in line:
             return line.split(" pk=")[1].strip().split()[0][:64]
@@ -105,6 +111,12 @@ def main():
     ap.add_argument("--run", action="store_true", help="生成后本地启动并自检")
     ap.add_argument("--echo-port", type=int, default=0,
                     help="最终目标 echo 服务端口（0=自动）")
+    ap.add_argument("--echo-host", default=None,
+                    help="最终目标 echo 主机（默认同 --host）")
+    ap.add_argument("--no-echo", action="store_true",
+                    help="不自带 echo 服务（由外部在别的网络命名空间提供）")
+    ap.add_argument("--netns-map", default="",
+                    help="alias=netns,... 把节点放进指定网络命名空间启动（跨主机等价验证）")
     a = ap.parse_args()
 
     topo = load_topology(a.topology)
@@ -115,6 +127,19 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     # 1) 分配 ID 与端口
+    ns_map = {}
+    for kv in filter(None, a.netns_map.split(",")):
+        k, _, v = kv.partition("=")
+        ns_map[k.strip()] = v.strip()
+
+    def port_for(n, key, fallback_host):
+        if n.get(key):
+            return int(n[key])
+        try:
+            return pick_free_port(n.get("host", a.host))
+        except OSError:
+            return pick_free_port(fallback_host)
+
     nodes = {}
     for n in topo["nodes"]:
         alias = n["alias"]
@@ -122,9 +147,11 @@ def main():
             "alias": alias,
             "role": n.get("role", "edge"),
             "id": gen_id(),
-            "port": n.get("listen_port") or pick_free_port(a.host),
-            "mgmt_port": pick_free_port(a.host),
+            "host": n.get("host", a.host),
+            "port": port_for(n, "listen_port", a.host),
+            "mgmt_port": port_for(n, "mgmt_port", a.host),
             "neighbors": list(n.get("neighbors", [])),
+            "ns": ns_map.get(alias),
             "pub": None,
         }
 
@@ -146,28 +173,28 @@ def main():
         d = os.path.join(out, alias)
         os.makedirs(os.path.join(d, "keys"), exist_ok=True)
         os.makedirs(os.path.join(d, "state"), exist_ok=True)
-        peers = [(nodes[x]["id"], a.host, nodes[x]["port"], None)
+        peers = [(nodes[x]["id"], nodes[x]["host"], nodes[x]["port"], None)
                  for x in nodes if x != alias]
-        nbrs = [(nodes[x]["id"], a.host, nodes[x]["port"], None)
+        nbrs = [(nodes[x]["id"], nodes[x]["host"], nodes[x]["port"], None)
                 for x in nd["neighbors"] if x in nodes]
         conf = os.path.join(d, "node.conf")
-        write_conf(conf, alias, nd["id"], nd["role"], a.host, nd["port"],
+        write_conf(conf, alias, nd["id"], nd["role"], nd["host"], nd["port"],
                    os.path.join(d, "state"), os.path.join(d, "keys", alias + ".key"),
                    peers, nbrs, nd["mgmt_port"],
                    topo.get("probe_interval_ms", 30000),
                    (peer_base + nd["port"]) & 0x7fffffff, links)
-        nd["pub"] = run_once(a.binary, conf)
+        nd["pub"] = run_once(a.binary, conf, nd.get("ns"))
         print(f"[deploy] {alias}: id={nd['id']} port={nd['port']} pk={nd['pub'][:16]}...")
 
     # 3) 公钥回填，重写配置（此时每节点都持有全网公钥）
     for alias, nd in nodes.items():
         d = os.path.join(out, alias)
-        peers = [(nodes[x]["id"], a.host, nodes[x]["port"], nodes[x]["pub"])
+        peers = [(nodes[x]["id"], nodes[x]["host"], nodes[x]["port"], nodes[x]["pub"])
                  for x in nodes if x != alias]
-        nbrs = [(nodes[x]["id"], a.host, nodes[x]["port"], nodes[x]["pub"])
+        nbrs = [(nodes[x]["id"], nodes[x]["host"], nodes[x]["port"], nodes[x]["pub"])
                 for x in nd["neighbors"] if x in nodes]
         write_conf(os.path.join(d, "node.conf"), alias, nd["id"], nd["role"],
-                   a.host, nd["port"], os.path.join(d, "state"),
+                   nd["host"], nd["port"], os.path.join(d, "state"),
                    os.path.join(d, "keys", alias + ".key"), peers, nbrs,
                    nd["mgmt_port"], topo.get("probe_interval_ms", 30000),
                    (peer_base + nd["port"]) & 0x7fffffff, links)
@@ -203,6 +230,7 @@ echo "stopped {alias}"
         "probe_interval_ms": topo.get("probe_interval_ms", 30000),
         "nodes": {k: {"id": v["id"], "port": v["port"], "mgmt_port": v["mgmt_port"],
                       "role": v["role"], "pub": v["pub"],
+                      "host": v["host"], "ns": v.get("ns"),
                       "neighbors": v["neighbors"]}
                   for k, v in nodes.items()},
     }
@@ -211,44 +239,54 @@ echo "stopped {alias}"
     print(f"[deploy] 产出目录: {out}  节点数: {len(nodes)}")
 
     if a.run:
-        run_local(out, meta, bin_abs, a.host, a.echo_port)
+        run_local(out, meta, bin_abs, a.host, a.echo_port,
+                  echo_host=a.echo_host, no_echo=a.no_echo, ns_map=ns_map)
 
 
-def run_local(out, meta, binary, host, echo_port):
-    """真实启动全部节点 + echo 目标，做端到端贯通自检"""
+def run_local(out, meta, binary, host, echo_port, echo_host=None,
+              no_echo=False, ns_map=None):
+    """真实启动全部节点 + echo 目标，做端到端贯通自检。
+       ns_map 非空时每个节点跑在独立网络栈里，等价于跨主机部署。"""
     import signal
+    ns_map = ns_map or {}
     procs = []
     echo_proc = None
+    ehost = echo_host or host
 
     try:
-        # echo 目标
+        # echo 目标（--no-echo 时由外部提供，用于跨命名空间场景）
         import threading
-        esrv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        esrv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        esrv.bind((host, echo_port or 0))
-        esrv.listen(8)
-        eport = esrv.getsockname()[1]
-        print(f"[run] echo 目标监听 {host}:{eport}")
+        eport = echo_port
+        if not no_echo:
+            esrv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            esrv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            esrv.bind((host, echo_port or 0))
+            esrv.listen(8)
+            eport = esrv.getsockname()[1]
+            print(f"[run] echo 目标监听 {host}:{eport}")
 
-        def echo_loop():
-            while True:
-                try:
-                    c, _ = esrv.accept()
-                except OSError:
-                    return
-                threading.Thread(target=lambda cc=c: (
-                    cc.sendall(cc.recv(65536)), cc.close()), daemon=True).start()
+            def echo_loop():
+                while True:
+                    try:
+                        c, _ = esrv.accept()
+                    except OSError:
+                        return
+                    threading.Thread(target=lambda cc=c: (
+                        cc.sendall(cc.recv(65536)), cc.close()), daemon=True).start()
 
-        threading.Thread(target=echo_loop, daemon=True).start()
+            threading.Thread(target=echo_loop, daemon=True).start()
+        else:
+            print(f"[run] 使用外部 echo 目标 {ehost}:{eport}")
 
         # 启动节点（除 endpoint 外全部 daemon）
         for alias, nd in meta["nodes"].items():
             d = os.path.join(out, alias)
             log = open(os.path.join(d, "run.log"), "w")
-            p = subprocess.Popen([binary, "--config", "node.conf"],
-                                 cwd=d, stdout=log, stderr=subprocess.STDOUT)
+            cmd = _wrap(nd.get("ns"), [binary, "--config", "node.conf"])
+            p = subprocess.Popen(cmd, cwd=d, stdout=log, stderr=subprocess.STDOUT)
             procs.append((alias, p))
-            print(f"[run] {alias} 启动 pid={p.pid} port={nd['port']}")
+            print(f"[run] {alias} 启动 pid={p.pid} {nd['host']}:{nd['port']}"
+                  + (f" ns={nd['ns']}" if nd.get("ns") else ""))
         time.sleep(2.0)
 
         alive = sum(1 for _, p in procs if p.poll() is None)
@@ -274,8 +312,8 @@ def run_local(out, meta, binary, host, echo_port):
                      if n["role"] == "core"), None)
         if ep and core:
             payload = b"E2E-" + secrets.token_hex(16).encode()
-            cmd = [binary, "--config", "node.conf", "--connect",
-                   meta["nodes"][core]["id"], host, str(eport)]
+            cmd = _wrap(ns_map.get(ep), [binary, "--config", "node.conf", "--connect",
+                        meta["nodes"][core]["id"], ehost, str(eport)])
             r = subprocess.run(cmd, cwd=os.path.join(out, ep),
                                input=payload, capture_output=True, timeout=60)
             got = r.stdout

@@ -188,7 +188,8 @@ int tx_dnstun_label_parse(const char *name, uint32_t *seq, uint32_t *ack,
 }
 
 /* ---------------- RFC 1035 报文 ---------------- */
-size_t tx_dns_build_query(const char *qname, uint16_t tid, uint8_t *out, size_t cap) {
+size_t tx_dns_build_query_ex(const char *qname, uint16_t tid, uint16_t qtype,
+                             uint8_t *out, size_t cap) {
     size_t o = 0;
     const char *s = qname;
 
@@ -215,9 +216,13 @@ size_t tx_dns_build_query(const char *qname, uint16_t tid, uint8_t *out, size_t 
     }
     if (o + 5 > cap) return 0;
     out[o++] = 0x00;                                /* 根标签 */
-    out[o++] = 0x00; out[o++] = 0x01;               /* QTYPE = A */
+    out[o++] = (uint8_t)(qtype >> 8); out[o++] = (uint8_t)(qtype & 0xFF);
     out[o++] = 0x00; out[o++] = 0x01;               /* QCLASS = IN */
     return o;
+}
+
+size_t tx_dns_build_query(const char *qname, uint16_t tid, uint8_t *out, size_t cap) {
+    return tx_dns_build_query_ex(qname, tid, 1 /* A */, out, cap);
 }
 
 int tx_dns_parse_query(const uint8_t *p, size_t len, char *qname, size_t cap, uint16_t *tid) {
@@ -284,54 +289,76 @@ size_t tx_dns_build_txt_reply(const uint8_t *q, size_t qlen,
 
 int tx_dns_parse_txt(const uint8_t *p, size_t len, uint8_t *out, size_t cap, size_t *olen) {
     size_t o = 12;
-    uint16_t qd, an, type, rdlen;
-    uint8_t sl;
-    uint16_t i;
+    uint16_t qd, an;
+    int i;
 
     if (!p || !out || !olen || len < 12) return TX_DNSTUN_ERR_PROTO;
     qd = (uint16_t)(((uint16_t)p[4] << 8) | p[5]);
     an = (uint16_t)(((uint16_t)p[6] << 8) | p[7]);
     if (an < 1) return TX_DNSTUN_ERR_PROTO;
 
-    for (i = 0; i < qd; i++) {
-        while (o < len) {
-            uint8_t l = p[o];
-            if ((l & 0xC0) == 0xC0) { o += 2; break; }
-            if (l == 0) { o += 1; break; }
-            o += 1 + l;
+    /* 跳过问题区 */
+    for (i = 0; i < (int)qd; i++) {
+        int jumps = 0;
+        for (;;) {
+            uint8_t l;
+            if (o >= len) return TX_DNSTUN_ERR_PROTO;
+            l = p[o];
+            if (l == 0) { o++; break; }
+            if ((l & 0xC0) == 0xC0) {              /* 压缩指针 */
+                if (o + 2 > len) return TX_DNSTUN_ERR_PROTO;
+                if (++jumps > 8) return TX_DNSTUN_ERR_PROTO;
+                o += 2;
+                break;
+            }
+            if ((l & 0xC0) != 0) return TX_DNSTUN_ERR_PROTO;
+            o += 1u + (size_t)l;
+            if (o >= len) return TX_DNSTUN_ERR_PROTO;
         }
         o += 4;
         if (o > len) return TX_DNSTUN_ERR_PROTO;
     }
 
-    if (o + 2 > len) return TX_DNSTUN_ERR_PROTO;
-    if (p[o] == 0xC0) {
-        o += 2;
-    } else {
-        while (o < len && p[o] != 0) {
-            uint8_t l = p[o];
-            if ((l & 0xC0) == 0xC0) { o += 2; break; }
-            o += 1 + l;
-        }
-        if (o < len && p[o] == 0) o += 1;
-    }
-    if (o + 10 > len) return TX_DNSTUN_ERR_PROTO;
-    type = (uint16_t)(((uint16_t)p[o] << 8) | p[o + 1]);
-    o += 2;
-    o += 2;                                    /* class */
-    o += 4;                                    /* ttl */
-    rdlen = (uint16_t)(((uint16_t)p[o] << 8) | p[o + 1]);
-    o += 2;
-    if (type != 16) return TX_DNSTUN_ERR_PROTO;
-    if (rdlen == 0 || o + rdlen > len) return TX_DNSTUN_ERR_PROTO;
+    /* 遍历应答区取第一个 TXT。
+       旧实现只取第一条记录且要求它是 TXT —— 真实权威端常在 TXT 前带 CNAME，
+       公网应答因此整条解不出来（全部 -5）。 */
+    for (i = 0; i < (int)an; i++) {
+        uint16_t type, rdlen;
+        uint8_t sl;
+        int jumps = 0;
 
-    sl = p[o];
-    o += 1;
-    if (sl + 1 > rdlen) return TX_DNSTUN_ERR_PROTO;
-    if ((size_t)sl > cap) return TX_DNSTUN_ERR_TOOBIG;
-    memcpy(out, p + o, sl);
-    *olen = (size_t)sl;
-    return TX_DNSTUN_OK;
+        for (;;) {                                  /* 跳过记录名 */
+            uint8_t l;
+            if (o >= len) return TX_DNSTUN_ERR_PROTO;
+            l = p[o];
+            if (l == 0) { o++; break; }
+            if ((l & 0xC0) == 0xC0) {
+                if (o + 2 > len) return TX_DNSTUN_ERR_PROTO;
+                if (++jumps > 8) return TX_DNSTUN_ERR_PROTO;
+                o += 2;
+                break;
+            }
+            if ((l & 0xC0) != 0) return TX_DNSTUN_ERR_PROTO;
+            o += 1u + (size_t)l;
+            if (o >= len) return TX_DNSTUN_ERR_PROTO;
+        }
+        if (o + 10 > len) return TX_DNSTUN_ERR_PROTO;
+        type  = (uint16_t)(((uint16_t)p[o] << 8) | p[o + 1]);
+        rdlen = (uint16_t)(((uint16_t)p[o + 8] << 8) | p[o + 9]);
+        o += 10;
+        if (o + rdlen > len) return TX_DNSTUN_ERR_PROTO;
+
+        if (type != 16) { o += rdlen; continue; }   /* CNAME/A 等：跳过继续找 */
+        if (rdlen == 0) return TX_DNSTUN_ERR_PROTO;
+
+        sl = p[o];
+        if ((size_t)sl + 1 > rdlen) return TX_DNSTUN_ERR_PROTO;
+        if ((size_t)sl > cap) return TX_DNSTUN_ERR_TOOBIG;
+        memcpy(out, p + o + 1, sl);
+        *olen = (size_t)sl;
+        return TX_DNSTUN_OK;
+    }
+    return TX_DNSTUN_ERR_PROTO;
 }
 
 /* ---------------- 隧道端点 ---------------- */
@@ -411,7 +438,7 @@ static int send_one(tx_dnstun_t *t, uint32_t seq, int fin,
                                   name, sizeof(name)) != TX_DNSTUN_OK)
             return TX_DNSTUN_ERR_TOOBIG;
 
-        ql = tx_dns_build_query(name, (uint16_t)(seq & 0xFFFF), q, sizeof(q));
+        ql = tx_dns_build_query_ex(name, (uint16_t)(seq & 0xFFFF), 16 /* TXT */, q, sizeof(q));
         if (ql == 0) return TX_DNSTUN_ERR_PROTO;
 
         if (send(t->sock, q, ql, 0) < 0) continue;

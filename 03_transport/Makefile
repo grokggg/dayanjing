@@ -2,7 +2,7 @@ CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude
 BUILD := build
 
-all: $(BUILD)/libtransport.a $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_dnspub $(BUILD)/test_swin $(BUILD)/test_icmtun
+all: $(BUILD)/libtransport.a $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_dnspub $(BUILD)/test_swin $(BUILD)/test_icmtun $(BUILD)/test_icmppub $(BUILD)/test_dnsdown
 
 $(BUILD)/libtransport.a: $(BUILD)/transport.o $(BUILD)/net.o $(BUILD)/dnstun.o $(BUILD)/swin.o $(BUILD)/icmtun.o
 	ar rcs $@ $^
@@ -40,6 +40,18 @@ $(BUILD)/test_swin: tests/test_swin.c $(BUILD)/libtransport.a | $(BUILD)
 $(BUILD)/test_icmtun: tests/test_icmtun.c $(BUILD)/libtransport.a | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
 
+# 公网 ICMP 真实收发（依赖外网 + raw socket，不可达时 SKIP 而非 FAIL）
+$(BUILD)/test_icmppub: tests/test_icmppub.c $(BUILD)/libtransport.a | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
+
+# 公网 DNS 下行解码验证（需外网；不可达时 SKIP）
+$(BUILD)/test_dnsdown: tests/test_dnsdown.c $(BUILD)/libtransport.a | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
+
+testpub: $(BUILD)/test_icmppub $(BUILD)/test_dnsdown
+	./$(BUILD)/test_icmppub
+	./$(BUILD)/test_dnsdown
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
@@ -52,3 +64,5 @@ test: $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/te
 
 clean:
 	rm -rf $(BUILD)
+
+.PHONY: all test clean testpub

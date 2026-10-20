@@ -35,6 +35,10 @@ int tx_dnstun_label_parse(const char *name, uint32_t *seq, uint32_t *ack,
 
 /* ---- RFC 1035 报文编解码 ---- */
 size_t tx_dns_build_query(const char *qname, uint16_t tid, uint8_t *out, size_t cap);
+/* 指定 QTYPE。取下行数据时必须用 TXT(16)：真实权威端按 qtype 回答，
+   用 A(1) 查询时公网服务器不会回 TXT，下行永远解不出来。 */
+size_t tx_dns_build_query_ex(const char *qname, uint16_t tid, uint16_t qtype,
+                             uint8_t *out, size_t cap);
 int    tx_dns_parse_query(const uint8_t *p, size_t len, char *qname, size_t cap, uint16_t *tid);
 size_t tx_dns_build_txt_reply(const uint8_t *q, size_t qlen,
                               const uint8_t *txt, size_t tlen,

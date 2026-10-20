@@ -10,7 +10,7 @@ C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/cryp
 
 all: $(BUILD)/libp2p.a $(BUILD)/p2p_node
 
-$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o
+$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o $(BUILD)/resolv.o
 	ar rcs $@ $^
 
 $(BUILD)/mesh.o: src/mesh.c include/p2p.h | $(BUILD)
@@ -26,6 +26,13 @@ $(BUILD)/onion.o: src/onion.c include/p2p_onion.h | $(BUILD)
 
 $(BUILD)/onion_route.o: src/onion_route.c include/p2p.h include/p2p_onion.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# 自研 A 记录解析（RFC1035 over UDP），取代 getaddrinfo（静态链接无 NSS 依赖）
+$(BUILD)/resolv.o: src/resolv.c include/p2p_resolv.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_resolv: tests/test_resolv.c $(BUILD)/libp2p.a
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
 
 $(BUILD)/relay.o: src/relay.c include/p2p.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -115,7 +122,7 @@ $(BUILD)/test_mix: tests/test_mix.c $(BUILD)/libp2p.a $(C2OBJS)
 $(BUILD)/test_probesched: tests/test_probesched.c $(BUILD)/libp2p.a
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
 
-test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_probesched
+test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_probesched $(BUILD)/test_resolv
 	./$(BUILD)/test_mesh
 	./$(BUILD)/test_qos
 	./$(BUILD)/test_chain
@@ -127,6 +134,7 @@ test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2e
 	./$(BUILD)/test_hopkey
 	./$(BUILD)/test_mix
 	./$(BUILD)/test_probesched
+	./$(BUILD)/test_resolv
 
 inspect: all
 	@echo "== 符号表（14_p2p 公开接口） =="

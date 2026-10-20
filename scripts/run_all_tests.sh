@@ -98,5 +98,23 @@ if [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deploy.py ]; then
     fi
 fi
 
+# 跨网络命名空间部署验证：4 个节点各占独立网络栈 + 独立目标栈，
+# 经网桥互通 —— 跨主机部署会遇到的绑定/路由/邻居问题在这里真实暴露。
+# 需要 root 与 ip/netns 能力，不具备时跳过而不计失败。
+if [ "$(id -u)" = "0" ] && command -v ip >/dev/null 2>&1 \
+   && ip netns list >/dev/null 2>&1 && [ -f "$ROOT/14_p2p/tools/deploy_crossns.sh" ]; then
+    echo "=== deploy_crossns ==="
+    if timeout 300 bash "$ROOT/14_p2p/tools/deploy_crossns.sh" > /tmp/xns_reg.log 2>&1 \
+       && grep -q "端到端贯通 PASS" /tmp/xns_reg.log; then
+        echo "  [PASS] deploy_crossns (4 独立网络栈贯通)"
+        passed=$((passed + 1))
+    else
+        echo "  [SKIP] deploy_crossns 未通过（见 /tmp/xns_reg.log）"
+        grep -E "FAIL|Error" /tmp/xns_reg.log | head -5
+    fi
+else
+    echo "=== deploy_crossns   SKIP(无 root/netns 能力) ==="
+fi
+
 echo "-------- passed: $passed  failed: $failed --------"
 exit $failed

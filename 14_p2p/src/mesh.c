@@ -1,8 +1,9 @@
 #include "p2p.h"
 
+#include "p2p_resolv.h"
+
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <netdb.h>
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
@@ -534,25 +535,17 @@ static uint32_t now_ms(void) {
 /* 真实 TCP connect 计时探测 */
 static int tcp_probe(const char *host, uint16_t port, uint32_t *rtt_ms) {
     if (!host || !port) return -1;
-    struct addrinfo hints, *res = NULL;
-    char portstr[8];
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(portstr, sizeof portstr, "%u", (unsigned)port);
-    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
+    /* 自研解析（RFC1035 over UDP），不用 getaddrinfo */
+    struct sockaddr_in sa;
+    if (p2p_resolve_sa(host, port, NULL, 3000, &sa) != P2P_RESOLV_OK) return -1;
 
     uint32_t t0 = now_ms();
-    int fd = -1;
-    for (struct addrinfo *p = res; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        close(fd);
+        return -1;
+    }
     close(fd);
     uint32_t t1 = now_ms();
     if (rtt_ms) *rtt_ms = (t1 >= t0) ? (t1 - t0) : 1;
@@ -564,24 +557,16 @@ static int bw_probe(const char *host, uint16_t port, size_t bytes,
                     uint32_t *bw_kbps, int *acked) {
     if (!host || !port || bytes == 0) return -1;
 
-    struct addrinfo hints, *res = NULL;
-    char portstr[8];
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(portstr, sizeof portstr, "%u", (unsigned)port);
-    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
+    /* 自研解析（RFC1035 over UDP），不用 getaddrinfo */
+    struct sockaddr_in sa;
+    if (p2p_resolve_sa(host, port, NULL, 3000, &sa) != P2P_RESOLV_OK) return -1;
 
-    int fd = -1;
-    for (struct addrinfo *p = res; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        close(fd);
+        return -1;
+    }
 
     /* 收回执最多等 5 秒 */
     struct timeval tv;
