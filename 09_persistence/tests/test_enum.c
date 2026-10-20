@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE   /* -std=c11 严格模式下 mkdtemp 不声明，需显式开启 */
 #include "persist.h"
 #include <stdio.h>
 #include <string.h>
@@ -8,10 +9,12 @@ static int pass=0,fail=0;
 static int g_hits; static persist_method_t g_last;
 static void cb(persist_method_t m,const char*fn,const char*p,void*ud){
     (void)fn;(void)p;(void)ud; g_hits++; g_last=m; }
+
 int main(void){
     printf("=== 09_persistence 枚举测试 ===\n");
-    const char *root="/tmp/t_persist_enum";
-    rmdir("/tmp/t_persist_enum");
+    char root_tpl[] = "/tmp/t_persist_enum_XXXXXX";
+    const char *root = mkdtemp(root_tpl);
+    if(!root){ printf("[FAIL] mkdtemp 失败\n"); return 1; }
     CK(persist_enumerate(root,cb,NULL)==0, "空假根枚举到 0 项(不崩溃)");
     CK(persist_enumerate(NULL,cb,NULL)==-1, "NULL 假根返回 -1");
     CK(persist_enumerate(root,NULL,NULL)==-1, "NULL 回调返回 -1");
@@ -34,7 +37,9 @@ int main(void){
     CK(persist_installed(root,PERSIST_CRON)==0, "卸载后 cron 不在位");
     g_hits=0;
     CK(persist_enumerate(root,cb,NULL)==1, "卸载后枚举只剩 1 项");
-    rmdir("/tmp/t_persist_enum");
+    /* 清理：先卸载残留项，再删目录；mkdtemp 每次独立，避免跨轮污染 */
+    persist_uninstall(PERSIST_SSHKEY, root, "ssh-rsa AAA");
+    rmdir(root);
     printf("total=%d pass=%d fail=%d\n",pass+fail,pass,fail);
     return fail?1:0;
 }
