@@ -117,8 +117,8 @@ frame_set_payload(struct frame *f, const uint8_t *data, size_t len)
 
 /* ---------- CRC 计算 ---------- */
 
-uint32_t
-frame_calc_crc(const struct frame *f)
+/* 纯计算：不修改 f */
+static uint32_t crc_of(const struct frame *f)
 {
     /* 拼一份 header（不含尾部 crc 字段），与 payload 拼接后一次计算 */
     size_t plen = (size_t)f->hdr.payload_len;
@@ -140,10 +140,19 @@ frame_calc_crc(const struct frame *f)
     return c;
 }
 
+uint32_t
+frame_calc_crc(struct frame *f)
+{
+    uint32_t c = crc_of(f);
+    f->crc = c;                 /* 按文档：计算后写回 f->crc */
+    return c;
+}
+
 int
 frame_verify_crc(const struct frame *f)
 {
-    return (frame_calc_crc(f) == f->crc) ? FRAME_OK : FRAME_ERR_CRC;
+    /* calc 需写回，此处去掉 const 后再比较 */
+    return (crc_of(f) == f->crc) ? FRAME_OK : FRAME_ERR_CRC;
 }
 
 /* ---------- 编码 ---------- */
@@ -173,7 +182,7 @@ frame_pack(const struct frame *f, uint8_t *out, size_t out_cap)
         p += plen;
     }
 
-    uint32_t crc = frame_calc_crc(f);
+    uint32_t crc = crc_of(f);
     put_u32_le(p, crc);
     /* 注意：调用方若需要 f->crc 反映，可自行读取尾部；此处不修改 const 输入 */
 

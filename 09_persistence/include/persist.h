@@ -40,4 +40,15 @@ int persist_uninstall(persist_method_t m, const char *root_prefix, const char *a
 /* 内核态 LKM 模板源码（沙盒无内核头，不可编译验证，仅作交付物） */
 const char *persist_kernel_source(void);
 
+
+/* ---- 枚举（完整能力） ---- */
+typedef void (*persist_cb_t)(persist_method_t m, const char *fname,
+                             const char *fpath, void *ud);
+
+/* 扫描假根下已安装的持久化项，逐项回调。返回回调次数；-1 参数错误 */
+int persist_enumerate(const char *root_prefix, persist_cb_t cb, void *ud);
+
+/* 查询某一方法在假根下是否已安装：1=已装 0=未装 -1=非文件型/参数错误 */
+int persist_installed(const char *root_prefix, persist_method_t m);
+
 #endif

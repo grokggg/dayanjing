@@ -64,7 +64,7 @@ int      frame_pack(const struct frame *f, uint8_t *out, size_t out_cap);
 int      frame_unpack(struct frame *f, const uint8_t *buf, size_t buf_len);
 
 /* 计算当前帧的 CRC32（覆盖 header + payload），写入 f->crc */
-uint32_t frame_calc_crc(const struct frame *f);
+uint32_t frame_calc_crc(struct frame *f);   /* 计算并写回 f->crc */
 
 /* 校验 CRC：重新计算并与 f->crc 比较，匹配返回 FRAME_OK */
 int      frame_verify_crc(const struct frame *f);

@@ -32,4 +32,23 @@ size_t ev_camouflage(ev_mode_t mode, const uint8_t *frame, size_t len,
 int ev_decamouflage(ev_mode_t mode, const uint8_t *in, size_t in_len,
                     uint8_t *out, size_t *out_len);
 
+
+/* ---- 流量调度（完整能力） ---- */
+
+typedef struct {
+    size_t index;    /* 分片序号 */
+    size_t offset;   /* 该片在 chunk 缓冲区中的字节偏移 */
+    size_t len;      /* 该片占用长度（固定 mtu，最后一片为实际） */
+    int    delay_ms; /* 该片应延迟发送的毫秒数 */
+} ev_slot_t;
+
+/* 可复现抖动：同 seed 序列产出相同结果，便于测试与流量规划 */
+int ev_jitter_seeded(int base_ms, int jitter_ms, uint32_t *seed);
+
+/* 生成发送计划：先按 mtu 分片，再为每片分配抖动延迟。
+ * 成功返回片数；slots 中 offset/len 指向 chunks 缓冲区。
+ * 注意：本函数只做分片布局与延迟计算，实际写入 chunks 由调用方调 ev_frag_split */
+size_t ev_plan(size_t frame_len, size_t mtu, int base_ms, int jitter_ms,
+               uint32_t *seed, ev_slot_t *slots, size_t scap);
+
 #endif
