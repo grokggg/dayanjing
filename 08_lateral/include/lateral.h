@@ -37,4 +37,14 @@ size_t lat_socks5_greeting(uint8_t *out, size_t cap);
 size_t lat_socks5_request(const char *host, int port, uint8_t *out, size_t cap);
 int    lat_socks5_reply_ok(const uint8_t *reply, size_t len);
 
+/* ---- SOCKS5 代理转发（fork + poll 双工中继） ---- */
+typedef struct { int listen_fd; int port; } lat_proxy_t;
+
+int  lat_proxy_listen(int port, lat_proxy_t *out);
+void lat_proxy_close(lat_proxy_t *p);
+int  lat_proxy_connect(const char *host, int port);
+int  lat_proxy_handshake(int cfd);                    /* 成功返回目标 fd */
+int  lat_proxy_relay(int cfd, int tfd, int idle_ms);  /* idle_ms<=0 无超时 */
+int  lat_proxy_serve_once(const lat_proxy_t *p, int timeout_ms); /* 父进程返回 pid */
+
 #endif

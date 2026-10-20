@@ -32,11 +32,11 @@ bash scripts/run_all_tests.sh
 | 05 | `05_server` | 会话表：哈希查找 + LRU 双向链表 | 全通过 |
 | 06 | `06_db` | 自研追加式记录存储（魔数+类型+长度） | 全通过 |
 | 07 | `07_ui` | HTTP 请求解析 + 响应构造 | 全通过 |
-| 08 | `08_lateral` | CIDR 解析 + 端口规格解析 | 全通过 |
+| 08 | `08_lateral` | CIDR/端口解析 + TCP connect 扫描 + SMB/WMI/SSH 横向插件 + SOCKS5 报文编解码 **与可运行代理转发**（fork + poll 双工中继） | 26/26 + 28/28 |
 | 09 | `09_persistence` | 用户态持久化文本生成（cron/systemd/LaunchAgent） | 全通过（内核态标记 `UNVERIFIED_KERNEL`） |
-| 10 | `10_evasion` | 大帧分片/重组 + 心跳抖动 | 全通过 |
+| 10 | `10_evasion` | 大帧分片/重组 + 心跳抖动 + 伪装三形态（域名前置 / DoH / TLS ClientHello） | 14/14 |
 | 11 | `11_edr_bypass` | direct_syscall + PE 解析 | 11/11 |
-| 12 | `12_exploit` | 载荷注册表 | 全通过 |
+| 12 | `12_exploit` | 载荷注册表 + 载荷生成模板 + CVE 指纹匹配 + 攻击链编排 | 28/28 |
 | 13 | `13_c2_server` | Python 服务端参考实现 | 19/19 |
 | — | `agent_windows` | 摄像头采集/转码/密封（Windows 后端已编译检查） | 17/17 + 43/43 |
 
@@ -60,10 +60,17 @@ bash scripts/run_all_tests.sh
               |               07_ui (HTTP API)     |
               |                                    |
               +--- 10_evasion (分片/抖动) 可对 03_transport 载荷二次伪装
-              +--- 08_lateral (CIDR/端口) -> 12_exploit (载荷) -> 横向
+              +--- 08_lateral (CIDR/端口/扫描/SOCKS5 代理转发) -> 12_exploit (载荷) -> 横向
               +--- 09_persistence (持久化) / 11_edr_bypass (EDR 绕过) 支撑投放
                           13_c2_server (Python 参考实现，协议第二意见)
 ```
+
+跨模块集成测试（全本地内存/回环，不发外网包）：
+
+- `tests/integration.c`：原始帧 → 03_transport(HTTP) → 10_evasion(分片) → 06_db(落盘/读出) → 10_evasion(重组) → 03_transport(解包) → 07_ui(响应)，字节级一致
+- `tests/e2e_camo.c`：03_transport × 10_evasion 伪装联合，四种伪装形态各跑「伪装→分片→重组→解伪装」与「伪装→HTTP 包装→解包→解伪装」，另含完整组合链路与 7 项负向用例，60/60
+
+运行全量：`sh scripts/run_all_tests.sh`（14 模块 + 2 集成）
 
 数据流（端到端）：
 

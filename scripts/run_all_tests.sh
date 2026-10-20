@@ -40,6 +40,19 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+printf "=== e2e_camo (跨模块: transport x evasion 伪装联合) ===\n"
+if cc -std=c11 -O2 -Wall -Wextra -Wpedantic \
+      -I"$ROOT/03_transport/include" -I"$ROOT/10_evasion/include" \
+      "$ROOT/tests/e2e_camo.c" \
+      "$ROOT/03_transport/build/libtransport.a" \
+      "$ROOT/10_evasion/build/libevasion.a" \
+      -o "$ROOT/build/e2e_camo" 2>/dev/null && "$ROOT/build/e2e_camo" >/dev/null 2>&1; then
+    echo "  PASS"
+else
+    echo "  FAIL"
+    FAIL=$((FAIL + 1))
+fi
+
 echo "-----------------------------"
 echo "failed: $FAIL"
 exit "$FAIL"
