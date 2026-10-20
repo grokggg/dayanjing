@@ -2,9 +2,9 @@ CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude
 BUILD := build
 
-all: $(BUILD)/libtransport.a $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_dnspub
+all: $(BUILD)/libtransport.a $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_dnspub $(BUILD)/test_swin $(BUILD)/test_icmtun
 
-$(BUILD)/libtransport.a: $(BUILD)/transport.o $(BUILD)/net.o $(BUILD)/dnstun.o
+$(BUILD)/libtransport.a: $(BUILD)/transport.o $(BUILD)/net.o $(BUILD)/dnstun.o $(BUILD)/swin.o $(BUILD)/icmtun.o
 	ar rcs $@ $^
 
 $(BUILD)/transport.o: src/transport.c | $(BUILD)
@@ -28,13 +28,27 @@ $(BUILD)/test_dnstun: tests/test_dnstun.c $(BUILD)/libtransport.a | $(BUILD)
 $(BUILD)/test_dnspub: tests/test_dnspub.c $(BUILD)/libtransport.a | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
 
+$(BUILD)/swin.o: src/swin.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/icmtun.o: src/icmtun.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_swin: tests/test_swin.c $(BUILD)/libtransport.a | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
+
+$(BUILD)/test_icmtun: tests/test_icmtun.c $(BUILD)/libtransport.a | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
-test: $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun
+test: $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_swin $(BUILD)/test_icmtun
 	./$(BUILD)/test_transport
 	./$(BUILD)/test_net
 	./$(BUILD)/test_dnstun
+	./$(BUILD)/test_swin
+	./$(BUILD)/test_icmtun
 
 clean:
 	rm -rf $(BUILD)

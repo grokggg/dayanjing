@@ -8,7 +8,7 @@ BUILD   := build
 # crypto_hash.o 提供 HKDF，供 p2p_tunnel_init_from_session 从会话密钥派生隧道密钥
 C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
 
-all: $(BUILD)/libp2p.a
+all: $(BUILD)/libp2p.a $(BUILD)/p2p_node
 
 $(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o
 	ar rcs $@ $^
@@ -85,6 +85,17 @@ $(BUILD)/test_cell: tests/test_cell.c $(BUILD)/libp2p.a $(C2OBJS)
 $(BUILD)/test_bw: tests/test_bw.c $(BUILD)/libp2p.a
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
 
+# 可独立部署的节点守护进程（配置驱动，无需重新编译即可换拓扑）
+$(BUILD)/p2p_node: src/node.c $(BUILD)/libp2p.a $(C2OBJS)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB) -lpthread
+
+# 静态制品：可直接 scp 到目标机运行，不依赖目标机任何开发库
+STATIC := static
+$(STATIC)/p2p_node: src/node.c
+	mkdir -p $(STATIC)
+	$(CC) $(CFLAGS) -static -o $@ $< \
+	  $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB) -lpthread
+
 $(BUILD):
 	mkdir -p $(BUILD)
 
@@ -124,4 +135,9 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect
+.PHONY: all test clean inspect static
+
+static: $(STATIC)/p2p_node
+	@file $(STATIC)/p2p_node | cut -c1-120
+	@echo "== 动态依赖检查 =="
+	@ldd $(STATIC)/p2p_node 2>&1 | head -3

@@ -81,5 +81,22 @@ run_int proto_c2_layer \
 
 run_py 13_c2_server_py 13_c2_server/tests/test_server.py
 
+# 部署自检：真实起 4 节点（endpoint->edge0->edge1->core）+ echo 目标，
+# 建洋葱电路并校验端到端回显一致。这不是单测，是部署级贯通验证。
+if [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deploy.py ]; then
+    echo "=== deploy_4node ==="
+    if python3 14_p2p/tools/deploy.py \
+        --topology 14_p2p/tools/topo_4node.json \
+        --out /tmp/dep_selftest --run > /tmp/dep_selftest.log 2>&1 \
+        && grep -q "端到端贯通 PASS" /tmp/dep_selftest.log; then
+        echo "  [PASS] deploy_4node"
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] deploy_4node  (见 /tmp/dep_selftest.log)"
+        tail -12 /tmp/dep_selftest.log
+        failed=$((failed + 1))
+    fi
+fi
+
 echo "-------- passed: $passed  failed: $failed --------"
 exit $failed
