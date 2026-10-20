@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "initial_access.h"
 
 #include <stdio.h>
@@ -5,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -57,6 +59,12 @@ static int http_req(int port, const char *req, char *out, size_t cap) {
     sa.sin_family = AF_INET; sa.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
+    /* 接收超时：对端不响应时必须快速失败，否则测试会永久阻塞 */
+    {
+        struct timeval tv;
+        tv.tv_sec = 5; tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
     send(fd, req, strlen(req), 0);
     size_t got = 0;
     for (;;) {
@@ -97,13 +105,24 @@ int main(void) {
     int port = phish_listen_port(lfd);
     CHECK(port > 0, "phish_listen_port 取得实际端口");
 
-    /* --- 3/4 GET 发表单 --- */
-    if (port > 0 && http_get(port, "/login", resp, sizeof(resp)) == 0) {
-        CHECK(strncmp(resp, "HTTP/1.1 200", 12) == 0, "GET /login 返回 200");
-        CHECK(strstr(resp, "<form") != NULL, "GET 响应含登录表单");
-    } else {
-        CHECK(0, "GET /login 返回 200");
-        CHECK(0, "GET 响应含登录表单");
+    /* --- 3/4 GET 发表单（必须有服务端进程 accept，否则无人应答） --- */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            char c[256] = {0};
+            phish_serve_once(lfd, redir, c, sizeof(c));
+            _exit(0);
+        } else {
+            msleep(50);
+            if (port > 0 && http_get(port, "/login", resp, sizeof(resp)) == 0) {
+                CHECK(strncmp(resp, "HTTP/1.1 200", 12) == 0, "GET /login 返回 200");
+                CHECK(strstr(resp, "<form") != NULL, "GET 响应含登录表单");
+            } else {
+                CHECK(0, "GET /login 返回 200");
+                CHECK(0, "GET 响应含登录表单");
+            }
+            int st = 0; waitpid(pid, &st, 0);
+        }
     }
 
     /* --- 5 POST 返回 302 并跳转 --- */

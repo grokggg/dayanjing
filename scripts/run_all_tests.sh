@@ -59,7 +59,7 @@ run_py() {
 
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
          08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
-         14_p2p agent_windows; do
+         14_p2p 16_initial_access 17_loader agent_windows; do
     run_c "$m"
 done
 
