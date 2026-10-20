@@ -53,11 +53,34 @@ typedef struct {
     uint8_t   neighbors[P2P_MAX_NEIGHBORS][P2P_NODE_ID_LEN];
     int       n_neighbors;
 
-    /* 链路质量：与 neighbors[k] 一一对应的边度量（无向边，双向同步写入） */
-    uint32_t  nbr_rtt[P2P_MAX_NEIGHBORS];    /* RTT 毫秒，0 = 未测量 */
-    uint32_t  nbr_ok[P2P_MAX_NEIGHBORS];     /* 成功计数 */
-    uint32_t  nbr_fail[P2P_MAX_NEIGHBORS];   /* 失败计数（丢包惩罚依据） */
+    /* 链路质量：与 neighbors[k] 一一对应的边度量（无向边，双向同步写入）
+     * rtt_ewma / jitter 采用定点 x16（真实值 = 存储值 / 16），
+     * 避免整数除法把小数直接抹成 0 —— 亚毫秒差异在整数域下会完全消失。 */
+    uint32_t  nbr_rtt[P2P_MAX_NEIGHBORS];       /* 最近一次 RTT（ms） */
+    uint32_t  nbr_rtt_ewma[P2P_MAX_NEIGHBORS];  /* EWMA RTT，定点 x16 */
+    uint32_t  nbr_jitter[P2P_MAX_NEIGHBORS];    /* RFC3550 抖动，定点 x16 */
+    uint32_t  nbr_bw[P2P_MAX_NEIGHBORS];        /* 带宽 kbps，0 = 未知 */
+    uint32_t  nbr_ok[P2P_MAX_NEIGHBORS];        /* 成功计数 */
+    uint32_t  nbr_fail[P2P_MAX_NEIGHBORS];      /* 失败计数（丢包惩罚依据） */
 } p2p_node_t;
+
+/* ---- QoS 代价模型参数 ----
+ * cost = HOP_BASE(每跳基础)
+ *      + rtt_ewma(x16 -> /16)
+ *      + jitter(x16 -> /16) * JITTER_W
+ *      + fail * FAIL_PENALTY
+ *      + (bw > 0 ? BW_REF / bw : BW_UNKNOWN)
+ *
+ * 带宽项的设计理由：RTT 低但带宽窄的链路（如高延迟卫星 vs 低速专线）
+ * 在纯时延模型下会被误判为优质，加入 1/bw 项后大流量场景会自然避开。 */
+#define P2P_QOS_HOP_BASE      100
+#define P2P_QOS_FAIL_PENALTY  500
+#define P2P_QOS_JITTER_W        4   /* 抖动权重：抖动比均值更影响交互体验 */
+#define P2P_QOS_BW_REF      10000   /* cost += BW_REF / bw_kbps */
+#define P2P_QOS_BW_UNKNOWN    300   /* 带宽未知时的固定惩罚 */
+
+/* EWMA 平滑系数 alpha = 1/8（定点 x16 下：new = old*7/8 + rtt*2） */
+#define P2P_QOS_EWMA_SHIFT      3
 
 typedef struct {
     p2p_node_t nodes[P2P_MAX_NODES];
@@ -94,6 +117,36 @@ int  p2p_link_set_rtt(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b, uint32_
 int  p2p_link_note(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b, int ok);
 int  p2p_link_metrics(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
                       uint32_t *rtt_ms, uint32_t *ok, uint32_t *fail);
+
+/* ---- 扩展度量：EWMA / 抖动 / 带宽 ----
+ * rtt_ewma、jitter 为定点 x16（真实值 = 值 / 16）。
+ * 传入 rtt_ms 会同时推进 EWMA 与 RFC3550 抖动估计：
+ *   EWMA  : e = e - (e >> 3) + (rtt << 4 >> 3)     （alpha = 1/8）
+ *   Jitter: j = j - (j >> 4) + (|rtt - prev| << 4 >> 4)  （RFC 3550，1/16）
+ * 首次测量时 EWMA 直接置为 rtt<<4，jitter 置 0。
+ * bw_kbps 为 0 表示未知（代价模型走 BW_UNKNOWN 惩罚）。 */
+int  p2p_link_update_rtt(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                         uint32_t rtt_ms);
+int  p2p_link_set_bw(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                     uint32_t bw_kbps);
+int  p2p_link_get_qos(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                      uint32_t *rtt_ewma, uint32_t *jitter,
+                      uint32_t *bw_kbps, uint32_t *ok, uint32_t *fail);
+
+/*
+ * 主动探测：对邻居 host:port 做真实 TCP connect 并计时，把结果喂给 EWMA。
+ * 这是"无主动探测"限制的解除 —— RTT 不再需要外部测量后手工 set。
+ * 探测失败会累加 fail 计数（丢包惩罚生效），返回 P2P_ERR_UNREACH。
+ */
+int  p2p_link_probe(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                    uint32_t *rtt_ms);
+
+/* 全图探测：对 a 的所有邻居逐个 p2p_link_probe，返回成功探测数 */
+int  p2p_link_probe_all(p2p_mesh_t *m, const uint8_t *a, int *n_probed);
+
+/* 给定度量计算 QoS 代价（供测试直接对照代价模型） */
+uint32_t p2p_qos_cost(uint32_t rtt_ewma_x16, uint32_t jitter_x16,
+                      uint32_t bw_kbps, uint32_t fail_count);
 
 /* ---- 路由：Dijkstra 按链路质量选路（RTT + 失败惩罚） ----
  * 与 p2p_route_path（BFS 最少跳数）并存：
@@ -140,5 +193,32 @@ void p2p_route_serve(const p2p_mesh_t *m, const uint8_t *my_id, int listen_fd);
  */
 int  p2p_route_open(const p2p_mesh_t *m, const uint8_t *from, const uint8_t *dst,
                     const char *final_host, uint16_t final_port, int *out_fd);
+
+/* ====================================================================
+ * 洋葱路由：分层加密，中间跳看不到完整路径与最终目标
+ * （解除"电路头对中间跳可见"的限制，详见 p2p_onion.h）
+ * ==================================================================== */
+#include "p2p_onion.h"
+
+/*
+ * 发起端：QoS 算路 -> 逐层包裹洋葱 -> 连首跳 -> 发电路头。
+ * salt 由调用方提供（每条电路应随机），明文携带，用于派生各跳层密钥。
+ * 成功后 *out_fd 即对最终目标的端到端隧道。
+ */
+int  p2p_onion_route_open(const p2p_mesh_t *m, const uint8_t *from,
+                          const uint8_t *dst,
+                          const char *final_host, uint16_t final_port,
+                          const uint8_t master[P2P_ONION_MASTER_LEN],
+                          const uint8_t salt[P2P_ONION_SALT_LEN],
+                          int *out_fd);
+
+/* 中继一跳：剥开自己那层 -> 连下一跳（或最终目标）-> 转发剩余洋葱 -> 双工中继 */
+int  p2p_onion_route_handle(const p2p_mesh_t *m, const uint8_t *my_id,
+                            const uint8_t master[P2P_ONION_MASTER_LEN], int cfd);
+
+/* 洋葱版监听循环 */
+void p2p_onion_route_serve(const p2p_mesh_t *m, const uint8_t *my_id,
+                           const uint8_t master[P2P_ONION_MASTER_LEN],
+                           int listen_fd);
 
 #endif /* P2P_H */

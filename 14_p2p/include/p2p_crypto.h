@@ -123,6 +123,19 @@ size_t p2p_tunnel_wire_len(size_t plen);
  */
 int p2p_tunnel_frame_len(const uint8_t *wire, size_t wire_len, size_t *frame_len);
 
+/*
+ * 在已建立的电路 fd 上收发一帧（E2EE 与动态路由的叠加点）。
+ *
+ * wire 自带 4 字节长度前缀，故 recv 可精确切帧，无需额外分帧层。
+ * send 内部 wrap 后整帧写出；recv 读满一帧后 unwrap（含重放窗口检查）。
+ * 返回 P2P_C_OK 或负错误码；对端关闭返回 P2P_C_ERR_FMT。
+ */
+int p2p_tunnel_send(p2p_tunnel_t *t, int fd, uint32_t msg_type,
+                    const uint8_t *payload, size_t plen);
+int p2p_tunnel_recv(p2p_tunnel_t *t, int fd,
+                    uint64_t *seq, uint32_t *msg_type,
+                    uint8_t *payload, size_t cap, size_t *plen);
+
 const char *p2p_c_errstr(int e);
 
 #ifdef __cplusplus

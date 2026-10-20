@@ -130,6 +130,105 @@ int main(void) {
     CK(p2p_route_path_qos(&m, a, d, path, 16, &nh) == P2P_OK &&
        memcmp(path[0], b, P2P_NODE_ID_LEN) == 0, "删除 C 后只能走 B");
 
+
+    /* ================================================================
+     * 扩展度量：EWMA / RFC3550 抖动 / 带宽 / 主动探测
+     * ================================================================ */
+    printf("\n--- 扩展度量：EWMA / 抖动 / 带宽 / 主动探测 ---\n");
+
+    {
+        p2p_mesh_t m2;
+        p2p_mesh_init(&m2);
+        uint8_t x[16], y[16], zz[16];
+        mkid(x, 0x41); mkid(y, 0x42); mkid(zz, 0x43);
+        p2p_node_add(&m2, x, P2P_ROLE_ENDPOINT, "X", "127.0.0.1", 1);
+        p2p_node_add(&m2, y, P2P_ROLE_EDGE,     "Y", "127.0.0.1", 1);
+        p2p_node_add(&m2, zz, P2P_ROLE_CORE,     "Z", "127.0.0.1", 1);
+        p2p_neighbor_link(&m2, x, y);
+        p2p_neighbor_link(&m2, y, zz);
+
+        uint32_t ew = 0, jt = 0, bw = 0, ok2 = 0, fl2 = 0;
+
+        /* 首次测量：EWMA 直接置值，抖动为 0 */
+        CK(p2p_link_update_rtt(&m2, x, y, 100) == P2P_OK, "update_rtt 首次 100ms");
+        CK(p2p_link_get_qos(&m2, x, y, &ew, &jt, &bw, &ok2, &fl2) == P2P_OK, "get_qos");
+        CK(ew == (100u << 4), "首次测量 EWMA = rtt<<4（定点 x16）");
+        CK(jt == 0, "首次测量抖动为 0");
+        CK(ok2 == 1, "首次测量成功计数 +1");
+
+        /* EWMA 收敛：持续测 100 后改测 20，EWMA 应向 20 靠拢但不越变越远 */
+        uint32_t prev_ew = ew;
+        for (int i = 0; i < 5; i++) p2p_link_update_rtt(&m2, x, y, 100);
+        p2p_link_get_qos(&m2, x, y, &ew, &jt, &bw, &ok2, &fl2);
+        CK(ew == prev_ew, "连续测同值 EWMA 稳定");
+        uint32_t before = ew;
+        p2p_link_update_rtt(&m2, x, y, 20);
+        p2p_link_get_qos(&m2, x, y, &ew, &jt, &bw, &ok2, &fl2);
+        CK(ew < before && ew > (20u << 4), "EWMA 向新值收敛但不跳变");
+
+        /* 抖动：RTT 交替 10/200 会产生明显抖动；恒定 RTT 抖动衰减到 0 */
+        uint32_t j_hi = 0;
+        for (int i = 0; i < 8; i++) {
+            p2p_link_update_rtt(&m2, x, y, (i % 2) ? 200u : 10u);
+        }
+        p2p_link_get_qos(&m2, x, y, &ew, &j_hi, &bw, &ok, &fl);
+        CK(j_hi > 0, "RTT 剧烈波动产生抖动");
+        for (int i = 0; i < 64; i++) p2p_link_update_rtt(&m2, x, y, 50u);
+        p2p_link_get_qos(&m2, x, y, &ew, &jt, &bw, &ok2, &fl2);
+        CK(jt < j_hi, "恒定 RTT 后抖动衰减");
+
+        /* 带宽项：未知带宽有惩罚，高带宽代价更低 */
+        CK(p2p_qos_cost(0, 0, 0, 0) > p2p_qos_cost(0, 0, 100000, 0),
+           "带宽未知比高带宽代价更高");
+        CK(p2p_qos_cost(0, 0, 100, 0) > p2p_qos_cost(0, 0, 10000, 0),
+           "低带宽代价高于高带宽");
+        CK(p2p_qos_cost(100 << 4, 0, 0, 0) > p2p_qos_cost(10 << 4, 0, 0, 0),
+           "高 EWMA RTT 代价更高");
+        CK(p2p_qos_cost(0, 100 << 4, 0, 0) > p2p_qos_cost(0, 0, 0, 0),
+           "抖动计入代价");
+        CK(p2p_qos_cost(0, 0, 0, 1) - p2p_qos_cost(0, 0, 0, 0)
+           == P2P_QOS_FAIL_PENALTY, "失败惩罚为固定值");
+
+        /* 带宽影响选路：两条等 RTT 路径，选高带宽那条 */
+        p2p_mesh_t m3;
+        p2p_mesh_init(&m3);
+        uint8_t a2[16], b2[16], c2[16], d2[16];
+        mkid(a2, 0x51); mkid(b2, 0x52); mkid(c2, 0x53); mkid(d2, 0x54);
+        p2p_node_add(&m3, a2, P2P_ROLE_ENDPOINT, "A2", "127.0.0.1", 1);
+        p2p_node_add(&m3, b2, P2P_ROLE_EDGE,     "B2", "127.0.0.1", 1);
+        p2p_node_add(&m3, c2, P2P_ROLE_EDGE,     "C2", "127.0.0.1", 1);
+        p2p_node_add(&m3, d2, P2P_ROLE_CORE,     "D2", "127.0.0.1", 1);
+        p2p_neighbor_link(&m3, a2, b2);
+        p2p_neighbor_link(&m3, b2, d2);
+        p2p_neighbor_link(&m3, a2, c2);
+        p2p_neighbor_link(&m3, c2, d2);
+        /* 两条路径 RTT 完全相同，只有带宽不同 */
+        p2p_link_set_rtt(&m3, a2, b2, 10);
+        p2p_link_set_rtt(&m3, b2, d2, 10);
+        p2p_link_set_rtt(&m3, a2, c2, 10);
+        p2p_link_set_rtt(&m3, c2, d2, 10);
+        CK(p2p_link_set_bw(&m3, a2, b2, 100) == P2P_OK, "set_bw A2-B2 = 100kbps");
+        CK(p2p_link_set_bw(&m3, b2, d2, 100) == P2P_OK, "set_bw B2-D2 = 100kbps");
+        CK(p2p_link_set_bw(&m3, a2, c2, 100000) == P2P_OK, "set_bw A2-C2 = 100Mbps");
+        CK(p2p_link_set_bw(&m3, c2, d2, 100000) == P2P_OK, "set_bw C2-D2 = 100Mbps");
+
+        uint8_t p3[16][P2P_NODE_ID_LEN];
+        int n3 = 0;
+        CK(p2p_route_path_qos(&m3, a2, d2, p3, 16, &n3) == P2P_OK && n3 == 2,
+           "等 RTT 下 QoS 仍可达");
+        CK(memcmp(p3[0], c2, P2P_NODE_ID_LEN) == 0,
+           "等 RTT 下 QoS 选高带宽路径（B2 被带宽项惩罚）");
+
+        /* 无向边：带宽双向同步写入 */
+        uint32_t bw_rev = 0;
+        p2p_link_get_qos(&m3, d2, c2, NULL, NULL, &bw_rev, NULL, NULL);
+        CK(bw_rev == 100000, "带宽无向边双向一致");
+
+        /* 参数校验 */
+        CK(p2p_link_set_bw(&m3, a2, d2, 1000) == P2P_ERR_NOLINK, "未连边的带宽 -> NOLINK");
+        CK(p2p_link_update_rtt(&m3, a2, d2, 10) == P2P_ERR_NOLINK, "未连边的 rtt -> NOLINK");
+    }
+
     printf("\ntotal=%d pass=%d fail=%d\n", pass + fail, pass, fail);
     return fail ? 1 : 0;
 }

@@ -10,7 +10,7 @@ C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/cryp
 
 all: $(BUILD)/libp2p.a
 
-$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o
+$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o
 	ar rcs $@ $^
 
 $(BUILD)/mesh.o: src/mesh.c include/p2p.h | $(BUILD)
@@ -18,6 +18,13 @@ $(BUILD)/mesh.o: src/mesh.c include/p2p.h | $(BUILD)
 
 # QoS 路由与数据面联动：电路头编解码 + 逐跳动态转发
 $(BUILD)/route.o: src/route.c include/p2p.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 洋葱路由：分层加密，中间跳看不到完整路径与最终目标
+$(BUILD)/onion.o: src/onion.c include/p2p_onion.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/onion_route.o: src/onion_route.c include/p2p.h include/p2p_onion.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/relay.o: src/relay.c include/p2p.h | $(BUILD)
@@ -58,12 +65,17 @@ $(BUILD)/test_route: tests/test_route.c $(BUILD)/libp2p.a
 $(BUILD):
 	mkdir -p $(BUILD)
 
-test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route
+# 洋葱测试同时依赖密码学目标（层密钥 HKDF + 层加密 GCM）
+$(BUILD)/test_onion: tests/test_onion.c $(BUILD)/libp2p.a $(C2OBJS)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+
+test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion
 	./$(BUILD)/test_mesh
 	./$(BUILD)/test_qos
 	./$(BUILD)/test_chain
 	./$(BUILD)/test_e2ee
 	./$(BUILD)/test_route
+	./$(BUILD)/test_onion
 
 inspect: all
 	@echo "== 符号表（14_p2p 公开接口） =="

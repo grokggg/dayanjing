@@ -1,4 +1,11 @@
 #include "p2p.h"
+
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <time.h>
+#include <errno.h>
 #include <string.h>
 
 const char *p2p_errstr(int e) {
@@ -77,9 +84,12 @@ int p2p_node_del(p2p_mesh_t *m, const uint8_t *id) {
                  * 度量数组必须与邻居数组同下标 swap，否则会错位 */
                 int last = o->n_neighbors - 1;
                 memcpy(o->neighbors[j], o->neighbors[last], P2P_NODE_ID_LEN);
-                o->nbr_rtt[j]  = o->nbr_rtt[last];
-                o->nbr_ok[j]   = o->nbr_ok[last];
-                o->nbr_fail[j] = o->nbr_fail[last];
+                o->nbr_rtt[j]      = o->nbr_rtt[last];
+                o->nbr_rtt_ewma[j] = o->nbr_rtt_ewma[last];
+                o->nbr_jitter[j]   = o->nbr_jitter[last];
+                o->nbr_bw[j]       = o->nbr_bw[last];
+                o->nbr_ok[j]       = o->nbr_ok[last];
+                o->nbr_fail[j]     = o->nbr_fail[last];
                 o->n_neighbors--;
                 j--;
             }
@@ -137,15 +147,21 @@ int p2p_neighbor_link(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
 
     int ka = A->n_neighbors;
     memcpy(A->neighbors[A->n_neighbors++], b, P2P_NODE_ID_LEN);
-    A->nbr_rtt[ka]  = 0;
-    A->nbr_ok[ka]   = 0;
-    A->nbr_fail[ka] = 0;
+    A->nbr_rtt[ka]      = 0;
+    A->nbr_rtt_ewma[ka] = 0;
+    A->nbr_jitter[ka]   = 0;
+    A->nbr_bw[ka]       = 0;
+    A->nbr_ok[ka]       = 0;
+    A->nbr_fail[ka]     = 0;
 
     int kb = B->n_neighbors;
     memcpy(B->neighbors[B->n_neighbors++], a, P2P_NODE_ID_LEN);
-    B->nbr_rtt[kb]  = 0;
-    B->nbr_ok[kb]   = 0;
-    B->nbr_fail[kb] = 0;
+    B->nbr_rtt[kb]      = 0;
+    B->nbr_rtt_ewma[kb] = 0;
+    B->nbr_jitter[kb]   = 0;
+    B->nbr_bw[kb]       = 0;
+    B->nbr_ok[kb]       = 0;
+    B->nbr_fail[kb]     = 0;
     return P2P_OK;
 }
 
@@ -160,9 +176,12 @@ int p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
         if (memcmp(A->neighbors[i], b, P2P_NODE_ID_LEN) == 0) {
             int last = A->n_neighbors - 1;
             memcpy(A->neighbors[i], A->neighbors[last], P2P_NODE_ID_LEN);
-            A->nbr_rtt[i]  = A->nbr_rtt[last];
-            A->nbr_ok[i]   = A->nbr_ok[last];
-            A->nbr_fail[i] = A->nbr_fail[last];
+            A->nbr_rtt[i]      = A->nbr_rtt[last];
+            A->nbr_rtt_ewma[i] = A->nbr_rtt_ewma[last];
+            A->nbr_jitter[i]   = A->nbr_jitter[last];
+            A->nbr_bw[i]       = A->nbr_bw[last];
+            A->nbr_ok[i]       = A->nbr_ok[last];
+            A->nbr_fail[i]     = A->nbr_fail[last];
             A->n_neighbors--; found = 1; break;
         }
     }
@@ -170,9 +189,12 @@ int p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
         if (memcmp(B->neighbors[i], a, P2P_NODE_ID_LEN) == 0) {
             int last = B->n_neighbors - 1;
             memcpy(B->neighbors[i], B->neighbors[last], P2P_NODE_ID_LEN);
-            B->nbr_rtt[i]  = B->nbr_rtt[last];
-            B->nbr_ok[i]   = B->nbr_ok[last];
-            B->nbr_fail[i] = B->nbr_fail[last];
+            B->nbr_rtt[i]      = B->nbr_rtt[last];
+            B->nbr_rtt_ewma[i] = B->nbr_rtt_ewma[last];
+            B->nbr_jitter[i]   = B->nbr_jitter[last];
+            B->nbr_bw[i]       = B->nbr_bw[last];
+            B->nbr_ok[i]       = B->nbr_ok[last];
+            B->nbr_fail[i]     = B->nbr_fail[last];
             B->n_neighbors--; break;
         }
     }
@@ -199,12 +221,15 @@ int p2p_neighbor_has(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
  *   - 失败一次计 500（约 5 跳）：高丢包链路被强惩罚，优先规避
  * 未测量（rtt=0, fail=0）时退化为纯跳数代价。
  */
+static uint32_t qos_cost_local(uint32_t rtt_ewma_x16, uint32_t jitter_x16,
+                               uint32_t bw_kbps, uint32_t fail_count);
+
 static uint64_t edge_cost(const p2p_node_t *n, int k) {
-    uint64_t c = 100u;                          /* 每跳基础 */
-    c += (uint64_t)n->nbr_rtt[k];               /* RTT 毫秒 */
-    c += (uint64_t)n->nbr_fail[k] * 500u;       /* 失败惩罚 */
-    return c;
+    /* 代价模型：跳基础 + EWMA RTT + 抖动 + 失败惩罚 + 带宽项 */
+    return (uint64_t)qos_cost_local(n->nbr_rtt_ewma[k], n->nbr_jitter[k],
+                                    n->nbr_bw[k], n->nbr_fail[k]);
 }
+
 
 int p2p_link_set_rtt(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b, uint32_t rtt_ms) {
     if (!m || !a || !b) return P2P_ERR_ARGS;
@@ -215,6 +240,11 @@ int p2p_link_set_rtt(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b, uint32_t
     if (ka < 0 || kb < 0) return P2P_ERR_NOLINK;
     m->nodes[ia].nbr_rtt[ka] = rtt_ms;
     m->nodes[ib].nbr_rtt[kb] = rtt_ms;   /* 无向边：双向一致 */
+    /* 硬置 EWMA 与抖动，使"设 500ms 就按 500ms 计费"的语义成立 */
+    m->nodes[ia].nbr_rtt_ewma[ka] = rtt_ms << 4;
+    m->nodes[ib].nbr_rtt_ewma[kb] = rtt_ms << 4;
+    m->nodes[ia].nbr_jitter[ka] = 0;
+    m->nodes[ib].nbr_jitter[kb] = 0;
     return P2P_OK;
 }
 
@@ -356,5 +386,183 @@ int p2p_route_path(const p2p_mesh_t *m, const uint8_t *from, const uint8_t *dst,
     for (int i = 0; i < rn; i++)
         memcpy(path[i], rev[rn - 1 - i], P2P_NODE_ID_LEN);
     *n_hop = rn;
+    return P2P_OK;
+}
+
+
+/* ====================================================================
+ * QoS 代价模型 + EWMA / 抖动 / 带宽 / 主动探测
+ * ==================================================================== */
+
+static uint32_t qos_cost_local(uint32_t rtt_ewma_x16, uint32_t jitter_x16,
+                               uint32_t bw_kbps, uint32_t fail_count) {
+    uint64_t c = P2P_QOS_HOP_BASE;
+    c += (uint64_t)rtt_ewma_x16 >> 4;                        /* EWMA RTT (ms) */
+    c += ((uint64_t)jitter_x16 >> 4) * P2P_QOS_JITTER_W;     /* 抖动 */
+    c += (uint64_t)fail_count * P2P_QOS_FAIL_PENALTY;        /* 丢包惩罚 */
+    if (bw_kbps > 0) c += (uint64_t)P2P_QOS_BW_REF / bw_kbps;
+    else             c += P2P_QOS_BW_UNKNOWN;
+    if (c > 0xffffffffu) c = 0xffffffffu;
+    return (uint32_t)c;
+}
+
+uint32_t p2p_qos_cost(uint32_t rtt_ewma_x16, uint32_t jitter_x16,
+                      uint32_t bw_kbps, uint32_t fail_count) {
+    return qos_cost_local(rtt_ewma_x16, jitter_x16, bw_kbps, fail_count);
+}
+
+/* 推进 EWMA 与 RFC3550 抖动估计。首次测量时直接置值，不做平滑。 */
+static void advance_metrics(p2p_node_t *n, int k, uint32_t rtt_ms) {
+    uint32_t prev = n->nbr_rtt[k];
+    n->nbr_rtt[k] = rtt_ms;
+
+    int fresh = (n->nbr_rtt_ewma[k] == 0 && n->nbr_ok[k] == 0 &&
+                 n->nbr_fail[k] == 0 && n->nbr_jitter[k] == 0);
+    if (fresh) {
+        n->nbr_rtt_ewma[k] = rtt_ms << 4;
+        n->nbr_jitter[k]   = 0;
+        return;
+    }
+    /* EWMA alpha=1/8，定点 x16： e = e - (e>>3) + (rtt<<4>>3) */
+    uint64_t e = n->nbr_rtt_ewma[k];
+    e = e - (e >> P2P_QOS_EWMA_SHIFT)
+        + (((uint64_t)rtt_ms << 4) >> P2P_QOS_EWMA_SHIFT);
+    n->nbr_rtt_ewma[k] = (e > 0xffffffffu) ? 0xffffffffu : (uint32_t)e;
+
+    /* RFC 3550: J += (|D| - J) / 16，D 为相邻两次 RTT 之差（定点 x16） */
+    uint32_t d = (rtt_ms > prev) ? (rtt_ms - prev) : (prev - rtt_ms);
+    uint64_t j = n->nbr_jitter[k];
+    j = j - (j >> 4) + (uint64_t)d;
+    n->nbr_jitter[k] = (j > 0xffffffffu) ? 0xffffffffu : (uint32_t)j;
+}
+
+/* 定位边 (a,b) 在两侧的下标 */
+static int find_edge(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                     int *ia, int *ka, int *ib, int *kb) {
+    int x = p2p_node_find(m, a), y = p2p_node_find(m, b);
+    if (x < 0 || y < 0) return P2P_ERR_NOTFOUND;
+    *ia = x; *ib = y;
+    *ka = -1; *kb = -1;
+    for (int i = 0; i < m->nodes[x].n_neighbors; i++)
+        if (memcmp(m->nodes[x].neighbors[i], b, P2P_NODE_ID_LEN) == 0) { *ka = i; break; }
+    for (int i = 0; i < m->nodes[y].n_neighbors; i++)
+        if (memcmp(m->nodes[y].neighbors[i], a, P2P_NODE_ID_LEN) == 0) { *kb = i; break; }
+    if (*ka < 0 || *kb < 0) return P2P_ERR_NOLINK;
+    return P2P_OK;
+}
+
+int p2p_link_update_rtt(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                        uint32_t rtt_ms) {
+    if (!m || !a || !b) return P2P_ERR_ARGS;
+    int ia, ka, ib, kb;
+    int rc = find_edge(m, a, b, &ia, &ka, &ib, &kb);
+    if (rc != P2P_OK) return rc;
+    advance_metrics(&m->nodes[ia], ka, rtt_ms);
+    advance_metrics(&m->nodes[ib], kb, rtt_ms);   /* 无向边：双向一致 */
+    m->nodes[ia].nbr_ok[ka]++;
+    m->nodes[ib].nbr_ok[kb]++;
+    return P2P_OK;
+}
+
+int p2p_link_set_bw(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                    uint32_t bw_kbps) {
+    if (!m || !a || !b) return P2P_ERR_ARGS;
+    int ia, ka, ib, kb;
+    int rc = find_edge(m, a, b, &ia, &ka, &ib, &kb);
+    if (rc != P2P_OK) return rc;
+    m->nodes[ia].nbr_bw[ka] = bw_kbps;
+    m->nodes[ib].nbr_bw[kb] = bw_kbps;
+    return P2P_OK;
+}
+
+int p2p_link_get_qos(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                     uint32_t *rtt_ewma, uint32_t *jitter,
+                     uint32_t *bw_kbps, uint32_t *ok, uint32_t *fail) {
+    if (!m || !a || !b) return P2P_ERR_ARGS;
+    int x = p2p_node_find(m, a);
+    if (x < 0) return P2P_ERR_NOTFOUND;
+    int k = -1;
+    for (int i = 0; i < m->nodes[x].n_neighbors; i++)
+        if (memcmp(m->nodes[x].neighbors[i], b, P2P_NODE_ID_LEN) == 0) { k = i; break; }
+    if (k < 0) return P2P_ERR_NOLINK;
+    const p2p_node_t *n = &m->nodes[x];
+    if (rtt_ewma) *rtt_ewma = n->nbr_rtt_ewma[k];
+    if (jitter)   *jitter   = n->nbr_jitter[k];
+    if (bw_kbps)  *bw_kbps  = n->nbr_bw[k];
+    if (ok)       *ok       = n->nbr_ok[k];
+    if (fail)     *fail     = n->nbr_fail[k];
+    return P2P_OK;
+}
+
+static uint32_t now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull);
+}
+
+/* 真实 TCP connect 计时探测 */
+static int tcp_probe(const char *host, uint16_t port, uint32_t *rtt_ms) {
+    if (!host || !port) return -1;
+    struct addrinfo hints, *res = NULL;
+    char portstr[8];
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(portstr, sizeof portstr, "%u", (unsigned)port);
+    if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
+
+    uint32_t t0 = now_ms();
+    int fd = -1;
+    for (struct addrinfo *p = res; p; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return -1;
+    close(fd);
+    uint32_t t1 = now_ms();
+    if (rtt_ms) *rtt_ms = (t1 >= t0) ? (t1 - t0) : 1;
+    return 0;
+}
+
+int p2p_link_probe(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
+                   uint32_t *rtt_ms) {
+    if (!m || !a || !b) return P2P_ERR_ARGS;
+    int y = p2p_node_find(m, b);
+    if (y < 0) return P2P_ERR_NOTFOUND;
+    int x = p2p_node_find(m, a);
+    if (x < 0) return P2P_ERR_NOTFOUND;
+    if (!p2p_neighbor_has(m, a, b)) return P2P_ERR_NOLINK;
+
+    uint32_t rtt = 0;
+    if (tcp_probe(m->nodes[y].host, m->nodes[y].port, &rtt) != 0) {
+        /* 探测失败：累加失败计数（丢包惩罚生效） */
+        p2p_link_note(m, a, b, 0);
+        return P2P_ERR_UNREACH;
+    }
+    /* 回环 TCP 握手常 <1ms，取 1 避免 0 值被当作"未测量" */
+    if (rtt == 0) rtt = 1;
+    int rc = p2p_link_update_rtt(m, a, b, rtt);
+    if (rc != P2P_OK) return rc;
+    if (rtt_ms) *rtt_ms = rtt;
+    return P2P_OK;
+}
+
+int p2p_link_probe_all(p2p_mesh_t *m, const uint8_t *a, int *n_probed) {
+    if (!m || !a) return P2P_ERR_ARGS;
+    int x = p2p_node_find(m, a);
+    if (x < 0) return P2P_ERR_NOTFOUND;
+    int ok = 0;
+    int nn = m->nodes[x].n_neighbors;
+    uint8_t snapshot[P2P_MAX_NEIGHBORS][P2P_NODE_ID_LEN];
+    for (int i = 0; i < nn; i++)
+        memcpy(snapshot[i], m->nodes[x].neighbors[i], P2P_NODE_ID_LEN);
+    for (int i = 0; i < nn; i++) {
+        if (p2p_link_probe(m, a, snapshot[i], NULL) == P2P_OK) ok++;
+    }
+    if (n_probed) *n_probed = ok;
     return P2P_OK;
 }

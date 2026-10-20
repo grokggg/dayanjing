@@ -13,6 +13,7 @@
 #include "crypto_hash.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 /* 两个 ID 长度常量必须一致，否则方向判定与 info 拼接会错位 */
 _Static_assert(P2P_C_ID_LEN == P2P_NODE_ID_LEN,
@@ -215,4 +216,100 @@ int p2p_tunnel_unwrap(p2p_tunnel_t *t,
     if (seq)      *seq = s;
     if (msg_type) *msg_type = mt;
     return P2P_C_OK;
+}
+
+/* ====================================================================
+ * 电路 fd 上的帧收发（E2EE 与动态路由的叠加点）
+ * ==================================================================== */
+
+#include <sys/socket.h>
+#include <unistd.h>
+
+static int tw_send_all(int fd, const uint8_t *b, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = send(fd, b + off, n - off, MSG_NOSIGNAL);
+        if (w <= 0) return -1;
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+static ssize_t tw_recv_exact(int fd, uint8_t *b, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        ssize_t r = recv(fd, b + off, n - off, 0);
+        if (r <= 0) break;
+        off += (size_t)r;
+    }
+    return (ssize_t)off;
+}
+
+int p2p_tunnel_send(p2p_tunnel_t *t, int fd, uint32_t msg_type,
+                    const uint8_t *payload, size_t plen) {
+    if (!t || fd < 0) return P2P_C_ERR_ARG;
+    if (plen > 0 && !payload) return P2P_C_ERR_ARG;
+
+    size_t need = 0;
+    int rc = p2p_tunnel_wrap(t, msg_type, payload, plen, NULL, 0, &need);
+    if (rc != P2P_C_OK) return rc;
+
+    uint8_t stackbuf[2048];
+    uint8_t *wire = stackbuf;
+    int heap = 0;
+    if (need > sizeof stackbuf) {
+        wire = (uint8_t *)malloc(need);
+        if (!wire) return P2P_C_ERR_ARG;
+        heap = 1;
+    }
+
+    size_t wlen = 0;
+    rc = p2p_tunnel_wrap(t, msg_type, payload, plen, wire, need, &wlen);
+    if (rc != P2P_C_OK) { if (heap) free(wire); return rc; }
+
+    int sr = tw_send_all(fd, wire, wlen);
+    if (heap) free(wire);
+    return sr == 0 ? P2P_C_OK : P2P_C_ERR_FMT;
+}
+
+int p2p_tunnel_recv(p2p_tunnel_t *t, int fd,
+                    uint64_t *seq, uint32_t *msg_type,
+                    uint8_t *payload, size_t cap, size_t *plen) {
+    if (!t || fd < 0) return P2P_C_ERR_ARG;
+
+    /* 读 4 字节长度前缀（小端），自行推算整帧长度。
+     *
+     * 注意：不能在这里用 p2p_tunnel_frame_len —— 它带有
+     * "fl <= wire_len" 的完整性校验，而此刻只读到 4 字节，
+     * fl 必然大于 wire_len，会误判为格式错误。
+     * 该 API 适用于"已持有完整帧、按帧切分"的抓包/中继场景。 */
+    uint8_t pre[4];
+    if (tw_recv_exact(fd, pre, 4) != 4) return P2P_C_ERR_FMT;
+
+    uint32_t total = (uint32_t)pre[0]
+                   | ((uint32_t)pre[1] << 8)
+                   | ((uint32_t)pre[2] << 16)
+                   | ((uint32_t)pre[3] << 24);
+    /* total = 4(msg_type) + 12(iv) + ct + 16(tag)，ct 最小 20(envelope) */
+    if (total < 52) return P2P_C_ERR_FMT;
+    size_t fl = (size_t)total + 4u;
+    if (fl > (1u << 20)) return P2P_C_ERR_FMT;
+
+    uint8_t stackbuf[2048];
+    uint8_t *wire = stackbuf;
+    int heap = 0;
+    if (fl > sizeof stackbuf) {
+        wire = (uint8_t *)malloc(fl);
+        if (!wire) return P2P_C_ERR_ARG;
+        heap = 1;
+    }
+    memcpy(wire, pre, 4);
+    if (tw_recv_exact(fd, wire + 4, fl - 4) != (ssize_t)(fl - 4)) {
+        if (heap) free(wire);
+        return P2P_C_ERR_FMT;
+    }
+
+    int rc = p2p_tunnel_unwrap(t, wire, fl, seq, msg_type, payload, cap, plen);
+    if (heap) free(wire);
+    return rc;
 }
