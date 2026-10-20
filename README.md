@@ -38,6 +38,7 @@ bash scripts/run_all_tests.sh
 | 11 | `11_edr_bypass` | direct_syscall + PE 解析 | 11/11 |
 | 12 | `12_exploit` | 载荷注册表 + 载荷生成模板 + CVE 指纹匹配 + 攻击链编排 | 28/28 |
 | 13 | `13_c2_server` | Python 服务端参考实现 | 19/19 |
+| 14 | `14_p2p` | 节点表+邻居图+BFS 路由 + 数据面双工中继 + **端点侧 E2EE 隧道**（复用 `02_c2` AEAD，中间跳只转发密文） | 51/51 + 11/11 + 42/42 |
 | — | `agent_windows` | 摄像头采集/转码/密封（Windows 后端已编译检查） | 17/17 + 43/43 |
 
 ## 模块依赖图

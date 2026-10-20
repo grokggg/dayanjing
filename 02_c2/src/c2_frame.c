@@ -149,10 +149,8 @@ int c2_frame_open(const uint8_t key[16],
     ct  = wire + 8 + C2_FRAME_IV_LEN;
     tag = wire + 8 + C2_FRAME_IV_LEN + ct_len;
 
-    *plen = ct_len - 20;   /* 明文 Envelope 头 20 字节 */
-    if (ct_len < 20) return C2_FRAME_ERR_FMT;
-    if (!payload) return C2_FRAME_OK;      /* 仅探测 */
-    if (cap < ct_len - 20) return C2_FRAME_ERR_LEN;
+    /* 必须先判下界再算减法：ct_len < 20 时 ct_len - 20 在无符号下会回绕成巨大值 */
+    if (ct_len < C2_ENVELOPE_HDR) return C2_FRAME_ERR_FMT;
 
     pt = (uint8_t *)malloc(ct_len);
     if (!pt) return C2_FRAME_ERR_ARG;
@@ -165,15 +163,23 @@ int c2_frame_open(const uint8_t key[16],
     env_mt   = get_u32le(pt + 12);
     env_plen = get_u32le(pt + 16);
 
-    if (env_ver != C2_PROTO_VERSION) { free(pt); return C2_FRAME_ERR_FMT; }
-    if (env_mt != mt) { free(pt); return C2_FRAME_ERR_FMT; }   /* 帧头/载荷 msg_type 必须一致 */
-    if (env_plen != ct_len - 20) { free(pt); return C2_FRAME_ERR_FMT; }
+    if (env_ver != C2_PROTO_VERSION) { memset(pt, 0, ct_len); free(pt); return C2_FRAME_ERR_FMT; }
+    if (env_mt != mt) { memset(pt, 0, ct_len); free(pt); return C2_FRAME_ERR_FMT; }   /* 帧头/载荷 msg_type 必须一致 */
+    if (env_plen != ct_len - C2_ENVELOPE_HDR) { memset(pt, 0, ct_len); free(pt); return C2_FRAME_ERR_FMT; }
 
+    /* 验签通过后才回填输出，失败路径不写任何输出参数 */
     if (seq)      *seq      = get_u64le(pt + 0);
     if (msg_type) *msg_type = mt;
+    *plen = ct_len - C2_ENVELOPE_HDR;
 
-    if (ct_len - 20 > 0) memcpy(payload, pt + 20, ct_len - 20);
-    *plen = ct_len - 20;
+    if (!payload) {                       /* 仅探测：已完整验签，不接受伪造帧 */
+        memset(pt, 0, ct_len);
+        free(pt);
+        return C2_FRAME_OK;
+    }
+    if (cap < ct_len - C2_ENVELOPE_HDR) { memset(pt, 0, ct_len); free(pt); return C2_FRAME_ERR_LEN; }
+
+    memcpy(payload, pt + C2_ENVELOPE_HDR, ct_len - C2_ENVELOPE_HDR);
 
     memset(pt, 0, ct_len);
     free(pt);
