@@ -102,6 +102,10 @@ $(BUILD)/test_route: tests/test_route.c $(BUILD)/libp2p.a
 $(BUILD)/test_cell: tests/test_cell.c $(BUILD)/libp2p.a $(C2OBJS)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
 
+# 单坏信元的恢复能力（AUTH 后流位置仍前进，链路不被单个坏字节打死）
+$(BUILD)/test_cell_resync: tests/test_cell_resync.c $(BUILD)/libp2p.a $(C2OBJS)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+
 # 真实带宽探测：快/慢 sink 真实进程 + 真实 socket
 $(BUILD)/test_bw: tests/test_bw.c $(BUILD)/libp2p.a
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
@@ -136,7 +140,7 @@ $(BUILD)/test_mix: tests/test_mix.c $(BUILD)/libp2p.a $(C2OBJS)
 $(BUILD)/test_probesched: tests/test_probesched.c $(BUILD)/libp2p.a
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
 
-test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_mix_cover $(BUILD)/test_probesched $(BUILD)/test_resolv $(BUILD)/test_cover
+test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_mix_cover $(BUILD)/test_probesched $(BUILD)/test_resolv $(BUILD)/test_cover $(BUILD)/test_cell_resync
 	./$(BUILD)/test_mesh
 	./$(BUILD)/test_qos
 	./$(BUILD)/test_chain
@@ -144,6 +148,7 @@ test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2e
 	./$(BUILD)/test_route
 	./$(BUILD)/test_onion
 	./$(BUILD)/test_cell
+	./$(BUILD)/test_cell_resync
 	./$(BUILD)/test_bw
 	./$(BUILD)/test_hopkey
 	./$(BUILD)/test_mix

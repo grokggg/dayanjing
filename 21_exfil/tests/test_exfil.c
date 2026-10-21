@@ -306,18 +306,38 @@ static void test_security(void) {
     int rc3 = exfil_chan_feed(&rx3, wire + 2 * P2P_CELL_WIRE, &rd, out, sizeof(out), &outlen);
     CHECK(rc3 == EXF_ERR_AUTH, "跳号信元被 IV 绑定检出(AUTH)");
 
-    /* 计数器在被拒时不前进 —— 流可自愈到正确位置的下一个信元。
-     * 但这不是"能容错"：被跳过的信元数据已永久丢失，
-     * 批收不到 FIN，最终由 incomplete 检出（下面验证）。 */
-    int rc3b = exfil_chan_feed(&rx3, wire + 1 * P2P_CELL_WIRE, &rd, out, sizeof(out), &outlen);
-    CHECK(rc3b == EXF_PARTIAL, "被拒后计数器未前进，下一正确信元可继续");
+    /*
+     * 行为变更（重要，非笔误）：
+     * 旧实现"验签失败不推进计数器" —— 好处是能"跳过去再回补"，
+     * 代价是链路上一次**就地篡改**会让此后每一个信元的 IV 都错位，
+     * 单个坏字节即可永久打死链路且不可恢复（真实 DoS 面）。
+     * 新实现：验签失败同样推进计数（流位置确实前进了 1），
+     *   就地篡改 -> 只损失那一个信元，下一个立刻恢复。
+     * 代价：不再支持"跳号后回补"。流式 C2 中信元按序到达，
+     *   回补没有实际用途，故取新语义。详见 14_p2p/tests/test_cell_resync.c
+     */
+    exfil_chan_t rx_selfheal;
+    exfil_chan_init(&rx_selfheal, K_RECV, K_SEND, PFX, 0);
+    int r4a = exfil_chan_feed(&rx_selfheal, wire + 0 * P2P_CELL_WIRE, &rd, out, sizeof(out), &outlen);
+    uint8_t t1[P2P_CELL_WIRE];
+    memcpy(t1, wire + 1 * P2P_CELL_WIRE, P2P_CELL_WIRE);
+    t1[100] ^= 0x01;
+    int r4b = exfil_chan_feed(&rx_selfheal, t1, &rd, out, sizeof(out), &outlen);
+    int r4c = exfil_chan_feed(&rx_selfheal, wire + 2 * P2P_CELL_WIRE, &rd, out, sizeof(out), &outlen);
+    CHECK(r4a == EXF_PARTIAL, "自愈用例：首片正常");
+    CHECK(r4b == EXF_ERR_AUTH, "自愈用例：被篡改的第 2 片被拒");
+    CHECK(r4c != EXF_ERR_AUTH, "★ 就地篡改后下一个信元可继续（链路未死）");
+    printf("[INFO] 篡改后下一片 rc=%d\n", r4c);
+    exfil_chan_wipe(&rx_selfheal);
+    exfil_chan_wipe(&rx3);
 
-    /* 少喂最后一片（FIN）-> 批仍不完整 */
-    int rc3c = 0;
-    for (size_t i = 2; i + 1 < got; i++)
-        rc3c = exfil_chan_feed(&rx3, wire + i * P2P_CELL_WIRE, &rd, out, sizeof(out), &outlen);
-    CHECK(exfil_chan_incomplete(&rx3) == 1, "跳号导致批不完整被检出");
-    (void)rc3c;
+    /* 少喂最后一片（FIN）-> 批仍不完整（用干净通道验证，避免与跳号状态耦合） */
+    exfil_chan_t rx_nofin;
+    exfil_chan_init(&rx_nofin, K_RECV, K_SEND, PFX, 0);
+    for (size_t i = 0; i + 1 < got; i++)
+        exfil_chan_feed(&rx_nofin, wire + i * P2P_CELL_WIRE, &rd, out, sizeof(out), &outlen);
+    CHECK(exfil_chan_incomplete(&rx_nofin) == 1, "少喂 FIN 导致批不完整被检出");
+    exfil_chan_wipe(&rx_nofin);
     exfil_chan_wipe(&rx3);
 
     /* 截断：只喂前 n-1 片（不含 FIN）-> incomplete 必须为真 */

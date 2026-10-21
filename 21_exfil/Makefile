@@ -70,6 +70,10 @@ $(BUILD)/test_task: tests/test_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB)
 $(BUILD)/task_link.o: src/task_link.c include/exfil_task_link.h include/exfil_task.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 验签失败容忍层：边界（防黑洞）+ 遥测（有人在动链路）
+$(BUILD)/tol.o: src/tol.c include/exfil_tol.h include/exfil_task_link.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # 端到端：C2 命令经**真实洋葱电路**（3 跳真进程）下行 -> 落到植入体调度器
 # -> 回执原路返回。含篡改/错密钥/重放/超长声明取证。
 # 重连恢复接进真实洋葱电路：断开 -> 重建电路 -> 用恢复点续用会话。
@@ -81,6 +85,11 @@ $(BUILD)/test_task_resume: tests/test_task_resume.c $(BUILD)/task.o $(BUILD)/tas
 
 $(BUILD)/test_task_circuit: tests/test_task_circuit.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/task_link.o \
+	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+$(BUILD)/test_tol: tests/test_tol.c $(BUILD)/tol.o $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/tol.o $(BUILD)/task.o $(BUILD)/task_link.o \
 	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
 	  $(P2PLIB) $(C2OBJS) $(LATLIB)
 
@@ -185,7 +194,7 @@ $(BUILD)/test_exfil_burst_cover: tests/test_exfil_burst_cover.c \
 	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
 	  $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -197,7 +206,7 @@ test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BU
 	./$(BUILD)/test_task_cover
 	./$(BUILD)/test_cover_loop
 	./$(BUILD)/test_cover_circuit
-	./$(BUILD)/test_exfil_cover_circuit
+	./$(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil_burst_cover
 
 inspect: all

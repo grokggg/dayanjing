@@ -109,6 +109,21 @@ int p2p_cell_unpack(p2p_cell_ctx_t *c, const uint8_t in[P2P_CELL_WIRE],
     uint8_t pt[P2P_CELL_PT_LEN];
     if (gcm_open(c->k_recv, iv, iv, 12,
                  in, P2P_CELL_PT_LEN, in + P2P_CELL_PT_LEN, pt) != GCM_OK) {
+        /*
+         * 关键：验签失败也必须推进 recv_counter。
+         *
+         * IV = pfx || recv_counter 是**位置相关**的：计数器代表"我在流
+         * 上的第几个信元"。线上恒 512 字节，吃掉一个坏信元后流位置仍然
+         * 前进了 1。若此处不推进，对端下一个信元用 IV(N+1) 封装、本端
+         * 仍按 IV(N) 解 —— 之后**每一个**都失败，链路被单个坏字节永久
+         * 打死且不可恢复。这正是注入攻击的致命放大点。
+         *
+         * 推进后：单个被篡改的信元只损失它自己，下一个信元立刻恢复正常。
+         *
+         * 安全性不受影响：重放仍然失败（旧信元的 IV 是当前位置之前的值，
+         * 位置已前进即不匹配）；乱序同样失败。
+         */
+        c->recv_counter++;
         return P2P_CELL_ERR_AUTH;
     }
 
