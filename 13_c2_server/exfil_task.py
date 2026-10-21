@@ -208,7 +208,11 @@ def decode_cmd(payload: bytes) -> Dict[str, Any]:
             "dedup": dedup,
         }
         if not cfg_ok(cfg):
-            raise TaskError("invalid schedule config")
+            # 与 C 侧 exfil_task_decode_cmd 保持一致：**不在此处拒绝**。
+            # 配置合法性是语义层（apply），不是语法层（decode）。
+            # 若在 decode 就抛异常，BAD_CFG 回执永远产生不了，服务端
+            # 只能靠超时分辨「被拒」与「丢了」，这两者运营含义不同。
+            pass
         out["cfg"] = cfg
     else:
         # 非 SET_CFG：配置字段必须为 0
