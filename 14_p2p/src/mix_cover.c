@@ -46,7 +46,8 @@
 int p2p_mix_flush_adaptive(p2p_mix_t *mx, p2p_cover_t *cov, uint32_t now_ms,
                            p2p_cell_ctx_t *cc, p2p_mix_out_t *out,
                            size_t cap_items, size_t *n_out,
-                           size_t *n_real, size_t *n_cover) {
+                           size_t *n_real, size_t *n_cover,
+                           int more_data_pending) {
     if (!mx || !out || !n_out || !cc) return P2P_MIX_ERR_ARG;
     if (!cov) return P2P_MIX_ERR_ARG;
     if (cap_items == 0) return P2P_MIX_ERR_LEN;
@@ -131,6 +132,35 @@ int p2p_mix_flush_adaptive(p2p_mix_t *mx, p2p_cover_t *cov, uint32_t now_ms,
         else { n_r -= (over - n_c); n_c = 0; }
         total = n_r + n_c;
     }
+
+    /*
+     * 5.5) counter 顺序守卫（大产物突发场景下实测抓出的缺陷）
+     *
+     * 信元层 counter **不在线上传输**，两端各自按到达顺序计数
+     * （IV = pfx || counter，见 p2p_cell.h）。因此"counter 分配顺序"
+     * 必须严格等于"到达顺序"，否则接收端用错位的 counter 解包，
+     * 表现为 AUTH，而真实原因是覆盖信元插进了数据流中间。
+     *
+     * 大产物（100KB -> 204 信元）暴露了两段式封装的时序矛盾：
+     *   - 数据信元在 submit 阶段**一次性全部封装**，占用 counter
+     *     区间 [base, base+n)
+     *   - 覆盖信元在**出片时**才封装，从 counter base+n 开始
+     *   - 而数据是按片分批出队的（队列容量 64，204 个要分 4 片）
+     *   于是到达顺序变成：
+     *       数据(counter 0..63), 覆盖(counter 204), 数据(counter 64), ...
+     *   接收端按到达序号解第 65 个时期望 counter=64，实际拿到 204
+     *   -> AUTH -> 整条链路断掉。
+     *
+     * 规则 3 只禁止了"把覆盖插到**已入队**数据前面"，没有防住
+     * "插到**尚未入队**的数据前面"—— 后者正是大产物的情形。
+     *
+     * 故：只要本片之后还有任何数据要发（队列仍有剩余，或调用方告知
+     * 编码缓冲尚未排空），本片就不封装任何覆盖信元。覆盖只在本批数据
+     * 全部发完之后才发出，此时 counter 天然接续。
+     *
+     * 这不削弱覆盖的目的：覆盖要填的是**静默期**，而静默期没有数据。
+     */
+    if (mx->n > 0 || more_data_pending) n_c = 0;
 
     /*
      * 6) 输出：先数据、后覆盖（规则 3）。

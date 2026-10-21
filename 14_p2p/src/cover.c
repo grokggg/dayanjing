@@ -85,6 +85,21 @@ int p2p_cover_set_budget(p2p_cover_t *cov, uint32_t budget_bytes_per_min) {
     return COVER_OK;
 }
 
+int p2p_cover_set_max_silence(p2p_cover_t *cov, uint32_t max_silence_ms) {
+    if (!cov || !cov->inited) return COVER_ERR_ARG;
+    if (max_silence_ms == 0) return COVER_ERR_ARG;
+
+    /* 要在 max_silence_ms 内至少发出 1 个信元：rate >= 60000/ms 每分钟 */
+    uint32_t need = P2P_COVER_SILENCE_TO_MIN(max_silence_ms);
+    if (need == 0) need = 1u;
+
+    /* 被上限钳住：再短的静默上界也突破不了速率上限 */
+    if (need > cov->max_cover_per_min) need = cov->max_cover_per_min;
+
+    cov->min_cover_per_min = need;
+    return COVER_OK;
+}
+
 int p2p_cover_set_bounds(p2p_cover_t *cov, uint32_t min_per_min,
                          uint32_t max_per_min) {
     if (!cov || !cov->inited) return COVER_ERR_ARG;
@@ -162,6 +177,21 @@ uint32_t p2p_cover_rate(p2p_cover_t *cov) {
 
     if (rate < cov->min_cover_per_min) rate = cov->min_cover_per_min;
     if (rate > cov->max_cover_per_min) rate = cov->max_cover_per_min;
+
+    /*
+     * 覆盖单独不得超过预算换算出的容量。
+     *
+     * 下限是按「静默上界」导出的绝对速率，它不知道信道有多贵。在贵信道
+     * 上（DNS 2040 B/信元，target 仅 58 信元/分钟）直接套用 240 的下限
+     * 会把线上速率顶到 489600 B/分钟 —— 预算 120000 的 4 倍。带宽异常
+     * 本身就是比静默更直白的暴露面，故预算是硬约束，下限必须让位。
+     *
+     * 注意这里不能用 max(0, target - data) 去压：数据突发后 EWMA 还没
+     * 衰减完，那个值会是 0，覆盖又被打回原形（实测 6 秒一个不发）。
+     * 数据突发是瞬时的，静默期的真实数据速率是 0，此时发覆盖不与数据
+     * 争带宽；长期平均仍由 EWMA 收敛回预算内。
+     */
+    if (rate > target) rate = target;
 
     cov->last_rate = rate;
     return rate;

@@ -168,9 +168,18 @@ int exfil_link_cover_pump(exfil_chan_t *ch, exfil_link_cover_t *lc,
     p2p_mix_out_t out[P2P_MIX_MAX_BATCH + 64];
     size_t n_out = 0, n_r = 0, n_c = 0;
 
+    /*
+     * 编码缓冲是否还有未入队的数据信元。
+     * 只要还有，本片就不得封装覆盖信元 —— 数据信元在 submit 阶段已
+     * 一次性占用了 counter 区间，覆盖信元出片时才封装会排在区间之后，
+     * 而数据是按片分批出队的，二者交错会让到达顺序与 counter 顺序
+     * 不一致，接收端直接 AUTH。详见 mix_cover.c 第 5.5 步。
+     */
+    int more_pending = (lc->enc_i < lc->enc_n) ? 1 : 0;
+
     int rc = p2p_mix_flush_adaptive(&lc->mx, &lc->cov, now_ms, &ch->cell,
                                     out, P2P_MIX_MAX_BATCH + 64,
-                                    &n_out, &n_r, &n_c);
+                                    &n_out, &n_r, &n_c, more_pending);
     if (rc != P2P_MIX_OK) return rc;
 
     for (size_t i = 0; i < n_out; i++) {

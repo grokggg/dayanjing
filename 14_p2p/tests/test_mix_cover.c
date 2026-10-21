@@ -74,7 +74,7 @@ int main(void) {
         p2p_mix_out_t out[128];
         size_t n_out = 0, n_real = 0, n_cov = 0;
         int rc = p2p_mix_flush_adaptive(&mx, &cov, 1000u, &send,
-                                        out, 128, &n_out, &n_real, &n_cov);
+                                        out, 128, &n_out, &n_real, &n_cov, 0);
         check(rc == P2P_MIX_OK, "用例1 自适应出片返回 OK");
         check(n_cov > 0, "用例1 空闲时确实产出覆盖信元");
         check(n_real == 0, "用例1 无数据时真实信元为 0");
@@ -108,7 +108,7 @@ int main(void) {
         p2p_mix_out_t out[128];
         size_t n_out = 0, n_real = 0, n_cov = 0;
         int rc = p2p_mix_flush_adaptive(&mx, &cov, 1000u, &s2,
-                                        out, 128, &n_out, &n_real, &n_cov);
+                                        out, 128, &n_out, &n_real, &n_cov, 0);
         check(rc == P2P_MIX_OK, "用例2 出片 OK");
         check(n_real == 3, "用例2 三个数据信元全部发出");
         check(n_cov > 0, "用例2 同时产出覆盖信元");
@@ -158,7 +158,7 @@ int main(void) {
         p2p_mix_out_t out[64];
         size_t n_out = 0, n_real = 0, n_cov = 0;
         p2p_mix_flush_adaptive(&mx, &cov, 1000u, &s3, out, 64,
-                               &n_out, &n_real, &n_cov);
+                               &n_out, &n_real, &n_cov, 0);
         check(n_cov == 0 && n_out == 0, "用例3 预算为 0 时不发覆盖信元");
     }
 
@@ -176,9 +176,9 @@ int main(void) {
         p2p_mix_out_t o1[64], o2[64];
         size_t a_out=0,a_real=0,a_cov=0, b_out=0,b_real=0,b_cov=0;
         p2p_mix_flush_adaptive(&m1, &c1, 1000u, &s4a, o1, 64,
-                               &a_out, &a_real, &a_cov);
+                               &a_out, &a_real, &a_cov, 0);
         p2p_mix_flush_adaptive(&m2, &c2, 1000u, &s4b, o2, 64,
-                               &b_out, &b_real, &b_cov);
+                               &b_out, &b_real, &b_cov, 0);
 
         check(b_cov < a_cov, "用例4 DNS 信道下覆盖信元数少于直连（成本更高）");
         info("用例4 直连 cover=%zu DNS cover=%zu (cost %u vs %u)",
@@ -223,7 +223,7 @@ int main(void) {
         size_t n_out=0, n_real=0, n_cov=0;
         /* cap 只给 6 项：5 个数据 + 至多 1 个覆盖 */
         int rc = p2p_mix_flush_adaptive(&mx, &cov, 1000u, &s6,
-                                        out, 6, &n_out, &n_real, &n_cov);
+                                        out, 6, &n_out, &n_real, &n_cov, 0);
         check(rc == P2P_MIX_OK, "用例6 容量受限时仍返回 OK（不报错）");
         check(n_out <= 6, "用例6 输出不超过容量");
         check(n_real <= 5, "用例6 数据不被截断到超出队列内容");
@@ -241,16 +241,16 @@ int main(void) {
         size_t n_out=0, n_real=0, n_cov=0;
 
         check(p2p_mix_flush_adaptive(NULL, &cov, 0u, &s7, out, 64,
-                                     &n_out, &n_real, &n_cov) == P2P_MIX_ERR_ARG,
+                                     &n_out, &n_real, &n_cov, 0) == P2P_MIX_ERR_ARG,
               "用例7 mx 为空被拒");
         check(p2p_mix_flush_adaptive(&mx, NULL, 0u, &s7, out, 64,
-                                     &n_out, &n_real, &n_cov) == P2P_MIX_ERR_ARG,
+                                     &n_out, &n_real, &n_cov, 0) == P2P_MIX_ERR_ARG,
               "用例7 cov 为空被拒");
         check(p2p_mix_flush_adaptive(&mx, &cov, 0u, NULL, out, 64,
-                                     &n_out, &n_real, &n_cov) == P2P_MIX_ERR_ARG,
+                                     &n_out, &n_real, &n_cov, 0) == P2P_MIX_ERR_ARG,
               "用例7 cc 为空被拒");
         check(p2p_mix_flush_adaptive(&mx, &cov, 0u, &s7, out, 0,
-                                     &n_out, &n_real, &n_cov) == P2P_MIX_ERR_LEN,
+                                     &n_out, &n_real, &n_cov, 0) == P2P_MIX_ERR_LEN,
               "用例7 容量为 0 被拒");
     }
 
@@ -271,7 +271,7 @@ int main(void) {
             p2p_mix_out_t out[128];
             size_t n_out=0, n_real=0, n_cov=0;
             if (p2p_mix_flush_adaptive(&mx, &cov, now, &s8, out, 128,
-                                       &n_out, &n_real, &n_cov) != P2P_MIX_OK) {
+                                       &n_out, &n_real, &n_cov, 0) != P2P_MIX_OK) {
                 ok = 0; break;
             }
             for (size_t i = 0; i < n_out; i++) {

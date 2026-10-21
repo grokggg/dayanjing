@@ -134,11 +134,16 @@ int  p2p_mix_flush(p2p_mix_t *mx, uint32_t now_ms, p2p_cell_ctx_t *cc,
  *
  * 覆盖信元用 cc 这个**与数据相同**的上下文封装 —— 用独立上下文会让接收方
  * 计数器错位，表现为全线 AUTH。
+ *
+ * more_data_pending：调用方告知"本片之后是否还有数据要发"。
+ *   只要它为真（或出片后队列仍有剩余），本片就**不封装任何覆盖信元**。
+ *   这是大产物突发场景实测抓出的守卫，详见 mix_cover.c 第 5.5 步。
  */
 int  p2p_mix_flush_adaptive(p2p_mix_t *mx, p2p_cover_t *cov, uint32_t now_ms,
                             p2p_cell_ctx_t *cc, p2p_mix_out_t *out,
                             size_t cap_items, size_t *n_out,
-                            size_t *n_real, size_t *n_cover);
+                            size_t *n_real, size_t *n_cover,
+                            int more_data_pending);
 
 /* 观察用：当前预计一分钟线上总字节数（数据 + 覆盖） */
 uint32_t p2p_mix_projected_bytes_per_min(const p2p_cover_t *cov);

@@ -70,8 +70,27 @@ extern "C" {
 #define P2P_COVER_COST_ICMP   1112u
 #define P2P_COVER_COST_DNS    2040u
 
-/* 默认下限：即使数据满额也维持的覆盖速率（信元/分钟） */
-#define P2P_COVER_DEFAULT_MIN     2u
+/*
+ * 覆盖下限不再取绝对常数，而由「最大可容忍静默」导出：
+ *
+ *   min_cover(信元/分钟) = 60000 / max_silence(毫秒)
+ *
+ * 旧的绝对下限 2 信元/分钟（30 秒一个）是**无效**的：它保证不了任何
+ * 有意义的静默上界。实测（test_exfil_burst_cover）显示，大产物突发后
+ * 覆盖速率被数据压到该下限，6 秒的批间空档一个覆盖信元都发不出，
+ * 批间静默与"完全不覆盖"几乎相同（6021ms vs 6019ms）——
+ * 观察者据此直接反推采集周期。
+ *
+ * 覆盖的首要职责是**抹平静默**，其次才是守预算。故下限必须由需求
+ * （可容忍多长的静默）反推，而不是拍一个常数。
+ */
+#define P2P_COVER_DEFAULT_MAX_SILENCE_MS  250u   /* 默认：静默不超过 250ms */
+
+/* 静默上界 -> 覆盖下限（信元/分钟）的换算 */
+#define P2P_COVER_SILENCE_TO_MIN(ms)  (60000u / (ms))
+
+/* 默认下限：由默认静默上界导出（250ms -> 240 信元/分钟） */
+#define P2P_COVER_DEFAULT_MIN  P2P_COVER_SILENCE_TO_MIN(P2P_COVER_DEFAULT_MAX_SILENCE_MS)
 /* 默认上限：单靠覆盖能达到的最大速率（信元/分钟） */
 #define P2P_COVER_DEFAULT_MAX   600u
 
@@ -133,6 +152,18 @@ int p2p_cover_set_budget(p2p_cover_t *cov, uint32_t budget_bytes_per_min);
 /* 设置覆盖速率的上下限（clamp 区间） */
 int p2p_cover_set_bounds(p2p_cover_t *cov, uint32_t min_per_min,
                          uint32_t max_per_min);
+
+/*
+ * 按「最大可容忍静默」设定覆盖下限：min = 60000 / max_silence_ms。
+ *
+ * 这是设置下限的**推荐入口**——直接给 min 一个绝对常数很容易设成
+ * 无效值（见 P2P_COVER_DEFAULT_MAX_SILENCE_MS 处的实测说明）。
+ *
+ * 注意：本下限会被 max_cover_per_min 钳住。若要求的静默上界短到
+ * 超出上限（如 <100ms 需要 >600 信元/分钟），实际只能达到上限对应的
+ * 静默长度——调用方应相应放大预算，而不是指望突破速率上限。
+ */
+int p2p_cover_set_max_silence(p2p_cover_t *cov, uint32_t max_silence_ms);
 
 /*
  * 记录一次数据发送。n_cells 为本批数据占用的信元数（0 视为无效调用）。
