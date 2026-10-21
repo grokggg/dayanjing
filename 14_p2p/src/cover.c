@@ -59,6 +59,7 @@ int p2p_cover_init(p2p_cover_t *cov, uint32_t profile,
     cov->win_data_cells       = 0;
     cov->last_rate            = 0;
     cov->total_cover_cells    = 0;
+    cov->credit_milli         = 0;
     cov->inited               = 1;
     return COVER_OK;
 }
@@ -164,6 +165,34 @@ uint32_t p2p_cover_rate(p2p_cover_t *cov) {
 
     cov->last_rate = rate;
     return rate;
+}
+
+int p2p_cover_take_due(p2p_cover_t *cov, uint32_t elapsed_ms,
+                       uint32_t *n_cells) {
+    if (!cov || !n_cells) return COVER_ERR_ARG;
+
+    uint32_t rate = p2p_cover_rate(cov);
+    if (rate == 0) {            /* 预算为 0：明确禁用，余量也要清零 */
+        cov->credit_milli = 0;
+        *n_cells = 0;
+        return COVER_OK;
+    }
+
+    /*
+     * 毫信元 = rate * elapsed_ms * 1000 / 60000。
+     * 全部用 64 位：600 * 60000 * 1000 = 3.6e10，远超 uint32 上限。
+     */
+    uint64_t add = ((uint64_t)rate * (uint64_t)elapsed_ms * 1000ull) / 60000ull;
+    uint64_t total = add + (uint64_t)cov->credit_milli;
+
+    uint32_t n = (uint32_t)(total / 1000ull);
+    cov->credit_milli = (uint32_t)(total % 1000ull);
+
+    /* 上限保护：长时间未刷新时不得一次性喷出大量覆盖信元 */
+    if (n > P2P_COVER_DEFAULT_MAX) n = P2P_COVER_DEFAULT_MAX;
+
+    *n_cells = n;
+    return COVER_OK;
 }
 
 int p2p_cover_due(p2p_cover_t *cov, uint32_t *seed, uint32_t idle_ms,

@@ -78,6 +78,10 @@ extern "C" {
 /* 窗口长度：EWMA 每 WINDOW_US 推进一次 */
 #define P2P_COVER_WINDOW_US  (5u * 1000000u)   /* 5 秒 */
 
+/* 返回码（cover.c 内部同值，此处导出供驱动层比较） */
+#define P2P_COVER_OK        0
+#define P2P_COVER_ERR_ARG  -1
+
 typedef struct {
     uint32_t budget_bytes_per_min;  /* 信道字节预算（操作员按带宽/检测面设定） */
     uint32_t min_cover_per_min;     /* 覆盖下限 */
@@ -92,6 +96,16 @@ typedef struct {
 
     uint32_t last_rate;             /* 上次算出的覆盖速率，供观察/测试 */
     uint64_t total_cover_cells;     /* 累计发出的覆盖信元 */
+
+    /*
+     * 不足一个信元的余量（1/1000 信元为单位）。
+     *
+     * 为什么必须有：低速场景下 rate * elapsed / 60000 恒为 0。
+     * 例如下限 2 信元/分钟、片长 500ms -> 2*500/60000 = 0.017，
+     * 每次取整都是 0，覆盖流量**永远发不出去**，min_cover 下限形同虚设。
+     * 累积后约 30 秒凑够一个信元，长期速率才与 rate 相符。
+     */
+    uint32_t credit_milli;
     int      inited;
 } p2p_cover_t;
 
@@ -143,6 +157,18 @@ uint32_t p2p_cover_target_total(p2p_cover_t *cov);
  * 这是本模块的核心输出。
  */
 uint32_t p2p_cover_rate(p2p_cover_t *cov);
+
+/*
+ * 取出本段时间内应发的覆盖信元数（带余量累积）。
+ *
+ * 与直接用 rate*elapsed/60000 的区别：后者在低速下恒为 0（见 credit_milli
+ * 注释）。本函数把不足一个的部分累积到下一次，长期速率精确等于 rate，
+ * 短期宁少勿多 —— 超预算比少发一个覆盖信元更糟。
+ *
+ * n_cells 为 0 是正常的（余量还没凑够），不是错误。
+ */
+int p2p_cover_take_due(p2p_cover_t *cov, uint32_t elapsed_ms,
+                       uint32_t *n_cells);
 
 /*
  * 发送判决：给定自上次发送以来的空闲时长，返回 1 表示此刻应发一个覆盖信元。

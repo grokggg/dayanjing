@@ -58,13 +58,23 @@ import os
 import struct
 import time
 
-from crypto_layer import GCM, hkdf
+from crypto_layer import GCM, hkdf, hmac_sha256
 
 CACHE_LABEL = b"dayanjing:session-cache:v1"
 CACHE_INFO = b"cache-enc:v1"
 
 _PLAIN_FMT = ">8s16s16sQQII8s"   # 与上面的字段顺序一一对应
 _PLAIN_LEN = struct.calcsize(_PLAIN_FMT)   # 72
+
+# 落盘文件格式：
+#   magic(8) || ver(4) || count(4) || entries... || file_tag(16)
+# 条目已各自用 cache_key 加密且 AAD 绑定 implant_id，所以单条被
+# 换到另一个 implant 名下会解密失败；file_tag 额外绑定"文件整体"，
+# 防止攻击者整条删除或回滚到旧快照（降级攻击）。
+_FILE_MAGIC = b"DYNSCAC1"
+_FILE_VER = 1
+_FILE_HDR = ">8sII"
+_FILE_TAG_INFO = b"cache-file-tag:v1"
 
 DEFAULT_TTL = 24 * 3600
 
@@ -173,6 +183,94 @@ class SessionCache:
             "cell_recv_ctr": recv_ctr,
             "created_at": struct.unpack(">d", ts_raw)[0],
         }
+
+    # ------------------------------------------------------------------
+    # 落盘：跨进程持久化
+    # ------------------------------------------------------------------
+
+    def _file_tag_key(self) -> bytes:
+        """文件整体校验用的密钥，与条目加密密钥域分离。"""
+        return hkdf(salt=CACHE_LABEL, ikm=self._key,
+                    info=_FILE_TAG_INFO + self._server_static_id,
+                    length=16)
+
+    def save(self, path: str) -> int:
+        """把全部条目落盘，返回写入条目数。
+
+        文件带整体 MAC：只改一条、删一条、或用旧快照整体替换，都会在
+        load 时被检出。注意它挡不住"持有主密钥者重新签一份" —— 那已超出
+        本层威胁模型（拿到主密钥等于拿到一切）。
+        """
+        body = bytearray()
+        n = 0
+        for implant_id, blob in sorted(self._entries.items()):
+            idb = implant_id.encode("utf-8")
+            body += struct.pack(">H", len(idb)) + idb
+            body += struct.pack(">d", self._created[implant_id])
+            body += struct.pack(">I", len(blob)) + blob
+            n += 1
+
+        hdr = struct.pack(_FILE_HDR, _FILE_MAGIC, _FILE_VER, n)
+        tag = hmac_sha256(self._file_tag_key(), hdr + bytes(body))[:16]
+
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(hdr + bytes(body) + tag)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)      # 原子替换：崩溃不会留下半截文件
+        return n
+
+    def load(self, path: str) -> int:
+        """从磁盘恢复条目，返回恢复条目数。文件不存在返回 0。
+
+        整体 MAC 校验失败抛 CacheError —— 绝不部分加载：半份缓存会让
+        "哪些会话能恢复"变成不可预测状态，比全部丢失更危险。
+        """
+        if not os.path.exists(path):
+            return 0
+        with open(path, "rb") as f:
+            raw = f.read()
+        if len(raw) < struct.calcsize(_FILE_HDR) + 16:
+            raise CacheError("缓存文件过短")
+
+        hdr_len = struct.calcsize(_FILE_HDR)
+        hdr, body, tag = raw[:hdr_len], raw[hdr_len:-16], raw[-16:]
+        magic, ver, n = struct.unpack(_FILE_HDR, hdr)
+        if magic != _FILE_MAGIC:
+            raise CacheError("缓存文件 magic 不符")
+        if ver != _FILE_VER:
+            raise CacheError(f"不支持的缓存文件版本 {ver}")
+        if hmac_sha256(self._file_tag_key(), hdr + body)[:16] != tag:
+            raise CacheError("缓存文件整体校验失败（被篡改或回滚）")
+
+        off = 0
+        restored = 0
+        for _ in range(n):
+            if off + 2 > len(body):
+                raise CacheError("缓存文件条目头截断")
+            (id_len,) = struct.unpack(">H", body[off:off + 2]); off += 2
+            if off + id_len > len(body):
+                raise CacheError("缓存文件 implant_id 截断")
+            implant_id = body[off:off + id_len].decode("utf-8"); off += id_len
+            if off + 8 > len(body):
+                raise CacheError("缓存文件时间戳截断")
+            (created,) = struct.unpack(">d", body[off:off + 8]); off += 8
+            if off + 4 > len(body):
+                raise CacheError("缓存文件长度字段截断")
+            (blen,) = struct.unpack(">I", body[off:off + 4]); off += 4
+            if off + blen > len(body):
+                raise CacheError("缓存文件条目体截断")
+            blob = bytes(body[off:off + blen]); off += blen
+
+            self._check_id(implant_id)
+            self._entries[implant_id] = blob
+            self._created[implant_id] = created
+            restored += 1
+
+        if off != len(body):
+            raise CacheError("缓存文件尾部有多余字节")
+        return restored
 
     def drop(self, implant_id: str) -> None:
         self._entries.pop(implant_id, None)

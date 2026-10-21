@@ -48,6 +48,7 @@
 #define DAYANJING_P2P_MIX_H
 
 #include "p2p_cell.h"
+#include "p2p_cover.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -113,6 +114,34 @@ int  p2p_mix_due(const p2p_mix_t *mx, uint32_t now_ms);
 int  p2p_mix_flush(p2p_mix_t *mx, uint32_t now_ms, p2p_cell_ctx_t *cc,
                    p2p_mix_out_t *out, size_t cap_items,
                    size_t *n_out, size_t *n_real);
+
+/*
+ * 自适应出片：总速率被字节预算约束住，覆盖信元数量由 cover 层算出。
+ *
+ * 与 p2p_mix_flush 的区别：
+ *   flush          —— 恒定输出 batch 个/片，覆盖只是补满 batch 的填充
+ *   flush_adaptive —— 数据排多少发多少（上限 batch），覆盖按 cover_rate
+ *                     折算到本片应发几个
+ *
+ * 重要：flush_adaptive **按先数据后覆盖**输出，不做跨流交错。
+ * 原因：信元 counter 严格递增，接收方按到达顺序校验；数据信元在 enqueue
+ * 时已封装（counter 已定），覆盖信元出片时才封装。把后封装的覆盖插到
+ * 先封装的数据之前会让接收方看到 counter 回退 -> REPLAY -> 全线解不开。
+ * 跨流交错请用 p2p_mix_flush，它要求每条流各有独立上下文（多路链路场景）。
+ *
+ * n_out = n_real + n_cover。n_cover 为 0 通常意味着预算已耗尽或覆盖被禁用
+ * （budget = 0），这是正常的，不是错误。
+ *
+ * 覆盖信元用 cc 这个**与数据相同**的上下文封装 —— 用独立上下文会让接收方
+ * 计数器错位，表现为全线 AUTH。
+ */
+int  p2p_mix_flush_adaptive(p2p_mix_t *mx, p2p_cover_t *cov, uint32_t now_ms,
+                            p2p_cell_ctx_t *cc, p2p_mix_out_t *out,
+                            size_t cap_items, size_t *n_out,
+                            size_t *n_real, size_t *n_cover);
+
+/* 观察用：当前预计一分钟线上总字节数（数据 + 覆盖） */
+uint32_t p2p_mix_projected_bytes_per_min(const p2p_cover_t *cov);
 
 /* 队列积压与流数统计（供测试与自适应调节观察） */
 int  p2p_mix_stats(const p2p_mix_t *mx, int *n_queued, int *n_streams);

