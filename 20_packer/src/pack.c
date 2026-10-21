@@ -6,6 +6,7 @@
  */
 
 #include "packer.h"
+#include "pack_int.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,8 @@ const char *pk_errstr(int e)
         case PK_ERR_HASH:    return "plaintext digest mismatch";
         case PK_ERR_CORRUPT: return "compressed stream corrupt";
         case PK_ERR_SYS:     return "system call failed";
+        case PK_ERR_BIND:    return "binding id mismatch";
+        case PK_ERR_DEGEN:   return "degenerate session keys";
         default:             return "unknown";
     }
 }
@@ -110,18 +113,32 @@ static int pk_derive_key(const uint8_t *salt, size_t salt_len,
     return PK_OK;
 }
 
-/* ---------- AAD 构造 ---------- */
+/* ---------- AAD 构造（版本相关） ---------- */
 
-#define PK_AAD_LEN 80u
-
-static void pk_build_aad(const uint8_t *hdr, uint8_t aad[PK_AAD_LEN])
+static size_t pk_aad_len(uint32_t version)
 {
-    /* magic(8) version(4) flags(4) raw_len(8) pay_len(8) = 32 */
+    return (version >= PK_VERSION2) ? PK_AAD_V2_LEN : PK_AAD_V1_LEN;
+}
+
+/*
+ * AAD = magic|version|flags|raw_len|pay_len (32)
+ *     + salt(16) + raw_sha(32) [+ bind_id(32)，v2 起]
+ *
+ * v2 把 bind_id 纳入认证范围：制品被搬到另一会话/植入体时，
+ * 即便对方持有"形状正确"的密钥，也因 AAD 不符而验签失败。
+ */
+static void pk_build_aad(const uint8_t *hdr, uint32_t version,
+                         uint8_t *aad, size_t aad_cap)
+{
+    size_t need = pk_aad_len(version);
+
+    if (aad_cap < need) return;   /* 调用方保证容量；此处不越界写 */
+
     memcpy(aad, hdr, 32);
-    /* salt(16) @32 */
     memcpy(aad + 32, hdr + 32, PK_SALT_LEN);
-    /* raw_sha(32) @76 */
     memcpy(aad + 48, hdr + 76, PK_SHA_LEN);
+    if (version >= PK_VERSION2)
+        memcpy(aad + 80, hdr + 108, PK_BIND_ID_LEN);
 }
 
 /* ====================================================================
@@ -130,12 +147,18 @@ static void pk_build_aad(const uint8_t *hdr, uint8_t aad[PK_AAD_LEN])
 
 int pk_header_parse(const uint8_t *blob, size_t blob_len, pk_hdr *h)
 {
+    size_t hdr_len;
+
     if (!blob || !h) return PK_ERR_ARG;
     if (blob_len < PK_HDR_LEN) return PK_ERR_SMALL;
     if (memcmp(blob, PK_MAGIC, PK_MAGIC_LEN) != 0) return PK_ERR_MAGIC;
 
     h->version = get32(blob + 8);
-    if (h->version != PK_VERSION) return PK_ERR_VERSION;
+    if (h->version != PK_VERSION && h->version != PK_VERSION2)
+        return PK_ERR_VERSION;
+
+    hdr_len = (h->version >= PK_VERSION2) ? PK_HDR_V2_LEN : PK_HDR_LEN;
+    if (blob_len < hdr_len) return PK_ERR_SMALL;
 
     h->flags   = get32(blob + 12);
     h->raw_len = get64(blob + 16);
@@ -146,8 +169,12 @@ int pk_header_parse(const uint8_t *blob, size_t blob_len, pk_hdr *h)
     memcpy(h->tag,  blob + 60, PK_TAG_LEN);
     memcpy(h->raw_sha, blob + 76, PK_SHA_LEN);
 
+    memset(h->bind_id, 0, PK_BIND_ID_LEN);
+    if (h->version >= PK_VERSION2)
+        memcpy(h->bind_id, blob + 108, PK_BIND_ID_LEN);
+
     /* 长度自洽：密文必须恰好填满剩余部分 */
-    if (h->pay_len != (uint64_t)(blob_len - PK_HDR_LEN)) return PK_ERR_LEN;
+    if (h->pay_len != (uint64_t)(blob_len - hdr_len)) return PK_ERR_LEN;
     /* 明文长度不可能为 0（打包的载荷至少 1 字节） */
     if (h->raw_len == 0) return PK_ERR_LEN;
     return PK_OK;
@@ -161,21 +188,44 @@ size_t pk_size_bound(size_t raw_len)
     return PK_HDR_LEN + body;
 }
 
+size_t pk_size_bound_v2(size_t raw_len)
+{
+    size_t comp_bound = (raw_len * 9u) / 8u + 2u + PK_LZSS_PREFIX;
+    size_t body = (raw_len > comp_bound) ? raw_len : comp_bound;
+    return PK_HDR_V2_LEN + body;
+}
+
+int pk_artifact_bind_id(const uint8_t *blob, size_t blob_len,
+                        uint8_t id[PK_BIND_ID_LEN])
+{
+    pk_hdr h;
+    int rc;
+
+    if (!id) return PK_ERR_ARG;
+    rc = pk_header_parse(blob, blob_len, &h);
+    if (rc != PK_OK) return rc;
+    memcpy(id, h.bind_id, PK_BIND_ID_LEN);
+    return PK_OK;
+}
+
 /* ====================================================================
  * 打包
  * ==================================================================== */
 
-int pk_pack(const uint8_t *raw, size_t raw_len,
-            const uint8_t *seed, size_t seed_len,
-            uint8_t *out, size_t *out_len)
+int pk_pack_core(const uint8_t *raw, size_t raw_len,
+                 const uint8_t *seed, size_t seed_len,
+                 uint32_t version,
+                 const uint8_t bind_id[PK_BIND_ID_LEN],
+                 uint8_t *out, size_t *out_len)
 {
     uint8_t *comp = NULL;
     size_t   comp_len = 0;
     size_t   comp_cap;
     size_t   body_len;
+    size_t   hdr_len;
     const uint8_t *body;
     uint8_t  key[PK_KEY_LEN];
-    uint8_t  aad[PK_AAD_LEN];
+    uint8_t  aad[PK_AAD_V2_LEN];
     uint8_t *ct;
     uint8_t  sha[PK_SHA_LEN];
     int      rc;
@@ -183,8 +233,14 @@ int pk_pack(const uint8_t *raw, size_t raw_len,
     if (!raw || !out || !out_len) return PK_ERR_ARG;
     if (raw_len == 0) return PK_ERR_ARG;
     if (!seed || seed_len == 0) return PK_ERR_ARG;
+    if (version != PK_VERSION && version != PK_VERSION2) return PK_ERR_ARG;
+    if (version >= PK_VERSION2 && !bind_id) return PK_ERR_ARG;
 
-    if (*out_len < pk_size_bound(raw_len)) return PK_ERR_NOMEM;
+    hdr_len = (version >= PK_VERSION2) ? PK_HDR_V2_LEN : PK_HDR_LEN;
+
+    if (*out_len < (version >= PK_VERSION2 ? pk_size_bound_v2(raw_len)
+                                           : pk_size_bound(raw_len)))
+        return PK_ERR_NOMEM;
 
     /* --- 1. 压缩（仅在确有利时采用） --- */
     comp_cap = (raw_len * 9u) / 8u + 2u + PK_LZSS_PREFIX;
@@ -202,9 +258,9 @@ int pk_pack(const uint8_t *raw, size_t raw_len,
     }
 
     /* --- 2. 头 --- */
-    memset(out, 0, PK_HDR_LEN);
+    memset(out, 0, hdr_len);
     memcpy(out, PK_MAGIC, PK_MAGIC_LEN);
-    put32(out + 8,  PK_VERSION);
+    put32(out + 8,  version);
     put32(out + 12, (body == comp) ? PK_FLAG_COMPRESSED : 0u);
     put64(out + 16, (uint64_t)raw_len);
     put64(out + 24, (uint64_t)body_len);
@@ -215,39 +271,51 @@ int pk_pack(const uint8_t *raw, size_t raw_len,
     sha256(raw, raw_len, sha);
     memcpy(out + 76, sha, PK_SHA_LEN);
 
+    if (version >= PK_VERSION2)
+        memcpy(out + 108, bind_id, PK_BIND_ID_LEN);
+
     /* --- 3. GCM 加密 --- */
     if (pk_derive_key(out + 32, PK_SALT_LEN, seed, seed_len, key) != PK_OK) {
         free(comp);
         return PK_ERR_ARG;
     }
-    pk_build_aad(out, aad);
+    pk_build_aad(out, version, aad, sizeof(aad));
 
-    ct = out + PK_HDR_LEN;
-    rc = gcm_seal(key, out + 48, aad, PK_AAD_LEN,
+    ct = out + hdr_len;
+    rc = gcm_seal(key, out + 48, aad, pk_aad_len(version),
                   body, body_len, ct, out + 60);
     if (rc != GCM_OK) { free(comp); return PK_ERR_ARG; }
 
     /* --- 4. 收尾 --- */
     memset(key, 0, sizeof(key));
-    *out_len = PK_HDR_LEN + body_len;
+    *out_len = hdr_len + body_len;
     free(comp);
     return PK_OK;
+}
+
+int pk_pack(const uint8_t *raw, size_t raw_len,
+            const uint8_t *seed, size_t seed_len,
+            uint8_t *out, size_t *out_len)
+{
+    return pk_pack_core(raw, raw_len, seed, seed_len,
+                        PK_VERSION, NULL, out, out_len);
 }
 
 /* ====================================================================
  * 解包
  * ==================================================================== */
 
-int pk_unpack(const uint8_t *blob, size_t blob_len,
-              const uint8_t *seed, size_t seed_len,
-              uint8_t *out, size_t *out_len)
+int pk_unpack_core(const uint8_t *blob, size_t blob_len,
+                   const uint8_t *seed, size_t seed_len,
+                   uint8_t *out, size_t *out_len)
 {
     pk_hdr   h;
     uint8_t  key[PK_KEY_LEN];
-    uint8_t  aad[PK_AAD_LEN];
+    uint8_t  aad[PK_AAD_V2_LEN];
     uint8_t *ctbuf = NULL;
     uint8_t  sha[PK_SHA_LEN];
     size_t   cap = *out_len;
+    size_t   hdr_len;
     int      rc;
 
     if (!blob || !out || !out_len) return PK_ERR_ARG;
@@ -256,18 +324,20 @@ int pk_unpack(const uint8_t *blob, size_t blob_len,
     rc = pk_header_parse(blob, blob_len, &h);
     if (rc != PK_OK) return rc;
 
+    hdr_len = (h.version >= PK_VERSION2) ? PK_HDR_V2_LEN : PK_HDR_LEN;
+
     if (cap < h.raw_len) return PK_ERR_NOMEM;
 
     if (pk_derive_key(h.salt, PK_SALT_LEN, seed, seed_len, key) != PK_OK)
         return PK_ERR_ARG;
-    pk_build_aad(blob, aad);
+    pk_build_aad(blob, h.version, aad, sizeof(aad));
 
     /* 密文 -> 中间明文（可能是压缩流） */
     ctbuf = (uint8_t *)malloc((size_t)h.pay_len ? (size_t)h.pay_len : 1u);
     if (!ctbuf) { memset(key, 0, sizeof(key)); return PK_ERR_NOMEM; }
 
-    rc = gcm_open(key, h.iv, aad, PK_AAD_LEN,
-                  blob + PK_HDR_LEN, (size_t)h.pay_len, h.tag, ctbuf);
+    rc = gcm_open(key, h.iv, aad, pk_aad_len(h.version),
+                  blob + hdr_len, (size_t)h.pay_len, h.tag, ctbuf);
     memset(key, 0, sizeof(key));
     if (rc == GCM_ERR_AUTH) { free(ctbuf); return PK_ERR_AUTH; }
     if (rc != GCM_OK) { free(ctbuf); return PK_ERR_ARG; }
@@ -296,4 +366,11 @@ int pk_unpack(const uint8_t *blob, size_t blob_len,
         return PK_ERR_HASH;
 
     return PK_OK;
+}
+
+int pk_unpack(const uint8_t *blob, size_t blob_len,
+              const uint8_t *seed, size_t seed_len,
+              uint8_t *out, size_t *out_len)
+{
+    return pk_unpack_core(blob, blob_len, seed, seed_len, out, out_len);
 }

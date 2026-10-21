@@ -10,11 +10,15 @@ CRYPTDIR := ../00_crypto
 CRYPT_SRC := $(CRYPTDIR)/src/crypto_gcm.c $(CRYPTDIR)/src/crypto_hash.c
 CRYPT_OBJ := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o
 
-SRC     := src/lzss.c src/pack.c src/mexec.c
+SRC     := src/lzss.c src/pack.c src/bind.c src/mexec.c
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o) $(CRYPT_OBJ)
 
 TESTSRC := tests/test_packer.c
 TESTBIN := $(BUILD)/test_packer
+
+# 会话绑定单元测试
+BINDSRC := tests/test_bind.c
+BINDBIN := $(BUILD)/test_bind
 
 # mexec 真机验证目标：静态链接，避免 execveat 后再依赖动态加载器
 TARGETSRC := tests/mexec_target.c
@@ -22,7 +26,7 @@ TARGETBIN := $(BUILD)/mexec_target
 
 .PHONY: all test clean inspect static
 
-all: $(TESTBIN)
+all: $(TESTBIN) $(BINDBIN) $(INTGBIN)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -40,8 +44,28 @@ $(TARGETBIN): $(TARGETSRC) | $(BUILD)
 $(TESTBIN): $(OBJ) $(TESTSRC) $(TARGETBIN) | $(BUILD)
 	$(CC) $(CFLAGS) $(OBJ) $(TESTSRC) -o $@ $(LDFLAGS)
 
-test: $(TESTBIN)
+$(BINDBIN): $(OBJ) $(BINDSRC) | $(BUILD)
+	$(CC) $(CFLAGS) $(OBJ) $(BINDSRC) -o $@ $(LDFLAGS)
+
+# 与 02_c2 联编：真实会话密钥 -> 制品绑定 -> 解包
+C2DIR   := ../02_c2
+C2OBJ   := $(BUILD)/c2.o $(BUILD)/c2_frame.o
+INTGSRC := tests/test_c2_packer.c
+INTGBIN := $(BUILD)/test_c2_packer
+
+$(BUILD)/c2.o: $(C2DIR)/src/c2.c | $(BUILD)
+	$(CC) $(CFLAGS) -I$(C2DIR)/include -c $< -o $@
+
+$(BUILD)/c2_frame.o: $(C2DIR)/src/c2_frame.c | $(BUILD)
+	$(CC) $(CFLAGS) -I$(C2DIR)/include -c $< -o $@
+
+$(INTGBIN): $(OBJ) $(C2OBJ) $(INTGSRC) | $(BUILD)
+	$(CC) $(CFLAGS) -I$(C2DIR)/include $(OBJ) $(C2OBJ) $(INTGSRC) -o $@ $(LDFLAGS)
+
+test: $(TESTBIN) $(BINDBIN) $(INTGBIN)
 	./$(TESTBIN)
+	./$(BINDBIN)
+	./$(INTGBIN)
 
 static: CFLAGS += -static
 static: clean $(TESTBIN)

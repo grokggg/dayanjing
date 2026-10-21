@@ -39,6 +39,11 @@ bash scripts/run_all_tests.sh
 | 12 | `12_exploit` | 载荷注册表 + 载荷生成模板 + CVE 指纹匹配 + 攻击链编排 | 28/28 |
 | 13 | `13_c2_server` | Python 服务端参考实现 | 19/19 |
 | 14 | `14_p2p` | 节点表+邻居图 + QoS(Dijkstra, EWMA/抖动/带宽/主动探测) + 数据面双工中继 + **洋葱分层加密**(X25519 ephemeral-static + epoch 轮换→PFS) + **定长信元**(512B) + **混时序**(时间片跨流交错、恒定输出) + **探测低频错峰** + **E2EE 与动态路由联动** | mesh 51 + qos 62 + chain 11 + e2ee 78 + route 12 + onion 42 + cell 36 + bw 18 + hopkey 34 + mix 22 + probesched 24 = **390/390** |
+| 16 | `16_initial_access` | 钓鱼监听（GET 表单 / POST 捕获 / 302 跳真站） + 横幅侦察（仅 IP 字面量，规避 getaddrinfo） | 13/13 |
+| 17 | `17_loader` | PE32/PE32+ 解析 + 反射加载（重定位 / IAT / TLS） + shellcode 编码（AES-GCM + 派生 XOR 流） | 64/64 |
+| 18 | `18_privilege` | 版本号比较 + 内核 CVE 区间审计 + sudo / polkit / setuid 面枚举 | 74/74 |
+| 19 | `19_defense` | 反调试 / 反沙箱 / 反虚拟机 / hooks 扫描 / ETW+AMSI 字节桩 | 87/87 |
+| 20 | `20_packer` | 自研 LZSS + AES-128-GCM 制品 + memfd/execveat 无磁盘执行 + **与 02_c2 会话绑定**（v2 头 bind_id 纳入 AAD） | 46 + 44 + 21 = **111/111** |
 | — | `agent_windows` | 摄像头采集/转码/密封（Windows 后端已编译检查） | 17/17 + 43/43 |
 
 ## 模块依赖图
@@ -71,7 +76,7 @@ bash scripts/run_all_tests.sh
 - `tests/integration.c`：原始帧 → 03_transport(HTTP) → 10_evasion(分片) → 06_db(落盘/读出) → 10_evasion(重组) → 03_transport(解包) → 07_ui(响应)，字节级一致
 - `tests/e2e_camo.c`：03_transport × 10_evasion 伪装联合，四种伪装形态各跑「伪装→分片→重组→解伪装」与「伪装→HTTP 包装→解包→解伪装」，另含完整组合链路与 7 项负向用例，60/60
 
-运行全量：`sh scripts/run_all_tests.sh`（14 模块 + 2 集成）
+运行全量：`sh scripts/run_all_tests.sh`（20 模块 + 3 集成 + 2 部署贯通）
 
 数据流（端到端）：
 

