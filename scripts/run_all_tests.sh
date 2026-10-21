@@ -84,10 +84,14 @@ run_py 13_c2_server_py 13_c2_server/tests/test_server.py
 
 # 采集产物接收端：C 侧 21_exfil 真编码 -> Python ExfilSink 真解码的跨语言对齐。
 # 依赖 21_exfil/build/dump_cells，缺失时先构建。
-if [ ! -x "$ROOT/21_exfil/build/dump_cells" ]; then
+if [ ! -x "$ROOT/21_exfil/build/dump_cells" ] || \
+   [ ! -x "$ROOT/21_exfil/build/dump_task" ]; then
     make -C "$ROOT/21_exfil" > /dev/null 2>&1
 fi
 run_py 13_c2_server_exfil 13_c2_server/tests/test_exfil_sink.py
+
+# C2 下行任务通道：远程开采/停采/改参数。C 侧 dump_task 真编码 <-> Python 双向对齐。
+run_py 13_c2_server_task 13_c2_server/tests/test_exfil_task.py
 
 # Windows 后端 cam_mf.cpp 的逻辑验证。MinGW 不可得（apt/release 均 403），
 # 改用 SDK shim 在 Linux 下真实编译并用 mock 设备真跑其逻辑。

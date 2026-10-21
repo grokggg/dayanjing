@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/test_sched $(BUILD)/test_sched_gate
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -56,6 +56,15 @@ $(BUILD)/exfil_link.o: src/exfil_link.c include/exfil_link.h include/exfil.h | $
 $(BUILD)/sched.o: src/sched.c include/exfil_sched.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# C2 下行任务通道：编码唯一性校验 + 配置校验 + 落到调度器。
+# 依赖 sched.o（作用对象）与 02_c2 帧层（AEAD 封装）。
+$(BUILD)/task.o: src/task.c include/exfil_task.h include/exfil_sched.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_task: tests/test_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 $(BUILD)/test_sched: tests/test_sched.c $(BUILD)/sched.o
 	$(CC) $(CFLAGS) $< $(BUILD)/sched.o -o $@
 
@@ -81,12 +90,19 @@ $(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(L
 $(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate
+# 跨语言对齐工具：C 侧真编码任务/回执 -> 文件，供 Python 侧解码比对；
+# 反向模式 chk 则读取 Python 生成的 wire 并解码，实现双向验证。
+$(BUILD)/dump_task: tests/dump_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
 	./$(BUILD)/test_sched
 	./$(BUILD)/test_sched_gate
+	./$(BUILD)/test_task
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="
