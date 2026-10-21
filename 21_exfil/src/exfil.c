@@ -304,6 +304,7 @@ const char *exfil_errstr(int e) {
         case EXF_ERR_FMT:         return "malformed record";
         case EXF_ERR_CRC:         return "CRC mismatch (reassembly misaligned)";
         case EXF_ERR_INCOMPLETE:  return "batch truncated before FIN";
+        case EXF_ERR_IO:          return "link I/O failure (short write / peer closed / partial cell)";
         default:                  return "unknown";
     }
 }

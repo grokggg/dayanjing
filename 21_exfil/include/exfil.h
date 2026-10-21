@@ -106,6 +106,7 @@ extern "C" {
 #define EXF_ERR_FMT       -4  /* 格式错误（magic/ver/rsv 不符） */
 #define EXF_ERR_CRC       -5  /* CRC32 不匹配（重组错位 / 解包逻辑错误） */
 #define EXF_ERR_INCOMPLETE -6 /* 批未收到 FIN 就结束 —— 绝不静默成功 */
+#define EXF_ERR_IO         -7 /* 链路 IO 失败（短写 / 对端关闭 / 残缺信元） */
 
 /* 单条采集产物（解码后 payload 由调用方提供缓冲承接） */
 typedef struct {

