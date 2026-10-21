@@ -45,7 +45,7 @@ DAYANJING v4 — 13_c2_server/session_cache.py
 缓存条目格式（明文部分，加密前）
 ====================================================================
     generation(8) || k_c2s(16) || k_s2c(16)
-    || seq_out(8) || seq_in(8)
+    || seq_out(8) || seq_in(8)      # seq_in 以 +1 偏移存储（-1 记为 0）
     || cell_send_ctr(4) || cell_recv_ctr(4)
     || created_at(8)
 
@@ -134,7 +134,10 @@ class SessionCache:
             generation.to_bytes(8, "big"),
             k_c2s, k_s2c,
             seq_out & 0xFFFFFFFFFFFFFFFF,
-            seq_in & 0xFFFFFFFFFFFFFFFF,
+            # seq_in 允许 -1（尚未收到上行帧）。直接 & mask 会变成 2**64-1，
+            # 恢复时用它重建重放窗口会试图枚举天文数字区间 —— 故 +1 偏移存：
+            # 0 表示"未收到"，读回时减 1 还原。
+            (seq_in + 1) & 0xFFFFFFFFFFFFFFFF,
             cell_send_ctr & 0xFFFFFFFF,
             cell_recv_ctr & 0xFFFFFFFF,
             struct.pack(">d", now),
@@ -178,7 +181,7 @@ class SessionCache:
             "k_c2s": k_c2s,
             "k_s2c": k_s2c,
             "seq_out": seq_out,
-            "seq_in": seq_in,
+            "seq_in": seq_in - 1,   # 还原 +1 偏移：0 -> -1（未收到）
             "cell_send_ctr": send_ctr,
             "cell_recv_ctr": recv_ctr,
             "created_at": struct.unpack(">d", ts_raw)[0],

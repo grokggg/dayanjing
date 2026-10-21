@@ -274,6 +274,36 @@ class ReplayWindow:
         if key not in self._windows:
             self._windows[key] = {"seen": set(), "highest": -1}
 
+    def seed(self, key: ReplayKey, highest: int) -> None:
+        """用持久化的最高序号重建窗口基线。
+
+        为什么要这个方法：
+            ReplayWindow 是纯内存的。服务端重启后窗口为空，而会话可经
+            session_cache 落盘恢复 —— 此时植入体重连送来的旧序号会被
+            当作 'new' 接受，**重放防护在重启后整体失效**。缓存里存了
+            seq_in，但此前无人用它重建窗口（该字段被写死为 0 且从不读取）。
+
+        语义取舍：
+            我们只持久化了 highest，无法还原"哪些序号真的见过"。
+            故把 [lowest, highest] 整段视为已见 —— 方向是**保守拒收**：
+            落在窗口内的旧序号一律判 REPLAY，代价是窗口内未被使用过的
+            序号也会被拒。对 seq 单调递增的链路（每帧 +1）无实际影响；
+            对跳号发送则表现为一次拒收后由上层重传。
+        """
+        # 纵深防御：离谱的 highest（如未做 +1 偏移规范化的 2**64-1）会让
+        # 下面的 range 枚举到天文数字。上限取 2**48，远超任何真实序号。
+        if highest < 0 or highest > (1 << 48):
+            return
+        win = self._windows.get(key)
+        if win is None:
+            win = {"seen": set(), "highest": -1}
+            self._windows[key] = win
+        if highest <= win["highest"]:
+            return
+        lowest = max(highest - self._capacity + 1, 0)
+        win["seen"].update(range(lowest, highest + 1))
+        win["highest"] = highest
+
     def snapshot(self, key: ReplayKey) -> tuple:
         """返回 (seen_bitmap_tuple, highest)，供持久化层落盘。"""
         win = self._windows.get(key, {"seen": set(), "highest": -1})
