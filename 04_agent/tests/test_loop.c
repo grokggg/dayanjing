@@ -1,10 +1,12 @@
 #include "agent.h"
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 static int pass=0,fail=0;
 #define CK(c,m) do{ if(c){pass++;printf("[PASS] %s\n",m);} else{fail++;printf("[FAIL] %s\n",m);} }while(0)
 int main(void){
+    alarm(60);   /* 看门狗：任何一条挂死都变成失败，而不是拖垮回归 */
     printf("=== 04_agent 任务循环测试 ===\n");
     agent_task_reset();
     CK(agent_task_pending()==0, "初始队列为空");

@@ -15,8 +15,17 @@ int agent_collect(agent_info_t *info);
 
 /*
  * 执行命令并捕获 stdout。
- * 返回: >=0 子进程退出码；-1 超时；-2 内部错误；-3 被信号杀死
+ * 返回: >=0 子进程退出码；-1 超时；-2 参数错误/内部错误；-3 被信号杀死
  * out/outlen: 输出缓冲与长度（不含结尾 NUL，函数会补 NUL）
+ *
+ * timeout_ms 必须为正数。0 或负数直接返回 -2 —— 宁可拒绝执行，也不
+ * 接受"永不超时"这种会永久挂死 agent 的语义。
+ *
+ * 超时是**总时限**（poll 毫秒精度），不因命令持续吐输出而续期。
+ * 输出超过 cap 时截断，但管道继续排空，不会因写满 64KiB 而死锁。
+ *
+ * 子进程 stdin 指向 /dev/null，且关闭所有继承 fd —— 命令既不会读
+ * agent 的 stdin 卡住，也不会持有 agent 的 socket / 管道。
  */
 int agent_exec(const char *cmd, char *out, size_t cap, size_t *outlen, int timeout_ms);
 

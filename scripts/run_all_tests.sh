@@ -7,6 +7,17 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 failed=0
 passed=0
 
+# 单个测试用例的超时（秒）。默认 120 足够绝大多数单测。
+# 例外必须写明理由：12_exploit 的 canary/PIE 爆破是**逐字节试探**，
+# 每个字节平均 128 次、每次一次 fork+连接，单轮约 1900 次试探，
+# 两轮（含 ASLR 对照）实测约 128 秒。这不是卡住，是爆破本身的代价。
+tmo_for() {
+    case "$1" in
+        12_exploit) echo 600 ;;
+        *)          echo 120 ;;
+    esac
+}
+
 # C 模块：编译后跑 build/ 下所有可执行测试
 # 注意 build/linux/ 这类子目录也要扫到（agent_windows）
 run_c() {
@@ -22,7 +33,7 @@ run_c() {
     ok=1
     # 只取可执行文件，排除 .c/.o（.o 也会被 -perm -u+x 误匹配）
     for t in $(find "$d/build" -type f -name 'test_*' ! -name '*.c' ! -name '*.o' -perm -u+x 2>/dev/null | sort); do
-        if ! timeout 120 "$t" >/tmp/t_$name.log 2>&1; then
+        if ! timeout "$(tmo_for "$name")" "$t" >/tmp/t_$name.log 2>&1; then
             ok=0
             echo "FAIL -> $t"
             tail -6 /tmp/t_$name.log

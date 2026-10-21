@@ -7,6 +7,7 @@ static int fails = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
 int main(void) {
+    alarm(60);   /* 看门狗：任何一条挂死都变成失败，而不是拖垮回归 */
     /* ---- collect ---- */
     agent_info_t info;
     CHECK(agent_collect(&info) == 0);
