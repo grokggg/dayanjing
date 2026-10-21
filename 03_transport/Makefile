@@ -1,8 +1,8 @@
 CC ?= cc
-CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -I../14_p2p/include
 BUILD := build
 
-all: $(BUILD)/libtransport.a $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_dnspub $(BUILD)/test_swin $(BUILD)/test_icmtun $(BUILD)/test_icmppub $(BUILD)/test_dnsdown
+all: $(BUILD)/libtransport.a $(BUILD)/test_transport $(BUILD)/test_net $(BUILD)/test_dnstun $(BUILD)/test_dnspub $(BUILD)/test_swin $(BUILD)/test_icmtun $(BUILD)/test_icmppub $(BUILD)/test_dnsdown $(BUILD)/test_cover_cost
 
 $(BUILD)/libtransport.a: $(BUILD)/transport.o $(BUILD)/net.o $(BUILD)/dnstun.o $(BUILD)/swin.o $(BUILD)/icmtun.o
 	ar rcs $@ $^
@@ -47,6 +47,10 @@ $(BUILD)/test_icmppub: tests/test_icmppub.c $(BUILD)/libtransport.a | $(BUILD)
 # 公网 DNS 下行解码验证（需外网；不可达时 SKIP）
 $(BUILD)/test_dnsdown: tests/test_dnsdown.c $(BUILD)/libtransport.a | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a
+
+# 实测各类信道下每个信元的线上字节成本，回填 14_p2p 自适应覆盖流量模型
+$(BUILD)/test_cover_cost: tests/test_cover_cost.c $(BUILD)/libtransport.a ../14_p2p/build/cover.o | $(BUILD)
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a ../14_p2p/build/cover.o
 
 testpub: $(BUILD)/test_icmppub $(BUILD)/test_dnsdown
 	./$(BUILD)/test_icmppub

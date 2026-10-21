@@ -8,9 +8,9 @@ BUILD   := build
 # crypto_hash.o 提供 HKDF，供 p2p_tunnel_init_from_session 从会话密钥派生隧道密钥
 C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
 
-all: $(BUILD)/libp2p.a $(BUILD)/p2p_node
+all: $(BUILD)/libp2p.a $(BUILD)/p2p_node $(BUILD)/test_cover
 
-$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o $(BUILD)/resolv.o
+$(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o $(BUILD)/resolv.o $(BUILD)/cover.o
 	ar rcs $@ $^
 
 $(BUILD)/mesh.o: src/mesh.c include/p2p.h | $(BUILD)
@@ -40,6 +40,13 @@ $(BUILD)/relay.o: src/relay.c include/p2p.h | $(BUILD)
 # 定长信元层：固定 512 字节线上长度 + 填充 + 抖动 + 覆盖流量
 $(BUILD)/cell.o: src/cell.c include/p2p_cell.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# 自适应覆盖流量：覆盖速率随实测数据速率与信道字节成本联动
+$(BUILD)/cover.o: src/cover.c include/p2p_cover.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_cover: tests/test_cover.c $(BUILD)/libp2p.a
+	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
 
 $(BUILD)/crypto.o: src/crypto.c include/p2p_crypto.h ../02_c2/include/c2_frame.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

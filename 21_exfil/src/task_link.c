@@ -99,6 +99,43 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
     return EXF_TASK_OK;
 }
 
+int exfil_task_chan_resume(exfil_task_chan_t *ch,
+                           const uint8_t ks[16], const uint8_t kr[16],
+                           const uint8_t pfx[8],
+                           uint32_t send_ctr, uint32_t recv_ctr,
+                           uint64_t last_seq_down, uint64_t last_seq_up)
+{
+    int rc = exfil_task_chan_init(ch, ks, kr, pfx);
+    if (rc != EXF_TASK_OK) return rc;
+
+    /*
+     * 覆盖计数器。语义对齐 p2p_cell_unpack：
+     *   send_counter / recv_counter 都是"下一个将要使用的值"。
+     * 恢复点缓存的也必须是这个语义，否则会差一个 IV。
+     */
+    ch->cell.send_counter = send_ctr;
+    ch->cell.recv_counter = recv_ctr;
+    ch->cell.recv_init    = 1;
+
+    ch->last_seq_down = last_seq_down;
+    ch->last_seq_up   = last_seq_up;
+    ch->has_down      = 1;
+    ch->has_up        = 1;
+    return EXF_TASK_OK;
+}
+
+void exfil_task_chan_checkpoint(const exfil_task_chan_t *ch,
+                                uint32_t *send_ctr, uint32_t *recv_ctr,
+                                uint64_t *last_seq_down,
+                                uint64_t *last_seq_up)
+{
+    if (!ch) return;
+    if (send_ctr)      *send_ctr      = ch->cell.send_counter;
+    if (recv_ctr)      *recv_ctr      = ch->cell.recv_counter;
+    if (last_seq_down) *last_seq_down = ch->last_seq_down;
+    if (last_seq_up)   *last_seq_up   = ch->last_seq_up;
+}
+
 void exfil_task_chan_wipe(exfil_task_chan_t *ch)
 {
     if (!ch) return;

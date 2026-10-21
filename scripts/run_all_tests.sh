@@ -92,6 +92,7 @@ run_py 13_c2_server_exfil 13_c2_server/tests/test_exfil_sink.py
 
 # C2 下行任务通道：远程开采/停采/改参数。C 侧 dump_task 真编码 <-> Python 双向对齐。
 run_py 13_c2_server_task 13_c2_server/tests/test_exfil_task.py
+run_py 13_c2_server_cache 13_c2_server/tests/test_session_cache.py
 
 # Windows 后端 cam_mf.cpp 的逻辑验证。MinGW 不可得（apt/release 均 403），
 # 改用 SDK shim 在 Linux 下真实编译并用 mock 设备真跑其逻辑。
