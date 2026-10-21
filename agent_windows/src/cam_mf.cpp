@@ -61,6 +61,8 @@ struct mf_priv {
     cam_frame_t                   last_frame;     /* 最近一帧（内部缓冲区） */
     std::vector<uint8_t>          frame_buf;      /* 帧数据持有者 */
     bool                          com_inited;     /* 本实例是否初始化了 COM */
+    bool                          need_transform; /* 原生格式非压缩 -> 交付前须转码 */
+    bool                          mf_started;     /* 本实例是否调用过 MFStartup */
 };
 
 #define PRIV(s) ((mf_priv *)(s)->priv)
@@ -75,27 +77,43 @@ static uint32_t FourCCFromGUID(const GUID &g)
     return (uint32_t)g.Data1;
 }
 
+/*
+ * FourCC 以小端 uint32 存放于 GUID.Data1。
+ *
+ * 用显式十六进制常量，不用多字符字面量（'MJPG'）：多字符字面量的取值是
+ * 实现定义的，换编译器会静默变成另一个值，且 GCC/MSVC 均会告警。
+ *
+ * 注意 MFVideoFormat_RGB24 的 Data1 是 20（D3DFMT 值），不是 FourCC。
+ * 原实现按 'RGB ' 匹配，导致 RGB24 设备永远被判为 UNKNOWN 而无法采集。
+ */
+#define FCC_MJPG  0x47504A4Du   /* 'MJPG' */
+#define FCC_MEPG  0x4750454Du   /* 'MEPG'，部分编码器上报 */
+#define FCC_YUY2  0x32595559u   /* 'YUY2' */
+#define FCC_NV12  0x3231564Eu   /* 'NV12' */
+#define FCC_RGB24 20u           /* MFVideoFormat_RGB24 */
+
 static cam_pixel_fmt_t FmtFromGUID(const GUID &subtype)
 {
     uint32_t fcc = FourCCFromGUID(subtype);
     switch (fcc) {
-    case 'GPJM': /* 'MJPG' little-endian */
-    case 'GPEM': /* 'MEPG' some encoders */
+    case FCC_MJPG:
+    case FCC_MEPG:
         return CAM_FMT_MJPEG;
-    case '2YUY': /* 'YUY2' */
+    case FCC_YUY2:
         return CAM_FMT_YUYV422;
-    case '21VN': /* 'NV12' */
+    case FCC_NV12:
         return CAM_FMT_NV12;
-    case '24BG': /* 'RGB ' -> RGB24 */
+    case FCC_RGB24:
         return CAM_FMT_RGB24;
     default:
         return CAM_FMT_UNKNOWN;
     }
 }
 
+/* 压缩格式无需转码即可当 JPEG 交付；未压缩格式必须经 cam_frame_to_jpeg */
 static bool IsCompressedFmt(uint32_t fcc)
 {
-    return (fcc == 'GPJM' || fcc == 'GPEM');
+    return (fcc == FCC_MJPG || fcc == FCC_MEPG);
 }
 
 /* ------------------------------------------------------------------ */
@@ -121,8 +139,6 @@ bool mf_check_permission(void)
                       L"Software\\Microsoft\\Windows\\CurrentVersion\\"
                       L"CapabilityAccessManager\\ConsentStore\\webcam",
                       0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        wchar_t sid[256];
-        DWORD sid_sz = sizeof(sid);
         /* 遍历子键找当前用户 SID */
         DWORD idx = 0;
         wchar_t sub[256];
@@ -240,18 +256,29 @@ static HRESULT NegotiateFormat(IMFSourceReader *reader, const cam_config_t *cfg,
         if (FAILED(hr))
             continue;
 
-        GUID major = {0}, subtype = {0};
+        GUID major = {}, subtype = {};
         pType->GetGUID(MF_MT_MAJOR_TYPE, &major);
         if (major != MFMediaType_Video)
             continue;
         pType->GetGUID(MF_MT_SUBTYPE, &subtype);
 
-        UINT32 w = 0, h = 0;
-        pType->GetUINT32(MF_MT_FRAME_SIZE, &w);
-        pType->GetUINT32(MF_MT_FRAME_SIZE, &h);
-        /* MF_MT_FRAME_SIZE 是 packed UINT64，需拆开 */
-        h = (w >> 16) & 0xFFFF;
-        w = w & 0xFFFF;
+        /*
+         * MF_MT_FRAME_SIZE 是 packed UINT64：高 32 位为宽，低 32 位为高。
+         *
+         * 必须用 GetUINT64。此前用 GetUINT32 读该属性会返回失败
+         * （属性类型不匹配），宽高保持 0，后果是：
+         *   - 指定了分辨率时，所有候选都被过滤掉 -> 协商永远失败，
+         *     摄像头根本打不开；
+         *   - 未指定分辨率时，把 0x0 写进 SetCurrentMediaType，
+         *     open 却返回成功（假成功）。
+         */
+        UINT64 packed = 0;
+        if (FAILED(pType->GetUINT64(MF_MT_FRAME_SIZE, &packed)))
+            continue;
+        UINT32 w = (UINT32)(packed >> 32);
+        UINT32 h = (UINT32)(packed & 0xFFFFFFFFu);
+        if (w == 0 || h == 0)
+            continue;
 
         cam_pixel_fmt_t fmt = FmtFromGUID(subtype);
         if (fmt == CAM_FMT_UNKNOWN)
@@ -291,9 +318,12 @@ static HRESULT NegotiateFormat(IMFSourceReader *reader, const cam_config_t *cfg,
 
     pSet->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     pSet->SetGUID(MF_MT_SUBTYPE, candidates[best].subtype);
-    pSet->SetUINT32(MF_MT_FRAME_SIZE,
-                    (candidates[best].w & 0xFFFF)
-                    | ((candidates[best].h & 0xFFFF) << 16));
+    /*
+     * 与读取端严格对称：UINT64 packed，高 32 位宽、低 32 位高。
+     * 原实现用 SetUINT32 且按 16+16 打包，写入的分辨率是错误的。
+     */
+    pSet->SetUINT64(MF_MT_FRAME_SIZE,
+                    ((UINT64)candidates[best].w << 32) | (UINT64)candidates[best].h);
     if (cfg->fps != 0) {
         UINT64 fps = ((UINT64)cfg->fps << 32) | 1;
         pSet->SetUINT64(MF_MT_FRAME_RATE, fps);
@@ -327,6 +357,7 @@ static cam_err_t mf_open(cam_source_t *self, const cam_config_t *cfg)
 
     if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)))
         return CAM_ERR_GENERIC;
+    p->mf_started = true;
 
     /* 枚举设备 */
     ComPtr<IMFAttributes> pAttr;
@@ -349,7 +380,7 @@ static cam_err_t mf_open(cam_source_t *self, const cam_config_t *cfg)
             p->pSource.Get(), NULL, &p->pReader)))
         return CAM_ERR_GENERIC;
 
-    GUID subtype = {0};
+    GUID subtype = {};
     UINT32 w = 0, h = 0;
     HRESULT hr = NegotiateFormat(p->pReader.Get(), cfg, &subtype, &w, &h);
     if (FAILED(hr))
@@ -358,6 +389,8 @@ static cam_err_t mf_open(cam_source_t *self, const cam_config_t *cfg)
     p->last_frame.width = w;
     p->last_frame.height = h;
     p->last_frame.fmt = FmtFromGUID(subtype);
+    /* 压缩格式（MJPEG）可直接当 JPEG 交付；未压缩格式必须经 cam_frame_to_jpeg */
+    p->need_transform = !IsCompressedFmt(FourCCFromGUID(subtype));
 
     return CAM_OK;
 }
@@ -436,7 +469,15 @@ static void mf_close(cam_source_t *self)
         p->cActivates = 0;
     }
 
-    MFShutdown();
+    /*
+     * 只在本实例确实调用过 MFStartup 时才 MFShutdown。
+     * 原实现无条件关闭：一个从未 open 的实例 close 一次，就会把整个进程的
+     * Media Foundation 关掉，同进程内其他采集实例随之失效。
+     */
+    if (p->mf_started) {
+        MFShutdown();
+        p->mf_started = false;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -459,7 +500,11 @@ cam_source_t *cam_source_create(const char *backend)
         CoTaskMemFree(src);
         return NULL;
     }
-    ZeroMemory(p, sizeof(*p));
+    /*
+     * 不可再对 p 做 ZeroMemory：mf_priv 含 std::vector 与 ComPtr，
+     * 已由构造函数正确初始化，memset 会破坏这些已构造的子对象
+     *（GCC 以 -Wclass-memaccess 告警）。
+     */
 
     src->open = mf_open;
     src->capture = mf_capture;

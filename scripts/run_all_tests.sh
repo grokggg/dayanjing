@@ -81,6 +81,19 @@ run_int proto_c2_layer \
 
 run_py 13_c2_server_py 13_c2_server/tests/test_server.py
 
+# Windows 后端 cam_mf.cpp 的逻辑验证。MinGW 不可得（apt/release 均 403），
+# 改用 SDK shim 在 Linux 下真实编译并用 mock 设备真跑其逻辑。
+echo "=== winshim_mf ==="
+if make -C "$ROOT/agent_windows" winshim > /tmp/winshim.log 2>&1 \
+   && grep -q "19 pass, 0 fail" /tmp/winshim.log; then
+    echo "  [PASS] winshim_mf (cam_mf 19/19)"
+    passed=$((passed + 1))
+else
+    echo "  [FAIL] winshim_mf  (见 /tmp/winshim.log)"
+    tail -15 /tmp/winshim.log
+    failed=$((failed + 1))
+fi
+
 # 部署自检：真实起 4 节点（endpoint->edge0->edge1->core）+ echo 目标，
 # 建洋葱电路并校验端到端回显一致。这不是单测，是部署级贯通验证。
 if [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deploy.py ]; then

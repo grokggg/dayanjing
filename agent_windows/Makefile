@@ -60,3 +60,33 @@ win: | dirs
 
 clean:
 	rm -rf build
+
+# ---------------------------------------------------------------------------
+# winshim —— 用 Windows SDK shim 在 Linux 下对 cam_mf.cpp 做真实编译 + 逻辑验证
+#
+# 背景：MinGW 交叉工具链在本沙盒不可得（apt 源 403，GitHub release 403），
+# 因此无法做真机交叉编译。等价路径是由 tests/winsdk_shim 提供 Windows
+# 头文件的最小等价声明 + 可运行 mock Media Foundation，使 Windows 专用源码
+# 能被 g++ 真实编译，并用受控假设备真跑其逻辑分支。
+#
+# 覆盖：语法、类型、调用契约、格式协商、取帧、生命周期。
+# 不覆盖：Windows Media Foundation 的真实设备行为（需真机）。
+#
+# 该验证已抓出 5 个真实缺陷，详见 tests/winsdk_shim/README。
+# ---------------------------------------------------------------------------
+SHIM_BUILD := build/winshim
+SHIM_I     := -Iinclude -Itests/winsdk_shim -D_WIN32
+SHIM_CXX   := $(CXX) -std=c++14 -O1 -Wall -Wextra -Wno-unknown-pragmas $(SHIM_I)
+
+.PHONY: winshim winshim-build
+
+winshim-build:
+	@mkdir -p $(SHIM_BUILD)
+	$(SHIM_CXX) -c src/cam_mf.cpp -o $(SHIM_BUILD)/cam_mf.o
+	$(SHIM_CXX) -c tests/winsdk_shim/shim_impl.cpp -o $(SHIM_BUILD)/shim_impl.o
+	$(SHIM_CXX) -c tests/test_mf_logic.cpp -o $(SHIM_BUILD)/test_mf_logic.o
+	$(CXX) $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/shim_impl.o \
+	      $(SHIM_BUILD)/test_mf_logic.o -o $(SHIM_BUILD)/test_mf_logic
+
+winshim: winshim-build
+	@./$(SHIM_BUILD)/test_mf_logic
