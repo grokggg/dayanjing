@@ -554,26 +554,15 @@ static int encode_block(bitstream_t *bs, const int16_t *block,
 /* ====================================================================
  * 真彩色基线 JPEG 编码（Y'CbCr 4:2:0）
  * ==================================================================== */
-static size_t encode_color_jpeg(const uint8_t *ycbcr, uint32_t width, uint32_t height,
-                                int stride, int quality,
-                                uint8_t *out, size_t out_cap)
+/*
+ * 实际编码：只做编码，不分配任何缓冲、不做探测。
+ * out 必须非空且 out_cap 足够；容量不足返回 0。
+ * 探测逻辑由外层 encode_color_jpeg 包装处理（分离原因见那里）。
+ */
+static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32_t height,
+                                    int stride, int quality,
+                                    uint8_t *out, size_t out_cap)
 {
-    /* 容量检查：探测模式下（out==NULL 或 out_cap==0）只做边界判断不写入。
-     * 为保证探测结果与实际编码完全一致，探测时分配一块临时缓冲跑一遍，
-     * 这样调用方拿到的容量就是真实写入量，不会有低估风险。 */
-    uint8_t *tmpp = NULL;
-    size_t   real_cap = out_cap;
-    int      probing = (out == NULL) || (out_cap == 0);
-
-    if (probing) {
-        /* 探测模式：分配一块大缓冲跑完整编码，返回真实长度。
-         * 16x16 YUYV422 编码后通常 <2KiB，64KiB 足以覆盖绝大多数场景。 */
-        real_cap = 64 * 1024;
-        tmpp = (uint8_t *)malloc(real_cap);
-        if (!tmpp) return 0;
-        out = tmpp;
-        out_cap = real_cap;
-    }
 
     uint8_t *p   = out;
     uint8_t *end = out + out_cap;
@@ -788,7 +777,6 @@ static size_t encode_color_jpeg(const uint8_t *ycbcr, uint32_t width, uint32_t h
 
     /* EOI */
     if (bs.pos + 2 > bs.cap) {
-        if (probing) free(tmpp);
         return 0;
     }
     bs.buf[bs.pos++] = 0xFF;
@@ -797,10 +785,42 @@ static size_t encode_color_jpeg(const uint8_t *ycbcr, uint32_t width, uint32_t h
     /* 返回实测总长度（而非公式预估值）：p 指向扫描数据起点，
      * bs.pos 是最终写入位置，差值即扫描数据 + EOI 的实际长度。 */
     size_t total = (size_t)(p - out) + scan_written + 2;
-    if (probing) {
-        free(tmpp);      /* 探测模式：丢弃编码结果，只返回长度 */
-    }
     return total;
+}
+
+/*
+ * 探测包装：out==NULL 或 out_cap==0 时只返回所需长度，不写入。
+ *
+ * 为什么要把探测分离出来（历史缺陷，勿回退）：
+ *   原实现在探测时**硬编码 64KiB 临时缓冲**，注释写着"16x16 编码后通常
+ *   <2KiB"—— 即只在极小测试帧上验证过。真实分辨率下（320x240 高熵帧
+ *   已超 64KiB，1920x1080 可达数 MB）编码会中途撞到缓冲末尾返回 0，
+ *   于是 cam_frame_to_jpeg 探测失败 -> CAM_ERR_TRANSFORM -> **采集整体失败**。
+ *   静默失败比崩溃更危险：上层会以为"设备无帧"，而不是"容量不够"。
+ *
+ * 修正：按分辨率动态估算上界，撞到末尾则加倍重试。
+ *   估算 = width*height*4 + 64KiB。每像素 4 字节对高熵数据已很保守
+ *   （高熵时 Huffman 压缩率趋近 1，还要容纳头部/量化表/霍夫曼表）。
+ */
+static size_t encode_color_jpeg(const uint8_t *ycbcr, uint32_t width, uint32_t height,
+                                int stride, int quality,
+                                uint8_t *out, size_t out_cap)
+{
+    if (!((out == NULL) || (out_cap == 0)))
+        return encode_color_jpeg_raw(ycbcr, width, height, stride, quality, out, out_cap);
+
+    size_t est = (size_t)width * (size_t)height * 4u + (64u * 1024u);
+    if (est < 256u * 1024u) est = 256u * 1024u;
+
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint8_t *tmp = (uint8_t *)malloc(est);
+        if (!tmp) return 0;
+        size_t r = encode_color_jpeg_raw(ycbcr, width, height, stride, quality, tmp, est);
+        free(tmp);
+        if (r > 0) return r;
+        est *= 2;               /* 撞到容量末尾：加倍重试 */
+    }
+    return 0;
 }
 
 /* ====================================================================
