@@ -367,16 +367,15 @@ int main(void)
 
     /* ---- 用例3：SET_CFG 非法（max < min），以伪造字节下发 ---- */
     {
-        uint8_t wire[EXF_TASK_LINK_MAX_WIRE];
+        uint8_t wire[P2P_CELL_DATA_MAX];
         size_t  wlen = 0;
-        CK(seal_raw_cmd(sv.ks, PFX, sv.ctr_down, 2,
+        CK(seal_raw_cmd(sv.ks, sv.pfx_frame, sv.cell.send_counter, 2,
                         EXF_TASK_OP_SET_CFG, 1002,
                         5000000, 1000000,   /* max < min，非法 */
                         8, 60000000, 4, 1u << 20, 1,
                         wire, sizeof wire, &wlen) == C2_FRAME_OK,
            "用例3 手工封非法配置命令");
-        CK(exfil_task_link_send(fd, wire, wlen) == EXF_TASK_OK, "用例3 命令写入电路");
-        sv.ctr_down++;
+        CK(exfil_task_chan_send_raw(&sv, fd, wire, wlen) == EXF_TASK_OK, "用例3 命令写入电路");
         implant_res_t r;
         CK(read_res(rp, &r) == 0, "用例3 读到植入体报告");
         CK(r.rc == EXF_TASK_OK, "用例3 命令被接受（报文本身合法）");
@@ -445,14 +444,13 @@ int main(void)
     /* ---- 用例7：篡改取证 ---- */
     {
         exfil_task_cmd_t c; mk_cmd(&c, EXF_TASK_OP_START, 1007);
-        uint8_t wire[EXF_TASK_LINK_MAX_WIRE];
+        uint8_t wire[P2P_CELL_DATA_MAX];
         size_t wlen = 0;
-        CK(exfil_task_seal_cmd(sv.ks, PFX, sv.ctr_down, 7, &c,
+        CK(exfil_task_seal_cmd(sv.ks, sv.pfx_frame, sv.cell.send_counter, 7, &c,
                                wire, sizeof wire, &wlen) == EXF_TASK_OK,
            "用例7 手工封命令");
         wire[wlen - 1] ^= 0x01;                       /* 翻转最后一个字节（tag 内）*/
-        CK(exfil_task_link_send(fd, wire, wlen) == EXF_TASK_OK, "用例7 篡改报文写入电路");
-        sv.ctr_down++;                                /* 与对端计数保持同步 */
+        CK(exfil_task_chan_send_raw(&sv, fd, wire, wlen) == EXF_TASK_OK, "用例7 篡改报文写入电路");
         implant_res_t r;
         CK(read_res(rp, &r) == 0, "用例7 读到植入体报告");
         printf("[INFO] 用例7 植入体 rc=%d (%s)\n", r.rc, exfil_task_errstr(r.rc));
@@ -463,13 +461,12 @@ int main(void)
     /* ---- 用例8：错密钥取证 ---- */
     {
         exfil_task_cmd_t c; mk_cmd(&c, EXF_TASK_OP_START, 1008);
-        uint8_t wire[EXF_TASK_LINK_MAX_WIRE];
+        uint8_t wire[P2P_CELL_DATA_MAX];
         size_t wlen = 0;
-        CK(exfil_task_seal_cmd(K_X, PFX, sv.ctr_down, 8, &c,
+        CK(exfil_task_seal_cmd(K_X, sv.pfx_frame, sv.cell.send_counter, 8, &c,
                                wire, sizeof wire, &wlen) == EXF_TASK_OK,
            "用例8 用非会话密钥封命令");
-        CK(exfil_task_link_send(fd, wire, wlen) == EXF_TASK_OK, "用例8 报文写入电路");
-        sv.ctr_down++;
+        CK(exfil_task_chan_send_raw(&sv, fd, wire, wlen) == EXF_TASK_OK, "用例8 报文写入电路");
         implant_res_t r;
         CK(read_res(rp, &r) == 0, "用例8 读到植入体报告");
         printf("[INFO] 用例8 植入体 rc=%d (%s)\n", r.rc, exfil_task_errstr(r.rc));
@@ -479,13 +476,12 @@ int main(void)
     /* ---- 用例9：重放取证 ---- */
     {
         exfil_task_cmd_t c; mk_cmd(&c, EXF_TASK_OP_QUERY, 1009);
-        uint8_t wire[EXF_TASK_LINK_MAX_WIRE];
+        uint8_t wire[P2P_CELL_DATA_MAX];
         size_t wlen = 0;
-        CK(exfil_task_seal_cmd(sv.ks, PFX, sv.ctr_down, 9, &c,
+        CK(exfil_task_seal_cmd(sv.ks, sv.pfx_frame, sv.cell.send_counter, 9, &c,
                                wire, sizeof wire, &wlen) == EXF_TASK_OK,
            "用例9 封合法命令");
-        CK(exfil_task_link_send(fd, wire, wlen) == EXF_TASK_OK, "用例9 报文写入电路");
-        sv.ctr_down++;
+        CK(exfil_task_chan_send_raw(&sv, fd, wire, wlen) == EXF_TASK_OK, "用例9 报文写入电路");
         implant_res_t r;
         CK(read_res(rp, &r) == 0, "用例9 读到植入体报告");
         CK(r.rc == EXF_TASK_OK, "用例9 首次被接受");
@@ -493,22 +489,104 @@ int main(void)
         CK(exfil_task_chan_recv_ack(&sv, fd, NULL, &a) == EXF_TASK_OK, "用例9 回执返回");
 
         /* 原样重发 —— c2_frame 不跟踪计数器，只能靠本层 seq 拦截 */
-        CK(exfil_task_link_send(fd, wire, wlen) == EXF_TASK_OK, "用例9 原样重发");
+        CK(exfil_task_chan_send_raw(&sv, fd, wire, wlen) == EXF_TASK_OK, "用例9 原样重发");
         implant_res_t r2;
         CK(read_res(rp, &r2) == 0, "用例9 读到重放报告");
         printf("[INFO] 用例9 重放 rc=%d (%s)\n", r2.rc, exfil_task_errstr(r2.rc));
         CK(r2.rc == EXF_TASK_ERR_REPLAY, "用例9 重放被 seq 单调性拦截");
     }
 
-    /* ---- 用例11：声明长度超限 ---- */
+    /* ---- 用例11：恒定长度（原"声明长度"攻击面已随长度前缀一起消失）---- */
     {
-        uint8_t hdr[4];
-        hdr[0] = 0xff; hdr[1] = 0xff; hdr[2] = 0xff; hdr[3] = 0xff;
-        (void)!write(fd, hdr, sizeof hdr);            /* 声明 4 GiB */
-        implant_res_t r;
-        CK(read_res(rp, &r) == 0, "用例11 读到植入体报告");
-        printf("[INFO] 用例11 植入体 rc=%d (%s)\n", r.rc, exfil_task_errstr(r.rc));
-        CK(r.rc == EXF_TASK_ERR_LEN, "用例11 超长声明被 LEN 拒绝（不按声明值分配）");
+        int sp[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) == 0) {
+            exfil_task_chan_t t;
+            uint8_t  wire[P2P_CELL_DATA_MAX];
+            uint8_t  buf[P2P_CELL_WIRE * 2];
+            size_t   wlen = 0;
+            size_t   n1 = 0, n2 = 0;
+
+            CK(exfil_task_chan_init(&t, K_A, K_B, PFX) == EXF_TASK_OK,
+               "用例11 旁路通道初始化");
+
+            exfil_task_cmd_t c11; exfil_task_ack_t a11;
+            memset(&c11, 0, sizeof c11);
+            memset(&a11, 0, sizeof a11);
+            c11.opcode = EXF_TASK_OP_START; c11.task_id = 2001;
+            a11.opcode = EXF_TASK_OP_START; a11.status  = EXF_TASK_ST_OK;
+            a11.task_id = 2001;
+
+            CK(exfil_task_seal_cmd(t.ks, t.pfx_frame, t.cell.send_counter, 1,
+                                   &c11, wire, sizeof wire, &wlen) == EXF_TASK_OK,
+               "用例11 旁路封命令");
+            printf("[INFO] 用例11 内层命令报文=%zu 字节\n", wlen);
+            CK(exfil_task_chan_send_raw(&t, sp[0], wire, wlen) == EXF_TASK_OK,
+               "用例11 命令写入旁路");
+            { size_t got = 0;
+              while (got < P2P_CELL_WIRE) {
+                  ssize_t r = read(sp[1], buf + got, P2P_CELL_WIRE - got);
+                  if (r <= 0) break;
+                  got += (size_t)r;
+              }
+              n1 = got; }
+
+            CK(exfil_task_seal_ack(t.ks, t.pfx_frame, t.cell.send_counter, 1,
+                                   &a11, wire, sizeof wire, &wlen) == EXF_TASK_OK,
+               "用例11 旁路封回执");
+            printf("[INFO] 用例11 内层回执报文=%zu 字节\n", wlen);
+            CK(exfil_task_chan_send_raw(&t, sp[0], wire, wlen) == EXF_TASK_OK,
+               "用例11 回执写入旁路");
+            { size_t got = 0;
+              while (got < P2P_CELL_WIRE) {
+                  ssize_t r = read(sp[1], buf + got, P2P_CELL_WIRE - got);
+                  if (r <= 0) break;
+                  got += (size_t)r;
+              }
+              n2 = got; }
+
+            CK(n1 == P2P_CELL_WIRE, "用例11 命令线上恒 512 字节");
+            CK(n2 == P2P_CELL_WIRE, "用例11 回执线上恒 512 字节");
+            CK(n1 == n2, "用例11 命令与回执长度不可区分（无长度指纹）");
+            exfil_task_chan_wipe(&t);
+            close(sp[0]); close(sp[1]);
+        }
+    }
+
+    /* ---- 用例12：方向密钥不退化（IV 重用回归守卫）----
+     *
+     * 早期版本把回执写成"用 kr 封、用 ks 解"，两端一折算，下行与上行
+     * 用的是同一把密钥；再叠加两方向计数器各自从 0 起、共用同一 pfx，
+     * 于是第一条命令与第一条回执在**同一密钥下 IV 完全相同** ——
+     * 两条密文异或即抵消密钥流，泄露明文异或（GCM 致命误用）。
+     *
+     * 本用例直接从密文侧取证：同一 pfx、同一 counter=0 下，
+     * 下行与上行密文的密钥流前缀必须不同。若退化成同一密钥，
+     * 前若干字节会逐字节相同，此断言即失败。
+     */
+    {
+        exfil_task_cmd_t c12; exfil_task_ack_t a12;
+        uint8_t w_cmd[512], w_ack[512];
+        size_t n_cmd = 0, n_ack = 0;
+        memset(&c12, 0, sizeof c12);
+        memset(&a12, 0, sizeof a12);
+        c12.opcode = EXF_TASK_OP_START; c12.task_id = 3001;
+        a12.opcode = EXF_TASK_OP_START; a12.status  = EXF_TASK_ST_OK;
+        a12.task_id = 3001;
+
+        /* 服务端视角：下行用 ks 封，上行（回执）对端用 kr 封 */
+        CK(exfil_task_seal_cmd(sv.ks, sv.pfx_frame, 0, 1, &c12,
+                               w_cmd, sizeof w_cmd, &n_cmd) == EXF_TASK_OK,
+           "用例12 封下行命令");
+        CK(exfil_task_seal_ack(sv.kr, sv.pfx_frame, 0, 1, &a12,
+                               w_ack, sizeof w_ack, &n_ack) == EXF_TASK_OK,
+           "用例12 封上行回执");
+        printf("[INFO] 用例12 下行=%zu 上行=%zu 字节\n", n_cmd, n_ack);
+
+        CK(memcmp(sv.ks, sv.kr, 16) != 0, "用例12 方向密钥本身不相等");
+        /* 密文区起始偏移：len(4) + msg_type(4) + pfx(8) + counter(4) = 20 */
+        CK(n_cmd > 32 && n_ack > 32, "用例12 报文长度足以取密钥流样本");
+        CK(memcmp(w_cmd + 20, w_ack + 20, 12) != 0,
+           "用例12 两方向密钥流不同（无 IV 重用）");
     }
 
     close(fd);
