@@ -9,6 +9,7 @@
  */
 
 #include "packer.h"
+#include "../src/pack_int.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -265,7 +266,7 @@ int main(void)
 
         o1 = (uint8_t *)malloc(sizeof(raw));
         o1len = sizeof(raw);
-        rc = pk_unpack(b1, b1len, seed_v1, sizeof(seed_v1), o1, &o1len);
+        rc = pk_unpack_core(b1, b1len, seed_v1, sizeof(seed_v1), o1, &o1len);
         CHECK(rc == PK_OK && o1len == sizeof(raw) &&
               memcmp(o1, raw, sizeof(raw)) == 0, "v1 解包往返一致");
 

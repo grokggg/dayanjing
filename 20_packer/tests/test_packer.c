@@ -6,6 +6,7 @@
  */
 
 #include "packer.h"
+#include "../src/pack_int.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -201,7 +202,7 @@ static void test_pack(void)
     rc = pk_pack(raw, raw_len, SEED, sizeof(SEED), blob, &blob_len);
     CHECK(rc == PK_OK, "pack 小载荷 ok");
     out_len = sizeof(raw) + 256;
-    rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+    rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
     CHECK(rc == PK_OK && out_len == raw_len && memcmp(out, raw, raw_len) == 0,
           "unpack 小载荷往返一致");
 
@@ -215,7 +216,7 @@ static void test_pack(void)
     CHECK(rc == PK_OK && (h.flags & PK_FLAG_COMPRESSED), "可压缩载荷置 COMPRESSED 标志");
     CHECK(blob_len < raw_len, "压缩后制品小于原始载荷");
     out_len = sizeof(raw) + 256;
-    rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+    rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
     CHECK(rc == PK_OK && out_len == raw_len && memcmp(out, raw, raw_len) == 0,
           "unpack 64KB 往返一致");
 
@@ -227,12 +228,12 @@ static void test_pack(void)
     rc |= pk_header_parse(blob, blob_len, &h);
     CHECK(rc == PK_OK && !(h.flags & PK_FLAG_COMPRESSED), "随机载荷回退原样不压缩");
     out_len = sizeof(raw) + 256;
-    rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+    rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
     CHECK(rc == PK_OK && out_len == raw_len && memcmp(out, raw, raw_len) == 0,
           "unpack 随机载荷往返一致");
 
     /* 11. 错误 seed */
-    rc = pk_unpack(blob, blob_len, SEED2, sizeof(SEED2), out, &out_len);
+    rc = pk_unpack_core(blob, blob_len, SEED2, sizeof(SEED2), out, &out_len);
     CHECK(rc == PK_ERR_AUTH, "错误 seed -> AUTH");
 
     /* 12. 篡改密文 */
@@ -243,18 +244,18 @@ static void test_pack(void)
         uint8_t save = blob[PK_HDR_LEN + 10];
         blob[PK_HDR_LEN + 10] ^= 0x01u;
         out_len = sizeof(raw) + 256;
-        rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+        rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
         CHECK(rc == PK_ERR_AUTH, "篡改密文 -> AUTH");
         blob[PK_HDR_LEN + 10] = save;
         out_len = sizeof(raw) + 256;
-        rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+        rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
         CHECK(rc == PK_OK, "还原密文 -> 恢复可用");
     }
 
     /* 13. 篡改 tag */
     blob[60 + 3] ^= 0x80u;
     out_len = sizeof(raw) + 256;
-    rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+    rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
     CHECK(rc == PK_ERR_AUTH, "篡改 tag -> AUTH");
 
     /* 14~17. 篡改头部（全部进 AAD，必须被拒） */
@@ -287,7 +288,7 @@ static void test_pack(void)
         uint8_t sv = blob[32];
         blob[32] ^= 0x01u;
         out_len = sizeof(raw) + 256;
-        rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+        rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
         CHECK(rc == PK_ERR_AUTH, "篡改 salt -> AUTH（salt 在 AAD 内）");
         blob[32] = sv;
     }
@@ -295,7 +296,7 @@ static void test_pack(void)
         uint8_t sv = blob[12];
         blob[12] ^= 0x01u;   /* flags 位 */
         out_len = sizeof(raw) + 256;
-        rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+        rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
         CHECK(rc == PK_ERR_AUTH, "篡改 flags -> AUTH（flags 在 AAD 内）");
         blob[12] = sv;
     }
@@ -306,7 +307,7 @@ static void test_pack(void)
 
     /* 19. 输出缓冲不足 */
     out_len = 8;
-    rc = pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
+    rc = pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len);
     CHECK(rc == PK_ERR_NOMEM, "解包缓冲不足 -> NOMEM");
 
     /* 20/21. 参数校验 */
@@ -417,7 +418,7 @@ static void test_mexec(void)
         CHECK(pk_pack(elf, elf_len, SEED, sizeof(SEED), blob, &blob_len) == PK_OK,
               "ELF 打包 ok");
         out_len = elf_len + 256;
-        CHECK(pk_unpack(blob, blob_len, SEED, sizeof(SEED), out, &out_len) == PK_OK &&
+        CHECK(pk_unpack_core(blob, blob_len, SEED, sizeof(SEED), out, &out_len) == PK_OK &&
               out_len == elf_len && memcmp(out, elf, elf_len) == 0,
               "ELF 解包字节级一致");
 

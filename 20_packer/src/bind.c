@@ -96,7 +96,7 @@ int pk_pack_session(const uint8_t *raw, size_t raw_len,
     if (rc != PK_OK) { memset(seed, 0, sizeof(seed)); return rc; }
 
     rc = pk_pack_core(raw, raw_len, seed, sizeof(seed),
-                      PK_VERSION2, bid, out, out_len);
+                      PK_VERSION2, bid, 0, NULL, out, out_len);
 
     memset(seed, 0, sizeof(seed));
     return rc;

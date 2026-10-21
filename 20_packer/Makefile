@@ -7,10 +7,11 @@ LDFLAGS ?=
 
 BUILD    := build
 CRYPTDIR := ../00_crypto
-CRYPT_SRC := $(CRYPTDIR)/src/crypto_gcm.c $(CRYPTDIR)/src/crypto_hash.c
-CRYPT_OBJ := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o
+CRYPT_SRC := $(CRYPTDIR)/src/crypto_gcm.c $(CRYPTDIR)/src/crypto_hash.c $(CRYPTDIR)/src/crypto_x25519.c
+CRYPT_OBJ := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
 
-SRC     := src/lzss.c src/pack.c src/bind.c src/mexec.c
+SRC     := src/lzss.c src/pack.c src/bind.c src/mexec.c \
+           src/binding.c src/keyrot.c src/artifact.c
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o) $(CRYPT_OBJ)
 
 TESTSRC := tests/test_packer.c
@@ -20,13 +21,20 @@ TESTBIN := $(BUILD)/test_packer
 BINDSRC := tests/test_bind.c
 BINDBIN := $(BUILD)/test_bind
 
+# v3 制品单元测试：规范化绑定 + 纪元联动 + 前向保密
+V3SRC := tests/test_v3.c
+V3BIN := $(BUILD)/test_v3
+
 # mexec 真机验证目标：静态链接，避免 execveat 后再依赖动态加载器
 TARGETSRC := tests/mexec_target.c
 TARGETBIN := $(BUILD)/mexec_target
 
 .PHONY: all test clean inspect static
 
-all: $(TESTBIN) $(BINDBIN) $(INTGBIN)
+# 注意：GNU make 在读取阶段即展开规则依赖，而 $(INTGBIN)/$(V3BIN) 定义在
+# 本文件后部。此处写显式路径，避免展开成空导致目标被静默跳过。
+all: $(BUILD)/test_packer $(BUILD)/test_bind \
+     $(BUILD)/test_c2_packer $(BUILD)/test_v3
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -47,6 +55,9 @@ $(TESTBIN): $(OBJ) $(TESTSRC) $(TARGETBIN) | $(BUILD)
 $(BINDBIN): $(OBJ) $(BINDSRC) | $(BUILD)
 	$(CC) $(CFLAGS) $(OBJ) $(BINDSRC) -o $@ $(LDFLAGS)
 
+$(V3BIN): $(OBJ) $(V3SRC) | $(BUILD)
+	$(CC) $(CFLAGS) $(OBJ) $(V3SRC) -o $@ $(LDFLAGS)
+
 # 与 02_c2 联编：真实会话密钥 -> 制品绑定 -> 解包
 C2DIR   := ../02_c2
 C2OBJ   := $(BUILD)/c2.o $(BUILD)/c2_frame.o
@@ -62,10 +73,12 @@ $(BUILD)/c2_frame.o: $(C2DIR)/src/c2_frame.c | $(BUILD)
 $(INTGBIN): $(OBJ) $(C2OBJ) $(INTGSRC) | $(BUILD)
 	$(CC) $(CFLAGS) -I$(C2DIR)/include $(OBJ) $(C2OBJ) $(INTGSRC) -o $@ $(LDFLAGS)
 
-test: $(TESTBIN) $(BINDBIN) $(INTGBIN)
+test: $(BUILD)/test_packer $(BUILD)/test_bind \
+      $(BUILD)/test_c2_packer $(BUILD)/test_v3
 	./$(TESTBIN)
 	./$(BINDBIN)
 	./$(INTGBIN)
+	./$(V3BIN)
 
 static: CFLAGS += -static
 static: clean $(TESTBIN)

