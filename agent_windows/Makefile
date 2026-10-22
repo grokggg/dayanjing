@@ -16,15 +16,20 @@
 CC       ?= cc
 CXX      ?= g++
 
-CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude
+# defend_win.c 复用 17_loader 的 PE 导出解析与 19_defense 的桩字节，
+# 不重复实现这两层，因此构建时需要带上它们的头文件与对应源文件。
+DEP_I    := -I../17_loader/include -I../19_defense/include
+CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I)
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
 BUILD     := build/linux
-PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c
+PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c src/defend_win.c
 PORT_OBJS := $(PORT_SRCS:src/%.c=$(BUILD)/%.o)
 
-TESTS     := test_pipeline test_linux_extra test_implant
+DEP_OBJS  := $(BUILD)/dep/loader_pe.o $(BUILD)/dep/defense_evade.o
+
+TESTS     := test_pipeline test_linux_extra test_implant test_defend_win
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
 .PHONY: all test clean win dirs
@@ -37,9 +42,18 @@ dirs:
 $(BUILD)/%.o: src/%.c include/camera.h | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# 每个测试二进制 = 该测试源码 + 跨平台内核源码
-$(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) | dirs
-	$(CC) $(CFLAGS) $< $(PORT_OBJS) -o $@ $(LDLIBS)
+# 复用的外部模块目标文件（17_loader 的 PE 解析 / 19_defense 的桩字节）
+$(BUILD)/dep/loader_pe.o: ../17_loader/src/pe.c | dirs
+	@mkdir -p $(BUILD)/dep
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/dep/defense_evade.o: ../19_defense/src/evade.c | dirs
+	@mkdir -p $(BUILD)/dep
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 每个测试二进制 = 该测试源码 + 跨平台内核源码 + 复用的外部模块
+$(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) $(DEP_OBJS) | dirs
+	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) -o $@ $(LDLIBS)
 
 test: $(TEST_BINS)
 	@fail=0; \
