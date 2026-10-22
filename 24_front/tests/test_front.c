@@ -159,9 +159,17 @@ static void t_request_shape(void) {
     front_free(c);
 }
 
+/* 真机部分需要出网；不可达时整体返回 77（环境不具备），
+   既不冒认通过，也不算作代码缺陷。 */
+static int real_skipped = 0;
+
 static void t_real_fronting(void) {
     int fd = tcp_connect(FRONT_DOMAIN);
-    if (fd < 0) { printf("[SKIP] 无法连接前置域 %s:443\n", FRONT_DOMAIN); return; }
+    if (fd < 0) {
+        printf("[SKIP] 无法连接前置域 %s:443\n", FRONT_DOMAIN);
+        real_skipped = 1;
+        return;
+    }
     io_ctx io; memset(&io, 0, sizeof(io)); io.fd = fd;
 
     front_ctx *c = NULL;
@@ -173,7 +181,7 @@ static void t_real_fronting(void) {
     cfg.verify       = 1;
 
     if (front_init(&c, &cfg, sock_send, sock_recv, &io) != FRONT_OK) {
-        printf("[SKIP] front_init 失败\n"); close(fd); return;
+        printf("[SKIP] front_init 失败\n"); real_skipped = 1; close(fd); return;
     }
     front_err fe = front_connect(c);
     printf("[INFO] front_connect: %s\n", front_errstr(fe));
@@ -202,5 +210,7 @@ int main(void) {
     t_request_shape();
     t_real_fronting();
     printf("\n=== %d/%d passed ===\n", total - fails, total);
-    return fails == 0 ? 0 : 1;
+    if (fails != 0) return 1;
+    if (real_skipped) return 77;      /* 真机部分未跑：记为环境不具备 */
+    return 0;
 }

@@ -13,6 +13,18 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* 素材目录由 Makefile 以绝对路径注入：全仓回归脚本是从仓库根目录调用
+   可执行文件的，用相对路径会找不到素材，表现为"莫名其妙少了几条用例"。
+   把路径固定住，任何工作目录下行为一致。 */
+#ifndef TLS_TESTDATA
+#define TLS_TESTDATA "tests/data"
+#endif
+static const char *TD(const char *name) {
+    static char buf[512];
+    snprintf(buf, sizeof(buf), "%s/%s", TLS_TESTDATA, name);
+    return buf;
+}
+
 static int fails = 0;
 static int total = 0;
 
@@ -102,10 +114,10 @@ static uint8_t *read_file(const char *path, size_t *len) {
 /* 与 OpenSSL 互操作：验证 openssl dgst -sha256 -sign 产生的签名 */
 static void t_rsa_openssl_sig(void) {
     size_t nlen = 0, elen = 0, slen = 0, mlen = 0;
-    uint8_t *nb = read_file("tests/data/rsa_n.bin", &nlen);
-    uint8_t *eb = read_file("tests/data/rsa_e.bin", &elen);
-    uint8_t *sb = read_file("tests/data/rsa_sig.bin", &slen);
-    uint8_t *mb = read_file("tests/data/rsa_msg.bin", &mlen);
+    uint8_t *nb = read_file(TD("rsa_n.bin"), &nlen);
+    uint8_t *eb = read_file(TD("rsa_e.bin"), &elen);
+    uint8_t *sb = read_file(TD("rsa_sig.bin"), &slen);
+    uint8_t *mb = read_file(TD("rsa_msg.bin"), &mlen);
     if (!nb || !eb || !sb || !mb) {
         printf("[SKIP] openssl 交叉验证素材缺失（先跑 scripts/gen_testdata.sh）\n");
         return;
