@@ -88,7 +88,7 @@ export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
          08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
          14_p2p 16_initial_access 17_loader 18_privilege 19_defense 20_packer \
-         21_exfil 22_kern 23_lkm 24_front 25_tls agent_windows; do
+         21_exfil 22_kern 23_lkm 24_front 25_tls 26_lateral_auto agent_windows; do
     run_c "$m"
 done
 
