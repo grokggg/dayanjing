@@ -118,6 +118,10 @@ run_py 13_c2_server_cache 13_c2_server/tests/test_session_cache.py
 run_py 13_c2_server_resume 13_c2_server/tests/test_session_resume.py
 run_py 13_c2_server_seqin 13_c2_server/tests/test_seq_in.py
 
+# 真实第三方软件漏洞挖掘：Pillow _imagingcms 堆溢出探测工具自检
+# 只验证工具逻辑（偏移/版本判定/指针构造），不触发崩溃（触发需受影响版本）
+run_py 12_exploit_pillowcms 12_exploit/tests/test_pillow_cms.py
+
 # Windows 后端 cam_mf.cpp 的逻辑验证。MinGW 不可得（apt/release 均 403），
 # 改用 SDK shim 在 Linux 下真实编译并用 mock 设备真跑其逻辑。
 echo "=== winshim_mf ==="
