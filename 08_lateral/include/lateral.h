@@ -20,6 +20,10 @@ int lat_scan_tcp(const char *host, const int *ports, size_t n, int timeout_ms,
 #define LAT_PLAT_NIX 2
 #define LAT_NAME_MAX 16
 
+/* 连接目标时的 DNS 解析超时（毫秒）。
+   传给 p2p_resolve_sa；不含 connect 本身的超时。 */
+#define LAT_PROXY_RESOLV_TIMEOUT_MS 3000
+
 typedef struct {
     char   name[LAT_NAME_MAX];
     int    platform;

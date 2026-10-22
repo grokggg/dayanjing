@@ -1,5 +1,5 @@
 CC ?= cc
-CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -I../14_p2p/include
 BUILD := build
 LDLIBS ?=
 

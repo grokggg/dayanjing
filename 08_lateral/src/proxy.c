@@ -20,7 +20,7 @@
 #include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+#include "p2p_resolv.h"
 #include <poll.h>
 #include <unistd.h>
 #include <errno.h>
@@ -99,30 +99,37 @@ void lat_proxy_close(lat_proxy_t *p) {
     }
 }
 
-/* ---- 连接目标（阻塞） ---- */
+/* ---- 连接目标（阻塞） ----
+ *
+ * 用自研 A 记录解析（14_p2p/src/resolv.c），不用 getaddrinfo。
+ *
+ * 为什么必须换掉 getaddrinfo：静态链接 glibc 时它会带入整套 NSS 机制
+ * （__libc_dlopen_mode / nss_* 系列符号，以及 /etc/passwd 字符串）。
+ * 这些既是动态依赖特征也是静态字符串特征，直接破坏"零依赖、无指纹"。
+ * 实测：仅此一个文件就让单体产物多出 146 个 NSS 符号和 1 处 /etc/passwd。
+ *
+ * 依赖方向：resolv.c 是叶子原语（不依赖任何模块），因此
+ *   relay.c(14_p2p) -> proxy.c(08_lateral) -> resolv.c(14_p2p)
+ * 是文件级无环图，不构成模块循环。
+ *
+ * 仅支持 IPv4：ATYP 0x04 已在 handshake 中返回 0x08（地址类型不支持）拒绝。
+ */
 int lat_proxy_connect(const char *host, int port) {
     if (!host || port <= 0 || port > 65535) return -1;
 
-    char portstr[16];
-    snprintf(portstr, sizeof portstr, "%d", port);
+    /* resolver 传 NULL：来源优先级为 P2P_RESOLVER 环境变量 > /etc/resolv.conf。
+       主机名若已是点分十进制 IPv4，内部直接返回，不发起任何 DNS 查询。 */
+    struct sockaddr_in sa;
+    if (p2p_resolve_sa(host, (uint16_t)port, NULL,
+                       LAT_PROXY_RESOLV_TIMEOUT_MS, &sa) != P2P_RESOLV_OK)
+        return -1;
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return -1;
-
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    if (connect(fd, (const struct sockaddr *)&sa, sizeof sa) != 0) {
         close(fd);
-        fd = -1;
+        return -1;
     }
-    freeaddrinfo(res);
     return fd;
 }
 
