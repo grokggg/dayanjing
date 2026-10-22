@@ -6,6 +6,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 failed=0
 passed=0
+skipped=0
 
 # 单个测试用例的超时（秒）。默认 120 足够绝大多数单测。
 # 例外必须写明理由：12_exploit 的 canary/PIE 爆破是**逐字节试探**，
@@ -33,7 +34,17 @@ run_c() {
     ok=1
     # 只取可执行文件，排除 .c/.o（.o 也会被 -perm -u+x 误匹配）
     for t in $(find "$d/build" -type f -name 'test_*' ! -name '*.c' ! -name '*.o' -perm -u+x 2>/dev/null | sort); do
-        if ! timeout "$(tmo_for "$name")" "$t" >/tmp/t_$name.log 2>&1; then
+        timeout "$(tmo_for "$name")" "$t" >/tmp/t_$name.log 2>&1
+        rc=$?
+        if [ $rc -eq 77 ]; then
+            # 退出码 77 = 环境不具备（如无 root 读不了 /proc/kcore）。
+            # 记为 SKIP：既不冒认通过，也不算作代码缺陷。
+            echo "SKIP -> $(basename "$t")"
+            grep -E '^\[SKIP\]' /tmp/t_$name.log | head -2
+            skipped=$((skipped+1))
+            continue
+        fi
+        if [ $rc -ne 0 ]; then
             ok=0
             echo "FAIL -> $t"
             tail -6 /tmp/t_$name.log
@@ -71,7 +82,7 @@ run_py() {
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
          08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
          14_p2p 16_initial_access 17_loader 18_privilege 19_defense 20_packer \
-         21_exfil agent_windows; do
+         21_exfil 22_kern agent_windows; do
     run_c "$m"
 done
 
@@ -155,5 +166,5 @@ else
     echo "=== deploy_crossns   SKIP(无 root/netns 能力) ==="
 fi
 
-echo "-------- passed: $passed  failed: $failed --------"
+echo "-------- passed: $passed  failed: $failed  skipped: $skipped --------"
 exit $failed

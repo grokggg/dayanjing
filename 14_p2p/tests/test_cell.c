@@ -128,32 +128,87 @@ int main(void) {
         check(cmd == P2P_CELL_CMD_PAD && dl == 0, "覆盖信元 cmd=PAD 且载荷为空");
     }
 
-    /* ---- 6. 篡改 / 密钥错误 / 重放 ---- */
+    /* ---- 6. 篡改：必须用独立的一对 ctx ----
+     *
+     * 验签失败同样推进接收计数——流位置确实前进了 1。若不推进，一个坏字节
+     * 就会让收发双方永久失步、整条链路报废（IV = pfx||counter 是位置相关的）。
+     * 代价：被拒的计数位不会回补，故本组绝不能与后续重放用例共用 ctx
+     * （共用会因计数错位而误判，这正是本用例此前失败的原因）。
+     * 恢复能力由 test_cell_resync 专项验证。 */
     {
+        p2p_cell_ctx_t A6, B6;
+        p2p_cell_init(&A6, ks, kr, pfx);
+        p2p_cell_init(&B6, kr, ks, pfx);
+
         uint8_t cell[P2P_CELL_WIRE];
         uint8_t d[16];
         memset(d, 0x33, sizeof d);
-        p2p_cell_pack(&A, P2P_CELL_CMD_DATA, d, sizeof d, cell);
+        p2p_cell_pack(&A6, P2P_CELL_CMD_DATA, d, sizeof d, cell);
 
         uint8_t bad[P2P_CELL_WIRE];
         memcpy(bad, cell, P2P_CELL_WIRE);
         bad[0] ^= 0x01;
         uint8_t cmd = 0; size_t dl = 0;
-        check(p2p_cell_unpack(&B, bad, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
+        check(p2p_cell_unpack(&B6, bad, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
               "篡改密文 -> AUTH");
 
         memcpy(bad, cell, P2P_CELL_WIRE);
         bad[P2P_CELL_WIRE - 1] ^= 0x01;   /* 改 tag */
-        check(p2p_cell_unpack(&B, bad, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
+        check(p2p_cell_unpack(&B6, bad, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
               "篡改 tag -> AUTH");
 
-        /* 重放：同一个信元送两次 */
-        check(p2p_cell_unpack(&B, cell, &cmd, NULL, 0, &dl) == P2P_CELL_OK,
+        /* 上面两次"篡改"是额外注入——A 从未发送过它们，其计数没有前进，
+         * 而 B 每收一个都推进，于是永远差 1，永不恢复。这是正确行为：
+         * 第三方注入坏信元本就该由上层容忍计数判为 FATAL 并断链，
+         * 而不是指望链路自愈（见 21_exfil 的 exfil_tol）。
+         *
+         * 真正要验证的是「线上损坏」：A 确实发过、内容在线上被改坏。
+         * 此时 A 的计数已推进，B 只有跟着推进才能对齐后续信元。 */
+    }
+    {
+        p2p_cell_ctx_t A7, B7;
+        p2p_cell_init(&A7, ks, kr, pfx);
+        p2p_cell_init(&B7, kr, ks, pfx);
+
+        uint8_t d[16];
+        memset(d, 0x33, sizeof d);
+        uint8_t c0[P2P_CELL_WIRE], c1[P2P_CELL_WIRE], c2[P2P_CELL_WIRE];
+        p2p_cell_pack(&A7, P2P_CELL_CMD_DATA, d, sizeof d, c0);
+        p2p_cell_pack(&A7, P2P_CELL_CMD_DATA, d, sizeof d, c1);
+        p2p_cell_pack(&A7, P2P_CELL_CMD_DATA, d, sizeof d, c2);
+
+        uint8_t cmd = 0; size_t dl = 0;
+        check(p2p_cell_unpack(&B7, c0, &cmd, NULL, 0, &dl) == P2P_CELL_OK,
+              "损坏前：首个信元正常投递");
+
+        uint8_t bad[P2P_CELL_WIRE];
+        memcpy(bad, c1, P2P_CELL_WIRE);
+        bad[0] ^= 0x01;
+        check(p2p_cell_unpack(&B7, bad, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
+              "线上损坏的信元被拒（非静默接受）");
+
+        check(p2p_cell_unpack(&B7, c2, &cmd, NULL, 0, &dl) == P2P_CELL_OK,
+              "线上损坏后后续信元可恢复（推进计数的作用）");
+        check(dl == sizeof d, "恢复后的信元载荷长度正确");
+    }
+
+    /* ---- 6b. 重放 / 错误密钥：另起一对干净的 ctx ---- */
+    {
+        p2p_cell_ctx_t A6b, B6b;
+        p2p_cell_init(&A6b, ks, kr, pfx);
+        p2p_cell_init(&B6b, kr, ks, pfx);
+
+        uint8_t cell[P2P_CELL_WIRE];
+        uint8_t d[16];
+        memset(d, 0x33, sizeof d);
+        p2p_cell_pack(&A6b, P2P_CELL_CMD_DATA, d, sizeof d, cell);
+
+        uint8_t cmd = 0; size_t dl = 0;
+        check(p2p_cell_unpack(&B6b, cell, &cmd, NULL, 0, &dl) == P2P_CELL_OK,
               "首次投递成功");
-        check(p2p_cell_unpack(&B, cell, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
+        check(p2p_cell_unpack(&B6b, cell, &cmd, NULL, 0, &dl) == P2P_CELL_ERR_AUTH,
               "重放同一信元 -> AUTH（计数器前进导致 IV 不匹配）");
 
-        /* 错误密钥 */
         uint8_t wrong[16];
         memset(wrong, 0x55, 16);
         p2p_cell_ctx_t W;
