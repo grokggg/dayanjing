@@ -41,6 +41,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
@@ -807,6 +808,19 @@ static int run_selftest(const mono_cfg_t *cfg)
         uint64_t fr = 0;
         int r;
         close(sp_cmd[0]); close(sp_data[0]);
+        /*
+         * 两件事必须做，否则会留下"命令挂死"：
+         *   setsid()  —— 脱离父进程组。否则本进程属于上层（shell / 回归脚本）
+         *                的前台进程组，父进程先退出后，上层仍然会等它，
+         *                表现为命令永不返回。
+         *   PDEATHSIG —— 父进程若被 SIGKILL（超时、运维误杀、OOM），内核
+         *                直接给本进程送 SIGKILL。没有这条，父进程被强杀后
+         *                本进程变成孤儿，继续持有它继承的 fd，上层等 EOF 挂死。
+         *                这类故障的现象是"命令卡住"，与业务逻辑毫无关系，
+         *                极难定位。
+         */
+        setsid();
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
         alarm(60);
         r = hs_server(sp_cmd[1], cfg, &sk, pfx_s, tsc, iid, sizeof iid);
         if (r != 0) {
@@ -837,12 +851,33 @@ static int run_selftest(const mono_cfg_t *cfg)
 
     close(sp_cmd[0]); close(sp_data[0]);
 
-    /* 兜底：若子进程因故未自行结束，先请它退出，避免留下孤儿进程
-     * 持有管道 —— 那会让上层（shell/回归脚本）永远等不到 EOF。 */
+    /*
+     * 确定性收尾。三条必须同时做对，缺一条就会出现假阳性或挂死：
+     *
+     *  1) st 必须显式标记"是否真的回收到子进程"。
+     *     st 初值 0 恰好编码了"正常退出、状态码 0"。若 waitpid 因任何原因
+     *     没拿到状态（ECHILD、被信号打断），就会被误判成子进程成功 ——
+     *     这是最危险的假阳性：服务端明明失败了，selftest 却报 PASS。
+     *
+     *  2) 超时后杀整个进程组（子进程已 setsid，pgid == pid），
+     *     确保孙进程一并清掉，随后阻塞 waitpid 收尸，不留僵尸。
+     *
+     *  3) 无法确认子进程状态时返回错误，绝不报成功。
+     */
     {
-        int i;
-        for (i = 0; i < 20 && waitpid(pid, &st, WNOHANG) == 0; i++) usleep(50000);
-        if (waitpid(pid, &st, WNOHANG) == 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); }
+        int reaped = 0, i;
+        for (i = 0; i < 60; i++) {              /* 最多 3 秒 */
+            pid_t w = waitpid(pid, &st, WNOHANG);
+            if (w == pid) { reaped = 1; break; }
+            if (w < 0) break;                   /* 无从回收：不假装成功 */
+            usleep(50000);
+        }
+        if (!reaped) {
+            kill(-pid, SIGKILL);                /* 子进程 setsid 后 pgid==pid */
+            kill(pid, SIGKILL);
+            if (waitpid(pid, &st, 0) == pid) reaped = 1;
+        }
+        if (!reaped) return -406;
     }
 
     if (rc != 0) return rc;
