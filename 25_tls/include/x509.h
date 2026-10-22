@@ -37,18 +37,30 @@ typedef struct {
     char cn[X509_NAME_MAX];
     char san[X509_SAN_MAX][X509_NAME_MAX];
     int  san_n;
+    /* basicConstraints 的 cA 标志。
+     *  1 = 明确 CA:TRUE， 0 = 明确 CA:FALSE， -1 = 扩展缺失（老式证书）
+     * 缺失时按"允许"处理是刻意的兼容取舍，但明确 CA:FALSE 的证书绝不能当签发者：
+     * 不检查这一项，攻击者拿一张普通服务器证书就能签出任意域名 —— 现实中的真实漏洞。 */
+    int  is_ca;
 } x509_cert;
 
+/* der 改为堆分配：整张证书最长 8192 字节，内联进 entry 会让单个
+ * x509_store 达到 160 × 11KB ≈ 1.7MB。调用方在栈上声明两三个 store 就会爆栈，
+ * 而且崩溃点与调用点无关，极难排查。现在 store 本体只有指针 + 计数。 */
 typedef struct {
-    uint8_t   der[X509_DER_MAX];
+    uint8_t  *der;           /* 堆分配副本，长度 = der_len */
     size_t    der_len;
     x509_cert c;
 } x509_entry;
 
 typedef struct {
-    x509_entry e[X509_STORE_MAX];
-    int        n;
+    x509_entry *e;           /* 懒分配：X509_STORE_MAX 个，首次写入时申请 */
+    int         n;
 } x509_store;
+
+/* 显式初始化/释放。也可以直接 memset 为 0 后使用：写入路径会懒分配，
+ * 因此既有调用方式不受影响（不强制调用方补 init）。 */
+void x509_store_free(x509_store *st);
 
 typedef enum {
     X509_OK = 0,
@@ -59,6 +71,7 @@ typedef enum {
     X509_ERR_EXPIRED,    /* 有效期外 */
     X509_ERR_HOST,       /* 主机名不匹配 */
     X509_ERR_RANGE,      /* 超出容量 */
+    X509_ERR_MEM,        /* 分配失败 */
     X509_ERR_IO          /* 读取信任库失败 */
 } x509_err;
 

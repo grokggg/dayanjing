@@ -24,6 +24,7 @@ const char *x509_errstr(x509_err e) {
     case X509_ERR_EXPIRED: return "certificate expired or not yet valid";
     case X509_ERR_HOST:  return "hostname mismatch";
     case X509_ERR_RANGE: return "capacity exceeded";
+    case X509_ERR_MEM:   return "out of memory";
     case X509_ERR_IO:    return "trust store unreadable";
     }
     return "unknown";
@@ -123,6 +124,40 @@ static void parse_san(const der_buf *extnval, x509_cert *c) {
     }
 }
 
+/* basicConstraints (2.5.29.19)：只取 cA 布尔。
+ * 取不到就按 DEFAULT FALSE 记 0 —— 扩展存在却不带 cA，语义上就是非 CA。
+ * 扩展整体缺失时保持 -1（由调用方决定，见 x509_cert.is_ca 的注释）。
+ * 这里手工解 TLV 而不复用 der_read_tlv：extnValue 这一层的偏移语义在调用链
+ * 上容易搞错，写错了不会报错，只会静默解析出错误的 cA 值。 */
+static void parse_basic_constraints(const der_buf *v, x509_cert *c) {
+    const uint8_t *p = v->p;
+    size_t n = v->len;
+    if (n < 2) return;
+    /* 兼容两种传入形态：已剥壳的 DER，或还带着 OCTET STRING 头 */
+    if (p[0] == ASN1_OCTET_STRING) {
+        size_t i = 1, l = 0;
+        if (p[i] < 0x80) { l = p[i]; i += 1; }
+        else if (p[i] == 0x81) { l = p[i + 1]; i += 2; }
+        else if (p[i] == 0x82) { l = ((size_t)p[i + 1] << 8) | p[i + 2]; i += 3; }
+        else return;
+        if (i + l > n) return;
+        p += i; n = l;
+    }
+    if (n < 2 || p[0] != ASN1_SEQUENCE) return;
+    size_t i = 1, l = 0;
+    if (p[i] < 0x80) { l = p[i]; i += 1; }
+    else if (p[i] == 0x81) { l = p[i + 1]; i += 2; }
+    else if (p[i] == 0x82) { l = ((size_t)p[i + 1] << 8) | p[i + 2]; i += 3; }
+    else return;
+    if (i + l > n) l = n - i;
+    /* SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLen INTEGER OPTIONAL } */
+    if (l >= 3 && p[i] == 0x01 && p[i + 1] == 0x01) {
+        c->is_ca = p[i + 2] ? 1 : 0;
+        return;
+    }
+    c->is_ca = 0;
+}
+
 static x509_err parse_extensions(const der_buf *exts, x509_cert *c) {
     /* extensions 是 [3] EXPLICIT SEQUENCE OF Extension */
     if (exts->len < 2 || exts->p[0] != ASN1_SEQUENCE) return X509_ERR_PARSE;
@@ -145,6 +180,7 @@ static x509_err parse_extensions(const der_buf *exts, x509_cert *c) {
         if (der_expect(ext.p, ext.len, &o3, 0x01, &crit) != ASN1_OK) o3 = save;
         if (der_expect(ext.p, ext.len, &o3, ASN1_OCTET_STRING, &val) != ASN1_OK) continue;
         if (der_oid_eq(&oid, "2.5.29.17")) parse_san(&val, c);
+        else if (der_oid_eq(&oid, "2.5.29.19")) parse_basic_constraints(&val, c);
     }
     return X509_OK;
 }
@@ -153,6 +189,7 @@ x509_err x509_parse(const uint8_t *der, size_t len, x509_cert *c) {
     if (!der || !c || len < 32) XF(X509_ERR_PARSE);
     memset(c, 0, sizeof(*c));
     c->der = der;
+    c->is_ca = -1;          /* 扩展缺失；明确写出来的才置 1/0 */
     c->der_len = len;
     c->san_n = 0;
 
@@ -333,13 +370,38 @@ static int b64_decode(const char *in, size_t len, uint8_t *out, size_t cap, size
     return 0;
 }
 
+void x509_store_free(x509_store *st) {
+    if (!st || !st->e) return;
+    for (int i = 0; i < st->n; i++) free(st->e[i].der);
+    free(st->e);
+    st->e = NULL;
+    st->n = 0;
+}
+
 x509_err x509_store_add_der(x509_store *st, const uint8_t *der, size_t len) {
-    if (st->n >= X509_STORE_MAX) return X509_ERR_RANGE;
+    if (!st || !der) return X509_ERR_PARSE;
     if (len > X509_DER_MAX) return X509_ERR_RANGE;
+    /* 懒分配：调用方可以直接 memset 为 0 后使用，不必先调 init。
+     * store 本体若内联 160 个 entry（每个含 8KB der）会是约 1.7MB，
+     * 在栈上声明两三个就爆栈，且崩溃点与调用点无关。 */
+    if (!st->e) {
+        st->e = calloc(X509_STORE_MAX, sizeof(*st->e));
+        if (!st->e) return X509_ERR_MEM;
+        st->n = 0;
+    }
+    if (st->n >= X509_STORE_MAX) return X509_ERR_RANGE;
+    uint8_t *copy = malloc(len ? len : 1);
+    if (!copy) return X509_ERR_MEM;
+    memcpy(copy, der, len);
     x509_entry *e = &st->e[st->n];
-    memcpy(e->der, der, len);
+    e->der = copy;
     e->der_len = len;
-    if (x509_parse(e->der, len, &e->c) != X509_OK) return X509_ERR_PARSE;
+    if (x509_parse(e->der, len, &e->c) != X509_OK) {
+        free(copy);
+        e->der = NULL;
+        e->der_len = 0;
+        return X509_ERR_PARSE;
+    }
     st->n++;
     return X509_OK;
 }
@@ -405,6 +467,10 @@ x509_err x509_verify_chain(const x509_cert *chain, int n,
             }
         }
         if (!issuer) return X509_ERR_CHAIN;
+        /* 明确写着 CA:FALSE 的证书不能充当签发者。
+         * 少了这道检查，一张普通服务器证书就能签出任意域名。
+         * is_ca == -1（扩展缺失，老式证书）按允许处理，是刻意的兼容取舍。 */
+        if (issuer->is_ca == 0) return X509_ERR_CHAIN;
         x509_err e = x509_verify_signed_by(&chain[i], issuer);
         if (e != X509_OK) return e;
         /* 链必须由信任锚收尾：中间证书自己签自己不算可信 */

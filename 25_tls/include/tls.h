@@ -44,6 +44,8 @@ typedef int (*tls_recv_cb)(void *arg, uint8_t *buf, size_t cap);
 typedef struct {
     const char *sni;         /* 写入 SNI 扩展的域名（观察者可见） */
     const char *verify_host; /* 证书主机名校验用；NULL 表示与 sni 相同 */
+    const char *alpn;        /* ALPN 通告的协议名，如 "h2"；NULL = 不发 ALPN。
+                                走 HTTP/2 必须给 "h2"，否则对端降级到 HTTP/1.1 */
     const char *ca_path;     /* 信任库 PEM；NULL 表示不校验证书 */
     int         verify;      /* 1 = 校验证书链与主机名 */
 } tls_config;

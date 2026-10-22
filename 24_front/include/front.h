@@ -37,6 +37,7 @@ typedef struct {
     const char *ca_path;        /* 信任库；NULL 表示不校验 */
     int         verify;         /* 1 = 校验证书链与主机名 */
     uint64_t    rng_seed;       /* 非 0 = 确定性路径抖动（测试用） */
+    int         http2;          /* 0 = HTTP/1.1，1 = HTTP/2（h2 需前置域支持） */
 } front_config;
 
 typedef struct front_ctx front_ctx;
@@ -58,5 +59,26 @@ front_err front_build_request(front_ctx *c, const uint8_t *frame, size_t len,
 
 /* 诊断：最近一次请求使用的路径 */
 int front_last_path(const front_ctx *c, char *out, size_t cap);
+
+/* 诊断：最近一次响应的状态码（h1 与 h2 一致语义） */
+int front_last_status(const front_ctx *c);
+
+/* ---- 自适应退避 ----
+ *
+ * 退避时长由实测 RTT 导出，不是常数。固定退避有两个后果，都是真实故障：
+ *   1. 惊群 —— 一批植入体在 CDN 故障后同时重试，链路上表现为"静默—同步爆发"，
+ *      这本身就是可提取的事件特征。故用全抖动（0.5W + rand[0,0.5W)）。
+ *   2. 退避造成的静默无人填充 —— 本层不发包，静默就暴露在链路上。
+ *      故把应等待的毫秒数暴露给调用方，交给覆盖层（14_p2p cover）去填。
+ *
+ * 本层只算时长，不 sleep：sleep 会让测试只能靠实时期待，既慢又不可复现。
+ */
+void     front_note_fail(front_ctx *c);
+void     front_note_success(front_ctx *c, uint64_t rtt_us);
+uint64_t front_backoff_ms(front_ctx *c);
+uint64_t front_rtt_ewma_us(const front_ctx *c);
+
+/* 退避上限（毫秒）：超过即不再加窗，避免链路断了以后永远不重试 */
+#define FRONT_BACKOFF_MAX_MS 30000
 
 #endif /* FRONT_H */

@@ -93,6 +93,7 @@ struct tls_ctx {
     int       anchors_loaded;
 
     char sni[256];
+    char alpn[64];   /* ALPN 通告的协议名，如 "h2"；空串 = 不发该扩展 */
     int  handshaked;
 };
 
@@ -307,6 +308,26 @@ static tls_err send_client_hello(tls_ctx *c) {
     put_u16(body + o, 4); o += 2;
     put_u16(body + o, 2); o += 2;
     put_u16(body + o, 0x0401); o += 2;
+
+    /* application_layer_protocol_negotiation (ALPN, RFC 7301)
+     *
+     * 域前置 + HTTP/2 的前提：h2 只能在 TLS 握手阶段通过 ALPN 协商出来。
+     * 不发 ALPN 的话，对端按"未协商则降级"处理，回落到 HTTP/1.1，
+     * 于是客户端发 h2 preface 之后等到的根本不是 SETTINGS ——
+     * 表现为"TLS 握手成功但 h2 握手失败"，很容易被误判成前置域不支持 h2。
+     */
+    if (c->alpn[0]) {
+        size_t pl = strlen(c->alpn);
+        if (pl > 255) return TLS_ERR_RANGE;
+        put_u16(body + o, 0x0010); o += 2;
+        size_t ex_at = o; o += 2;
+        size_t ls_at = o; o += 2;                 /* protocol_name_list 长度 */
+        body[o++] = (uint8_t)pl;
+        if (o + pl > sizeof(body)) return TLS_ERR_RANGE;
+        memcpy(body + o, c->alpn, pl); o += pl;
+        put_u16(body + ls_at, (uint16_t)(o - ls_at - 2));
+        put_u16(body + ex_at, (uint16_t)(o - ex_at - 2));
+    }
 
     /* renegotiation_info */
     put_u16(body + o, 0xff01); o += 2;
@@ -572,6 +593,11 @@ tls_err tls_client_init(tls_ctx **out, const tls_config *cfg,
             if (n >= sizeof(c->sni)) { free(c); return TLS_ERR_RANGE; }
             memcpy(c->sni, cfg->sni, n + 1);
         }
+        if (cfg->alpn) {
+            size_t n = strlen(cfg->alpn);
+            if (n >= sizeof(c->alpn)) { free(c); return TLS_ERR_RANGE; }
+            memcpy(c->alpn, cfg->alpn, n + 1);
+        }
     }
     c->send = send;
     c->recv = recv;
@@ -581,7 +607,12 @@ tls_err tls_client_init(tls_ctx **out, const tls_config *cfg,
     return TLS_OK;
 }
 
-void tls_free(tls_ctx *c) { free(c); }
+void tls_free(tls_ctx *c) {
+    if (!c) return;
+    /* 信任库是堆分配的（见 x509_store），不释放就是每次握手泄漏一份 */
+    x509_store_free(&c->anchors);
+    free(c);
+}
 
 int tls_sni_echo(const tls_ctx *c, char *out, size_t cap) {
     if (!c || !out || cap == 0) return -1;
