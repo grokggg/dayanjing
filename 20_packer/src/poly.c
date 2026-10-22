@@ -35,6 +35,7 @@ struct poly_ctx {
     size_t    gap_len;
     size_t    ct_off;
     int       have;
+    int       abi;
 };
 
 static uint64_t xs64(uint64_t *s)
@@ -52,15 +53,21 @@ static uint32_t rnd(poly_ctx *p, uint32_t n)
     return n ? (uint32_t)(xs64(&p->rng) % n) : 0;
 }
 
-poly_ctx *poly_new(uint64_t seed)
+poly_ctx *poly_new_abi(uint64_t seed, int abi)
 {
+    if (abi != POLY_ABI_SYSV && abi != POLY_ABI_WIN64) return NULL;
     poly_ctx *p = (poly_ctx *)calloc(1, sizeof(*p));
     if (!p) return NULL;
     /* xorshift64 的状态 0 是不动点：恒输出 0，会让所有变异退化为定值，
        跨构建的区分度归零。种子 0 必须扰动。 */
     p->rng = seed ? seed : 0x9E3779B97F4A7C15ull;
+    p->abi = abi;
     return p;
 }
+
+poly_ctx *poly_new(uint64_t seed) { return poly_new_abi(seed, POLY_ABI_SYSV); }
+
+int poly_abi(poly_ctx *p) { return p ? p->abi : POLY_ERR_PARAM; }
 
 void poly_free(poly_ctx *p) { free(p); }
 
@@ -428,13 +435,22 @@ static void i_xchg_self(ebuf *e, int reg)
 }
 
 /*
- * SysV ABI 的被调用者保存寄存器。存根会被"当作函数调用"，宿主完全有理由
+ * 被调用者保存（非易失）寄存器。存根会被"当作函数调用"，宿主完全有理由
  * 认为这些寄存器在返回后保持不变。存根把它们当普通分配单元用掉而不保存，
  * 单次调用看不出问题（宿主恰好没用到），第二次调用就崩——这正是本模块踩到
  * 的坑：单元测试连跑 64 份制品时在第 2 次迭代段错误。
  * rbp(5) 不参与分配，故不在此列。
+ *
+ * 两套集合的唯一差别是 RSI(6)/RDI(7)：SysV 视其为易失，MS x64 视其为非易失。
+ * 这是"Windows 版存根"与"Linux 版存根"在机器码层面唯一必需的区别——指令集
+ * 完全相同，差别只在"必须保存哪些寄存器"以及随之而来的保存槽数量。
  */
-static const int CALLEE_SAVED[5] = { 3, 12, 13, 14, 15 };
+static const int CALLEE_SAVED_SYSV[5]  = { 3, 12, 13, 14, 15 };
+static const int CALLEE_SAVED_WIN64[7] = { 3, 6, 7, 12, 13, 14, 15 };
+
+/* 保存槽上限：决定栈帧底部预留多少字节，密钥区必须排在它之后 */
+#define NSAVE_MAX_SYSV   5
+#define NSAVE_MAX_WIN64  7
 
 /* ------------------------------------------------------------------ */
 /* 寄存器分配                                                          */
@@ -455,11 +471,31 @@ static const int POOL[14] = { 0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
  *     载荷指针覆盖成宿主的旧值，jmp 直接飞掉
  * 这两条都是实测踩出来的：恢复插入后 300 个种子里 113 个崩，崩点全是 jmp。
  */
-static int is_volatile_reg(int x)
+static int is_volatile_sysv(int x)
 {
     return x == 0 || x == 1 || x == 2 ||   /* rax rcx rdx */
-           x == 6 || x == 7 ||             /* rsi rdi     */
+           x == 6 || x == 7 ||             /* rsi rdi（SysV 下易失） */
            x == 8 || x == 9 || x == 10 || x == 11;  /* r8..r11 */
+}
+
+/*
+ * MS x64：易失集合不含 rsi/rdi。
+ * rB 与 rP 必须取自易失集合：
+ *   - rB 由 call/pop 取得，发生在保存动作之前，其原值已无从恢复
+ *   - rP 必须活到最后的 jmp，若它是被调用者保存寄存器，收尾时的恢复会把
+ *     载荷指针覆盖成宿主的旧值，jmp 直接飞掉
+ * 这两条都是实测踩出来的：恢复插入后 300 个种子里 113 个崩，崩点全是 jmp。
+ * Win64 下易失池只剩 7 个（rax rcx rdx r8..r11），仍远多于所需的 2 个。
+ */
+static int is_volatile_win64(int x)
+{
+    return x == 0 || x == 1 || x == 2 ||   /* rax rcx rdx */
+           x == 8 || x == 9 || x == 10 || x == 11;  /* r8..r11 */
+}
+
+static int is_volatile_abi(int x, int abi)
+{
+    return abi == POLY_ABI_WIN64 ? is_volatile_win64(x) : is_volatile_sysv(x);
 }
 
 typedef struct {
@@ -479,17 +515,17 @@ typedef struct {
 } regs;
 
 /* 从池中取出第一个满足条件的寄存器并将其移除 */
-static int take_if(int *pool, int *n, int (*ok)(int))
+static int take_if(int *pool, int *n, int abi)
 {
     for (int k = 0; k < *n; k++) {
-        if (ok(pool[k])) {
+        if (is_volatile_abi(pool[k], abi)) {
             int v = pool[k];
             for (int q = k; q < *n - 1; q++) pool[q] = pool[q + 1];
             (*n)--;
             return v;
         }
     }
-    return pool[--(*n)];   /* 理论上不会走到：易失寄存器有 9 个，只需 2 个 */
+    return pool[--(*n)];   /* 理论上不会走到：易失寄存器最少 7 个，只需 2 个 */
 }
 
 static void alloc_regs(poly_ctx *p, regs *r)
@@ -502,8 +538,8 @@ static void alloc_regs(poly_ctx *p, regs *r)
         int t = pool[k]; pool[k] = pool[q]; pool[q] = t;
     }
     int n = 14;
-    r->rB    = take_if(pool, &n, is_volatile_reg);
-    r->rP    = take_if(pool, &n, is_volatile_reg);
+    r->rB    = take_if(pool, &n, p->abi);
+    r->rP    = take_if(pool, &n, p->abi);
     r->rS    = pool[0];
     r->rK    = pool[1];
     r->rI    = pool[2];
@@ -606,27 +642,32 @@ static int gen_stub(poly_ctx *p, ebuf *e, size_t pay_len, size_t gap)
 
     /*
      * 栈帧布局（自低地址向高地址）：
-     *   [0 .. 40)    被调用者保存寄存器槽位（最多 5 个）
-     *   [koff ..)    密钥 16 字节
-     *   [soff ..)    S 盒 256 字节
+     *   [0 .. nsave_max*8)  被调用者保存寄存器槽位（最多 5 或 7 个）
+     *   [koff ..)           密钥 16 字节
+     *   [soff ..)           S 盒 256 字节
      * 保存槽必须在最底部：密钥与 S 盒的偏移都从帧底起算，若槽位与之重叠，
-     * 解密前寄存器就被密文覆盖。
+     * 解密前寄存器就被密文覆盖。Win64 比 SysV 多两个非易失寄存器（rsi/rdi），
+     * 槽位上限从 5 变 7，密钥区起始必须随之后移——写死 48 会让第 6、7 个槽
+     * 压在密钥上，且不会报错，只是静默解出错误明文。
      */
-    uint32_t koff = 48u + 8u * rnd(p, 7u);        /* 48..96  */
-    uint32_t soff = 112u + 8u * rnd(p, 9u);       /* 112..176 */
+    int nsave_max = (p->abi == POLY_ABI_WIN64) ? NSAVE_MAX_WIN64 : NSAVE_MAX_SYSV;
+    const int *csp = (p->abi == POLY_ABI_WIN64) ? CALLEE_SAVED_WIN64 : CALLEE_SAVED_SYSV;
+
+    uint32_t koff = (uint32_t)(nsave_max * 8 + 8) + 8u * rnd(p, 7u);
+    uint32_t soff = (koff + 16u) + 8u * rnd(p, 9u);
     uint32_t frame = ((soff + 256u) + 15u) & ~15u;
 
     /* 收集本次真正用到的被调用者保存寄存器 */
     const int allr[13] = { r.rB, r.rS, r.rK, r.rI, r.rJ, r.rWi, r.rP,
                            r.rL, r.rT, r.rT2, r.rA, r.rB2, r.rJunk };
-    int save[5]; int ns = 0;
-    for (int t = 0; t < 5; t++) {
-        int c = CALLEE_SAVED[t];
+    int save[NSAVE_MAX_WIN64]; int ns = 0;
+    for (int t = 0; t < nsave_max; t++) {
+        int c = csp[t];
         for (int q = 0; q < 13; q++)
             if (allr[q] == c) { save[ns++] = c; break; }
     }
-    uint32_t slot[5];
-    for (int t = 0; t < 5; t++) slot[t] = 8u * (uint32_t)t;
+    uint32_t slot[NSAVE_MAX_WIN64];
+    for (int t = 0; t < NSAVE_MAX_WIN64; t++) slot[t] = 8u * (uint32_t)t;
     for (int t = ns - 1; t > 0; t--) {          /* 槽位顺序随机化 */
         uint32_t q = rnd(p, (uint32_t)(t + 1));
         uint32_t tmp = slot[t]; slot[t] = slot[q]; slot[q] = tmp;

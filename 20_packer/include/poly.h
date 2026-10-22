@@ -26,7 +26,16 @@
  *     真正的机密性由内层 pack.c 的 AES-128-GCM 提供。密钥以立即数形式内联
  *     在存根里，逆向者总能取出——这是所有多态壳的固有性质。
  *
- * 不依赖 OpenSSL / zlib，仅 libc。仅支持 x86-64 System V。
+ * ABI 模式：
+ *   POLY_ABI_SYSV   —— x86-64 System V（Linux/BSD）。非易失寄存器为
+ *                      RBX/RBP/R12-R15，RSI/RDI 是易失的，存根可以不保存。
+ *   POLY_ABI_WIN64  —— Microsoft x64。非易失寄存器额外包含 RSI 与 RDI，
+ *                      存根若用到它们必须先入槽再恢复。两者指令集完全相同，
+ *                      差异只在"哪些寄存器必须保存"与随之而来的保存槽布局。
+ *
+ * 两种模式共用同一套指令发射器，不重复实现。
+ *
+ * 不依赖 OpenSSL / zlib，仅 libc。仅支持 x86-64。
  */
 
 #ifndef DAYANJING_POLY_H
@@ -34,6 +43,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* ABI 选择 */
+#define POLY_ABI_SYSV   0
+#define POLY_ABI_WIN64  1
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,7 +65,13 @@ typedef struct poly_ctx poly_ctx;
 
 /* 以给定种子创建引擎。同一种子的构建结果逐字节可复现。 */
 poly_ctx *poly_new(uint64_t seed);
+
+/* 指定 ABI 创建引擎。abi 取 POLY_ABI_SYSV 或 POLY_ABI_WIN64，其余返回 NULL。 */
+poly_ctx *poly_new_abi(uint64_t seed, int abi);
 void      poly_free(poly_ctx *p);
+
+/* 取回引擎的 ABI 模式（POLY_ABI_*）；p 为空返回 POLY_ERR_PARAM。 */
+int       poly_abi(poly_ctx *p);
 
 /*
  * 生成一个多态制品。

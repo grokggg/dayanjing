@@ -30,6 +30,10 @@ V3BIN := $(BUILD)/test_v3
 POLYSRC := tests/test_poly.c
 POLYBIN := $(BUILD)/test_poly
 
+# Windows x64（MS x64 ABI）多态存根测试：真机执行 + 非易失寄存器保持
+WPOLYSRC := tests/test_poly_win64.c
+WPOLYBIN := $(BUILD)/test_poly_win64
+
 # v4 多态头制品测试：跨构建逐字节取证 + v3 对照
 SHAPEDSRC := tests/test_shaped.c
 SHAPEDBIN := $(BUILD)/test_shaped
@@ -44,7 +48,7 @@ TARGETBIN := $(BUILD)/mexec_target
 # 本文件后部。此处写显式路径，避免展开成空导致目标被静默跳过。
 all: $(BUILD)/test_packer $(BUILD)/test_bind \
      $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly \
-     $(BUILD)/test_shaped
+     $(BUILD)/test_poly_win64 $(BUILD)/test_shaped
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -72,6 +76,10 @@ $(POLYBIN): $(OBJ) $(POLYSRC) | $(BUILD)
 	$(CC) $(CFLAGS) $(OBJ) $(POLYSRC) -o $@ $(LDFLAGS)
 
 # v3 对照用例需要 pk_pack_core，故额外给 -Isrc
+$(WPOLYBIN): $(OBJ) $(WPOLYSRC) | $(BUILD)
+	$(CC) $(CFLAGS) $(OBJ) $(WPOLYSRC) -o $@ $(LDFLAGS)
+
+# v3 对照用例需要 pk_pack_core，故额外给 -Isrc
 $(SHAPEDBIN): $(OBJ) $(SHAPEDSRC) | $(BUILD)
 	$(CC) $(CFLAGS) -Isrc $(OBJ) $(SHAPEDSRC) -o $@ $(LDFLAGS)
 
@@ -92,12 +100,13 @@ $(INTGBIN): $(OBJ) $(C2OBJ) $(INTGSRC) | $(BUILD)
 
 test: $(BUILD)/test_packer $(BUILD)/test_bind \
       $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly \
-      $(BUILD)/test_shaped
+      $(BUILD)/test_poly_win64 $(BUILD)/test_shaped
 	./$(TESTBIN)
 	./$(BINDBIN)
 	./$(INTGBIN)
 	./$(V3BIN)
 	./$(POLYBIN)
+	./$(WPOLYBIN)
 	./$(SHAPEDBIN)
 
 static: CFLAGS += -static
