@@ -56,25 +56,176 @@ const GUID MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK =
 const GUID MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME =
     {0x60D0E559,0x52F8,0x4FA2,{0xB4,0x3C,0x85,0xA3,0x8A,0x57,0x84,0x44}};
 
-/* ---- 注册表（mock：模拟已授权） ---- */
-LONG RegOpenKeyExW(HKEY, LPCWSTR, DWORD, DWORD, PHKEY phk) { *phk = (HKEY)1; return ERROR_SUCCESS; }
-LONG RegCloseKey(HKEY) { return ERROR_SUCCESS; }
-LONG RegEnumKeyExW(HKEY, DWORD dwIndex, LPWSTR lpName, DWORD *lpcchName,
-                              DWORD *, LPWSTR, DWORD *, void *) {
-    if (dwIndex == 0) {
-        const wchar_t *sid = L"S-1-5-21-TEST";
-        wcscpy(lpName, sid);
-        *lpcchName = (DWORD)wcslen(sid);
-        return ERROR_SUCCESS;
-    }
-    return 259; /* ERROR_NO_MORE_ITEMS */
+/* ---- 注册表（有状态 mock：可写、可读、可枚举、可删） ----
+ *
+ * 为什么必须有状态：无状态 mock（恒返回固定值）无法验证"安装是否真的写入了"。
+ * install 之后 query 恒成功，测试通过但实际什么都没装 —— 这是最危险的假阳性。
+ *
+ * 预置 cam_mf 依赖的摄像头授权项，使其 19/19 不受影响。
+ */
+namespace {
+struct RegKey {
+    std::wstring path;
+    std::map<std::wstring, std::wstring> values;
+    std::vector<std::wstring> subkeys;
+};
+std::map<std::wstring, RegKey *> &reg_store() {
+    static std::map<std::wstring, RegKey *> m; return m;
 }
-LONG RegQueryValueExW(HKEY, LPCWSTR, DWORD *, DWORD *, LPBYTE lpData, DWORD *lpcbData) {
-    const wchar_t *v = L"Allow";
-    size_t n = (wcslen(v) + 1) * sizeof(wchar_t);
-    if (*lpcbData < (DWORD)n) { *lpcbData = (DWORD)n; return 234; }
-    memcpy(lpData, v, n); *lpcbData = (DWORD)n;
+bool &reg_preset_done() { static bool d = false; return d; }
+std::wstring reg_join(HKEY h, const wchar_t *sub) {
+    std::wstring p = (h == HKEY_CURRENT_USER) ? L"HKCU" : L"HKOTHER";
+    if (sub && *sub) { p += L"\\"; p += sub; }
+    return p;
+}
+RegKey *reg_get(const std::wstring &p) {
+    std::map<std::wstring, RegKey *>::iterator it = reg_store().find(p);
+    return it == reg_store().end() ? NULL : it->second;
+}
+RegKey *reg_mkdir(const std::wstring &p) {
+    RegKey *k = reg_get(p);
+    if (k) return k;
+    k = new RegKey(); k->path = p; reg_store()[p] = k;
+    size_t pos = p.rfind(L'\\');
+    if (pos != std::wstring::npos) {
+        RegKey *pk = reg_mkdir(p.substr(0, pos));
+        std::wstring leaf = p.substr(pos + 1);
+        bool has = false;
+        for (size_t i = 0; i < pk->subkeys.size(); i++)
+            if (pk->subkeys[i] == leaf) has = true;
+        if (!has) pk->subkeys.push_back(leaf);
+    }
+    return k;
+}
+std::wstring reg_u8(const char *s) {
+    std::wstring w;
+    for (; s && *s; ++s) w += (wchar_t)(unsigned char)*s;
+    return w;
+}
+void reg_preset() {
+    if (reg_preset_done()) return;
+    reg_preset_done() = true;
+    const std::wstring base =
+        L"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\"
+        L"CapabilityAccessManager\\ConsentStore\\webcam";
+    reg_mkdir(base);
+    reg_mkdir(base + L"\\S-1-5-21-TEST")->values[L"Value"] = L"Allow";
+    reg_mkdir(L"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+}
+}
+
+LONG RegOpenKeyExW(HKEY h, LPCWSTR sub, DWORD, DWORD, PHKEY phk) {
+    reg_preset();
+    if (!phk) return ERROR_INVALID_PARAMETER;
+    RegKey *k = reg_get(reg_join(h, sub));
+    if (!k) return ERROR_FILE_NOT_FOUND;
+    *phk = (HKEY)k;
     return ERROR_SUCCESS;
+}
+LONG RegCreateKeyExW(HKEY h, LPCWSTR sub, DWORD, LPWSTR, DWORD, DWORD, void *,
+                     PHKEY phk, DWORD *disp) {
+    reg_preset();
+    if (!phk) return ERROR_INVALID_PARAMETER;
+    std::wstring p = reg_join(h, sub);
+    bool existed = reg_get(p) != NULL;
+    *phk = (HKEY)reg_mkdir(p);
+    if (disp) *disp = existed ? 2 : 1;
+    return ERROR_SUCCESS;
+}
+LONG RegCloseKey(HKEY) { return ERROR_SUCCESS; }
+LONG RegEnumKeyExW(HKEY h, DWORD idx, LPWSTR name, DWORD *lpcch,
+                              DWORD *, LPWSTR, DWORD *, void *) {
+    reg_preset();
+    if (!h || !name || !lpcch) return ERROR_INVALID_PARAMETER;
+    RegKey *k = (RegKey *)h;
+    if (idx >= k->subkeys.size()) return ERROR_NO_MORE_ITEMS;
+    const std::wstring &s = k->subkeys[idx];
+    if (*lpcch < (DWORD)s.size() + 1) { *lpcch = (DWORD)s.size() + 1; return 234; }
+    wcscpy(name, s.c_str());
+    *lpcch = (DWORD)s.size();
+    return ERROR_SUCCESS;
+}
+LONG RegQueryValueExW(HKEY h, LPCWSTR vname, DWORD *, DWORD *ty,
+                      LPBYTE data, DWORD *lpcb) {
+    reg_preset();
+    if (!h || !vname || !lpcb) return ERROR_INVALID_PARAMETER;
+    RegKey *k = (RegKey *)h;
+    std::map<std::wstring, std::wstring>::iterator it = k->values.find(vname);
+    if (it == k->values.end()) return ERROR_FILE_NOT_FOUND;
+    size_t n = (it->second.size() + 1) * sizeof(wchar_t);
+    if (ty) *ty = REG_SZ;
+    /* 真机语义：lpData 为 NULL 时只回填所需字节数并返回 ERROR_SUCCESS。
+       早期 shim 在此返回 ERROR_MORE_DATA，使"先查大小再分配"的调用方
+       误判为失败 —— 这是 shim 保真度缺陷（继 HRESULT 32 位之后的第二处），
+       不是产品缺陷。 */
+    if (!data) { *lpcb = (DWORD)n; return ERROR_SUCCESS; }
+    if (*lpcb < (DWORD)n) { *lpcb = (DWORD)n; return 234; }
+    memcpy(data, it->second.c_str(), n);
+    *lpcb = (DWORD)n;
+    return ERROR_SUCCESS;
+}
+LONG RegSetValueExW(HKEY h, LPCWSTR vname, DWORD, DWORD ty,
+                    const BYTE *data, DWORD cb) {
+    reg_preset();
+    if (!h || !vname || !data || ty != REG_SZ) return ERROR_INVALID_PARAMETER;
+    RegKey *k = (RegKey *)h;
+    size_t chars = cb / sizeof(wchar_t);
+    std::wstring v;
+    for (size_t i = 0; i < chars; i++) {
+        wchar_t c;
+        memcpy(&c, data + i * sizeof(wchar_t), sizeof(wchar_t));
+        if (c == 0) break;
+        v += c;
+    }
+    k->values[vname] = v;
+    return ERROR_SUCCESS;
+}
+LONG RegDeleteValueW(HKEY h, LPCWSTR vname) {
+    reg_preset();
+    if (!h || !vname) return ERROR_INVALID_PARAMETER;
+    RegKey *k = (RegKey *)h;
+    std::map<std::wstring, std::wstring>::iterator it = k->values.find(vname);
+    if (it == k->values.end()) return ERROR_FILE_NOT_FOUND;
+    k->values.erase(it);
+    return ERROR_SUCCESS;
+}
+int MultiByteToWideChar(UINT, DWORD, const char *src, int cb,
+                        LPWSTR dst, int cch) {
+    if (!src || !dst || cch <= 0) return 0;
+    int n = (cb < 0) ? (int)strlen(src) : cb;
+    int i = 0;
+    for (; i < n && i < cch - 1; i++) {
+        if (src[i] == 0) break;
+        dst[i] = (wchar_t)(unsigned char)src[i];
+    }
+    dst[i] = 0;
+    return i + 1;
+}
+
+bool wsdk_reg_has(const char *path, const char *name) {
+    reg_preset();
+    RegKey *k = reg_get(reg_u8(path));
+    if (!k) return false;
+    return k->values.count(reg_u8(name)) != 0;
+}
+bool wsdk_reg_get(const char *path, const char *name, char *out, size_t cap) {
+    reg_preset();
+    if (!out || cap == 0) return false;
+    RegKey *k = reg_get(reg_u8(path));
+    if (!k) return false;
+    std::map<std::wstring, std::wstring>::iterator it = k->values.find(reg_u8(name));
+    if (it == k->values.end()) return false;
+    size_t i = 0;
+    for (; i < it->second.size() && i + 1 < cap; i++)
+        out[i] = (char)(it->second[i] < 128 ? it->second[i] : '?');
+    out[i] = 0;
+    return true;
+}
+void wsdk_reg_reset(void) {
+    std::map<std::wstring, RegKey *>::iterator it;
+    for (it = reg_store().begin(); it != reg_store().end(); ++it) delete it->second;
+    reg_store().clear();
+    reg_preset_done() = false;
 }
 
 /* ---- 字符串 / 内存 ---- */

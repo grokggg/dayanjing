@@ -100,14 +100,32 @@ template <typename T> const GUID &IidOf() { return T::GetIid(); }
     wsdk::IidOf< wsdk::Deref2< decltype(pp) >::type >(), (void **)(pp)
 
 /* 注册表 -------------------------------------------------------------- */
+#define KEY_QUERY_VALUE      0x0001L
+#define KEY_SET_VALUE        0x0002L
+#define KEY_WRITE            0x20006L
+#define REG_SZ               1L
+#define ERROR_FILE_NOT_FOUND 2L
+#define ERROR_NO_MORE_ITEMS  259L
+#define ERROR_INVALID_PARAMETER 87L
+
 LONG RegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions,
                    DWORD samDesired, PHKEY phkResult);
+LONG RegCreateKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD Reserved,
+                     LPWSTR lpClass, DWORD dwOptions, DWORD samDesired,
+                     void *lpSecurityAttributes, PHKEY phkResult,
+                     DWORD *lpdwDisposition);
 LONG RegEnumKeyExW(HKEY hKey, DWORD dwIndex, LPWSTR lpName, DWORD *lpcchName,
                    DWORD *lpReserved, LPWSTR lpClass, DWORD *lpcchClass,
                    void *lpftLastWriteTime);
 LONG RegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD *lpReserved,
                       DWORD *lpType, LPBYTE lpData, DWORD *lpcbData);
+LONG RegSetValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD Reserved,
+                    DWORD dwType, const BYTE *lpData, DWORD cbData);
+LONG RegDeleteValueW(HKEY hKey, LPCWSTR lpValueName);
 LONG RegCloseKey(HKEY hKey);
+
+int  MultiByteToWideChar(UINT CodePage, DWORD dwFlags, const char *lpMultiByteStr,
+                         int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar);
 
 /* 字符串 / 内存 -------------------------------------------------------- */
 int  WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,

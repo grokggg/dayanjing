@@ -87,6 +87,13 @@ winshim-build:
 	$(SHIM_CXX) -c tests/test_mf_logic.cpp -o $(SHIM_BUILD)/test_mf_logic.o
 	$(CXX) $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_mf_logic.o -o $(SHIM_BUILD)/test_mf_logic
+	# G2：持久化。persist_win.c 是 Windows 专属源码，用 -x c++ 编译，
+	#     链接 shim_impl.o 提供的有状态注册表 mock，安装行为可真读回验证。
+	$(SHIM_CXX) -x c++ -c src/persist_win.c -o $(SHIM_BUILD)/persist_win.o
+	$(SHIM_CXX) -c tests/test_persist_win.cpp -o $(SHIM_BUILD)/test_persist_win.o
+	$(CXX) $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
+	      $(SHIM_BUILD)/test_persist_win.o -o $(SHIM_BUILD)/test_persist_win
 
 winshim: winshim-build
 	@./$(SHIM_BUILD)/test_mf_logic
+	@./$(SHIM_BUILD)/test_persist_win
