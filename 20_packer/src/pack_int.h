@@ -40,4 +40,19 @@ int pk_unpack_core(const uint8_t *blob, size_t blob_len,
                    const uint8_t *seed, size_t seed_len,
                    uint8_t *out, size_t *out_len);
 
+/* ---- 共享原语：pack.c 与 shaped.c 共用，避免重复实现 ---- */
+
+void      put32(uint8_t *p, uint32_t v);
+void      put64(uint8_t *p, uint64_t v);
+uint32_t  get32(const uint8_t *p);
+uint64_t  get64(const uint8_t *p);
+
+/* 熵源：getrandom(2) 优先，失败回落 /dev/urandom */
+int       pk_rand(uint8_t *buf, size_t len);
+
+/* HKDF-Extract(salt, seed) -> Expand("dayanjing:packer:v1") -> AES 密钥 */
+int       pk_derive_key(const uint8_t *salt, size_t salt_len,
+                        const uint8_t *seed, size_t seed_len,
+                        uint8_t key[PK_KEY_LEN]);
+
 #endif /* DAYANJING_PACK_INT_H */

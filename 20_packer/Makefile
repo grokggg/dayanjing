@@ -11,7 +11,8 @@ CRYPT_SRC := $(CRYPTDIR)/src/crypto_gcm.c $(CRYPTDIR)/src/crypto_hash.c $(CRYPTD
 CRYPT_OBJ := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
 
 SRC     := src/lzss.c src/pack.c src/bind.c src/mexec.c \
-           src/binding.c src/keyrot.c src/artifact.c src/poly.c
+           src/binding.c src/keyrot.c src/artifact.c src/poly.c \
+           src/shaped.c
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o) $(CRYPT_OBJ)
 
 TESTSRC := tests/test_packer.c
@@ -29,6 +30,10 @@ V3BIN := $(BUILD)/test_v3
 POLYSRC := tests/test_poly.c
 POLYBIN := $(BUILD)/test_poly
 
+# v4 多态头制品测试：跨构建逐字节取证 + v3 对照
+SHAPEDSRC := tests/test_shaped.c
+SHAPEDBIN := $(BUILD)/test_shaped
+
 # mexec 真机验证目标：静态链接，避免 execveat 后再依赖动态加载器
 TARGETSRC := tests/mexec_target.c
 TARGETBIN := $(BUILD)/mexec_target
@@ -38,7 +43,8 @@ TARGETBIN := $(BUILD)/mexec_target
 # 注意：GNU make 在读取阶段即展开规则依赖，而 $(INTGBIN)/$(V3BIN) 定义在
 # 本文件后部。此处写显式路径，避免展开成空导致目标被静默跳过。
 all: $(BUILD)/test_packer $(BUILD)/test_bind \
-     $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly
+     $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly \
+     $(BUILD)/test_shaped
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -65,6 +71,10 @@ $(V3BIN): $(OBJ) $(V3SRC) | $(BUILD)
 $(POLYBIN): $(OBJ) $(POLYSRC) | $(BUILD)
 	$(CC) $(CFLAGS) $(OBJ) $(POLYSRC) -o $@ $(LDFLAGS)
 
+# v3 对照用例需要 pk_pack_core，故额外给 -Isrc
+$(SHAPEDBIN): $(OBJ) $(SHAPEDSRC) | $(BUILD)
+	$(CC) $(CFLAGS) -Isrc $(OBJ) $(SHAPEDSRC) -o $@ $(LDFLAGS)
+
 # 与 02_c2 联编：真实会话密钥 -> 制品绑定 -> 解包
 C2DIR   := ../02_c2
 C2OBJ   := $(BUILD)/c2.o $(BUILD)/c2_frame.o
@@ -81,12 +91,14 @@ $(INTGBIN): $(OBJ) $(C2OBJ) $(INTGSRC) | $(BUILD)
 	$(CC) $(CFLAGS) -I$(C2DIR)/include $(OBJ) $(C2OBJ) $(INTGSRC) -o $@ $(LDFLAGS)
 
 test: $(BUILD)/test_packer $(BUILD)/test_bind \
-      $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly
+      $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly \
+      $(BUILD)/test_shaped
 	./$(TESTBIN)
 	./$(BINDBIN)
 	./$(INTGBIN)
 	./$(V3BIN)
 	./$(POLYBIN)
+	./$(SHAPEDBIN)
 
 static: CFLAGS += -static
 static: clean $(TESTBIN)
@@ -107,3 +119,4 @@ inspect: $(TESTBIN)
 	@nm -g --defined-only $(BUILD)/pack.o  | awk '{print "  "$$3}'
 	@nm -g --defined-only $(BUILD)/mexec.o | awk '{print "  "$$3}'
 	@nm -g --defined-only $(BUILD)/poly.o  | awk '{print "  "$$3}'
+	@nm -g --defined-only $(BUILD)/shaped.o | awk '{print "  "$$3}'

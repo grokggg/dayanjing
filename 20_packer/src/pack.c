@@ -48,7 +48,7 @@ const char *pk_errstr(int e)
 
 /* ---------- 小端读写（显式，不依赖结构体布局） ---------- */
 
-static void put32(uint8_t *p, uint32_t v)
+void put32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v & 0xffu);
     p[1] = (uint8_t)((v >> 8) & 0xffu);
@@ -56,18 +56,18 @@ static void put32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)((v >> 24) & 0xffu);
 }
 
-static void put64(uint8_t *p, uint64_t v)
+void put64(uint8_t *p, uint64_t v)
 {
     for (int i = 0; i < 8; i++) p[i] = (uint8_t)((v >> (8 * i)) & 0xffu);
 }
 
-static uint32_t get32(const uint8_t *p)
+uint32_t get32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static uint64_t get64(const uint8_t *p)
+uint64_t get64(const uint8_t *p)
 {
     uint64_t v = 0;
     for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
@@ -76,7 +76,7 @@ static uint64_t get64(const uint8_t *p)
 
 /* ---------- 熵源：getrandom(2) 优先，失败回落 /dev/urandom ---------- */
 
-static int pk_rand(uint8_t *buf, size_t len)
+int pk_rand(uint8_t *buf, size_t len)
 {
     size_t got = 0;
 
@@ -101,7 +101,7 @@ static int pk_rand(uint8_t *buf, size_t len)
 
 /* ---------- 密钥派生 ---------- */
 
-static int pk_derive_key(const uint8_t *salt, size_t salt_len,
+int pk_derive_key(const uint8_t *salt, size_t salt_len,
                          const uint8_t *seed, size_t seed_len,
                          uint8_t key[PK_KEY_LEN])
 {

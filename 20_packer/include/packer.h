@@ -52,7 +52,14 @@ extern "C" {
 #define PK_VERSION     1     /* 已废弃：pk_unpack 拒绝解 v1，仅内部压测用 */
 #define PK_VERSION2    2     /* 会话绑定制品：bind_id 纳入 AAD */
 #define PK_VERSION3    3     /* 纪元 + ephemeral X25519：制品具备前向保密 */
+#define PK_VERSION4    4     /* 多态头：整头掩码，制品无跨样本恒定字节 */
 #define PK_FLAG_COMPRESSED 0x1u
+
+/* ---- v4 多态头制品 ---- */
+#define PK_NONCE_LEN   16    /* 每制品随机的掩码 nonce（明文，唯一非随机常量位） */
+#define PK_HDR_V4_LEN  (PK_NONCE_LEN + PK_HDR_V3_LEN)   /* 192：nonce + 掩码头 */
+#define PK_AAD_V4_LEN  (PK_NONCE_LEN + PK_HDR_V3_LEN)   /* 192：nonce + 真实头 */
+#define PK_SHAPED_OVERHEAD (PK_HDR_V4_LEN + PK_TAG_LEN) /* 208：另加末尾 tag */
 
 /* v3 制品头附加字段长度 */
 #define PK_EPOCH_LEN    4    /* 制品纪元字段（u32 小端，明文，纳入 AAD） */
@@ -404,6 +411,41 @@ int pk_unpack_artifact(const uint8_t *blob, size_t blob_len,
 
 /* 取制品头中的纪元（v1/v2 返回 0 并正常返回 PK_OK）。 */
 int pk_artifact_epoch(const uint8_t *blob, size_t blob_len, uint32_t *epoch);
+
+/* ====================================================================
+ * v4 多态头制品（shaped artifact）
+ *
+ * 与 v3 的差别不是"多一个字段"，而是识别方式的改变：
+ *   v3 及以前 —— 制品前 12 字节是恒定的 magic + version，识别靠常量；
+ *   v4        —— 整头用"会话种子 + 每制品随机 nonce"派生的掩码覆盖，
+ *                制品上不存在任何跨样本恒定字节，识别只能靠"能否解开"。
+ *
+ * 由此派生的一条硬规则：所有结构性错误一律返回 PK_ERR_AUTH，不返回
+ * MAGIC / VERSION / LEN。错误码本身也是一个 oracle——用它区分"不是制品"
+ * 与"密钥不对"，等价于把常量签名换了个位置。
+ * ==================================================================== */
+
+size_t pk_size_bound_v4(size_t raw_len);
+
+int pk_pack_shaped(const uint8_t *raw, size_t raw_len,
+                   const uint8_t *seed, size_t seed_len,
+                   const uint8_t bind_id[PK_BIND_ID_LEN],
+                   uint32_t epoch,
+                   const uint8_t eph_pub[PK_EPH_PUB_LEN],
+                   uint8_t *out, size_t *out_len);
+
+int pk_unpack_shaped(const uint8_t *blob, size_t blob_len,
+                     const uint8_t *seed, size_t seed_len,
+                     uint8_t *out, size_t *out_len);
+
+/* O(1) 查询：只需派生掩码，不需 GCM 解密。 */
+int pk_shaped_epoch(const uint8_t *blob, size_t blob_len,
+                    const uint8_t *seed, size_t seed_len,
+                    uint32_t *epoch);
+
+int pk_shaped_bind_id(const uint8_t *blob, size_t blob_len,
+                      const uint8_t *seed, size_t seed_len,
+                      uint8_t id[PK_BIND_ID_LEN]);
 
 #ifdef __cplusplus
 }
