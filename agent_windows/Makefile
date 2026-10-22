@@ -21,10 +21,10 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
 BUILD     := build/linux
-PORT_SRCS := src/cam_jpeg.c src/cam_mock.c
+PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c
 PORT_OBJS := $(PORT_SRCS:src/%.c=$(BUILD)/%.o)
 
-TESTS     := test_pipeline test_linux_extra
+TESTS     := test_pipeline test_linux_extra test_implant
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
 .PHONY: all test clean win dirs
