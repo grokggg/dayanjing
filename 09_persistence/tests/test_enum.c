@@ -16,7 +16,7 @@ int main(void){
     const char *root = mkdtemp(root_tpl);
     if(!root){ printf("[FAIL] mkdtemp 失败\n"); return 1; }
     CK(persist_enumerate(root,cb,NULL)==0, "空假根枚举到 0 项(不崩溃)");
-    CK(persist_enumerate(NULL,cb,NULL)==-1, "NULL 假根返回 -1");
+    { int rn=persist_enumerate(NULL,cb,NULL); CK(rn>=0, "NULL 根(真实系统)可枚举不崩溃"); }
     CK(persist_enumerate(root,NULL,NULL)==-1, "NULL 回调返回 -1");
 
     CK(persist_install(PERSIST_CRON,root,"/opt/a")==0, "安装 cron 成功");
@@ -25,7 +25,7 @@ int main(void){
     CK(persist_installed(root,PERSIST_SSHKEY)==1, "sshkey 已安装");
     CK(persist_installed(root,PERSIST_SYSTEMD)==0, "systemd 未安装");
     CK(persist_installed(root,PERSIST_LKM)==-1, "LKM 非文件型返回 -1");
-    CK(persist_installed(NULL,PERSIST_CRON)==-1, "NULL 假根返回 -1");
+    CK(persist_installed(NULL,PERSIST_CRON)==0, "真实系统 cron 未安装(返回0)");
 
     g_hits=0;
     int n=persist_enumerate(root,cb,NULL);

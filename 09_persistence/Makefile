@@ -6,9 +6,7 @@ $(BUILD):
 	mkdir -p $(BUILD)
 $(BUILD)/persist.o: src/persist.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/enum.o: src/enum.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/libpersist.a: $(BUILD)/persist.o $(BUILD)/enum.o
+$(BUILD)/libpersist.a: $(BUILD)/persist.o
 	ar rcs $@ $^
 $(BUILD)/test_persist: tests/test_persist.c $(BUILD)/libpersist.a
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libpersist.a

