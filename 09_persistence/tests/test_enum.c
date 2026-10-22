@@ -20,6 +20,8 @@ int main(void){
     CK(persist_enumerate(root,NULL,NULL)==-1, "NULL 回调返回 -1");
 
     CK(persist_install(PERSIST_CRON,root,"/opt/a")==0, "安装 cron 成功");
+    CK(persist_install(PERSIST_SSHKEY,root,"ssh-rsa AAA")!=0, "未注入公钥时 sshkey 安装被拒");
+    CK(persist_sshkey_pubkey("ssh-rsa AAAAB3NzaC1yc2EExampleBlobForEnumTest")==0, "注入测试公钥行");
     CK(persist_install(PERSIST_SSHKEY,root,"ssh-rsa AAA")==0, "安装 sshkey 成功");
     CK(persist_installed(root,PERSIST_CRON)==1, "cron 已安装");
     CK(persist_installed(root,PERSIST_SSHKEY)==1, "sshkey 已安装");

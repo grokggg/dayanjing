@@ -29,6 +29,12 @@ typedef struct {
 /* 生成持久化载荷文本（不写盘）。返回长度，失败 0 */
 size_t persist_generate(persist_method_t m, const char *arg, char *out, size_t cap);
 
+/* 注入要写入 authorized_keys 的真实公钥行（整行，含类型前缀与 blob）。
+ * 必须先于 PERSIST_SSHKEY 的生成/安装调用；未注入时 sshkey 生成返回 0（拒绝），
+ * 绝不写入无法认证的占位 key。
+ * line 需为单行、可打印、带 ssh-/ecdsa-/sk- 类型前缀。成功 0，非法 -1。 */
+int persist_sshkey_pubkey(const char *line);
+
 size_t persist_method_count(void);
 const persist_desc_t *persist_method_at(size_t i);
 

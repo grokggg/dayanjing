@@ -45,8 +45,21 @@ int main(void) {
                       strstr(buf, "<plist") != NULL && strstr(buf, "com.dayanjing.agent") != NULL);
     ck("ld_preload", persist_generate(PERSIST_LDPRELOAD, "/tmp/.x.so", buf, sizeof buf) > 0 &&
                      strstr(buf, "/tmp/.x.so") != NULL);
+    /* 未注入真实公钥时必须拒绝生成：占位 key 无法认证，
+     * 装上了也永远登不进去，比不装更糟（留痕 + 零收益）。 */
+    ck("ssh_key 未注入公钥即拒绝", persist_generate(PERSIST_SSHKEY, "id", buf, sizeof buf) == 0);
+    ck("注入真实公钥行", persist_sshkey_pubkey(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExamplePubKeyBlobForUnitTest comment") == 0);
     ck("ssh_key forced cmd", persist_generate(PERSIST_SSHKEY, "id", buf, sizeof buf) > 0 &&
-                             strstr(buf, "command=\"id\"") != NULL);
+                             strstr(buf, "command=\"id\"") != NULL &&
+                             strstr(buf, "ssh-ed25519 AAAAC3Nza") != NULL);
+    /* 类型前缀必须来自注入的整行，不能写死 ssh-rsa 去接 ed25519 blob */
+    ck("ssh_key 类型随注入行", strstr(buf, "ssh-rsa") == NULL);
+    ck("forced cmd 含引号被拒",
+       persist_generate(PERSIST_SSHKEY, "id \"x\"", buf, sizeof buf) == 0);
+    ck("非法公钥行被拒(无类型前缀)", persist_sshkey_pubkey("AAAAB3NzaC1yc2E") == -1);
+    ck("非法公钥行被拒(多行)", persist_sshkey_pubkey("ssh-rsa AAA\nssh-rsa BBB") == -1);
+    ck("非法公钥行被拒(空)", persist_sshkey_pubkey("") == -1);
     ck("registry_run", persist_generate(PERSIST_REGISTRY, "agent.exe", buf, sizeof buf) > 0 &&
                        strstr(buf, "CurrentVersion\\Run") != NULL);
     ck("schtask", persist_generate(PERSIST_SCHTASK, "agent.exe", buf, sizeof buf) > 0 &&
