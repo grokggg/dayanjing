@@ -71,14 +71,25 @@ typedef struct {
  *   blocks / nblk   : 真块数组，1 <= nblk <= FL_MAX_BLOCKS
  *   ngarbage        : 垃圾块数量，0 <= ngarbage <= FL_MAX_GARBAGE
  *   out / out_len   : 出参，malloc 分配，调用方 free
+ *   frame_out       : 出参，可为 NULL。回填本层为自己分配的栈帧字节数。
+ *
+ * frame_out 的用途：本层在 prologue 里会 `sub rsp, frame`，块体运行时
+ * rsp 已经比调用方进入时低了 frame 字节。若块体需要用 [rsp+X] 访问调用方
+ * 自己分配的栈帧，就必须把 X 加上 frame——而这个值在 fl_build 返回前无法
+ * 得知（帧大小是随机的）。调用方据此在构建后回填块体内的位移立即数。
  *
  * 出口是所有 next == -1 的块之后的公共收尾点。若没有任何块以 -1 结束，
  * 返回 FL_ERR_NOEXIT（否则生成的代码永不返回，必崩）。
  *
- * 同一种子的输出逐字节可复现。
+ * 注意：出口段末尾是一条 ret。若调用方需要"跳走"而非"返回"，必须在
+ * next == -1 的那个块体内自己发射 jmp——块体内的 jmp 先执行，出口段
+ * 的 ret 永远不会到达。
+ *
+ * 同一种子的输出逐字节可复现（帧大小也随之可复现）。
  */
 int fl_build(uint64_t seed, const fl_block *blocks, size_t nblk,
-             size_t ngarbage, uint8_t **out, size_t *out_len);
+             size_t ngarbage, uint8_t **out, size_t *out_len,
+             uint32_t *frame_out);
 
 const char *fl_strerror(int rc);
 

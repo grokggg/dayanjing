@@ -42,6 +42,10 @@ SHAPEDBIN := $(BUILD)/test_shaped
 FLATSRC := tests/test_flatten.c
 FLATBIN := $(BUILD)/test_flatten
 
+# 扁平化存根测试：poly 生成 4 块交 flatten 压平后真机执行
+PFLSRC := tests/test_poly_flat.c
+PFLBIN := $(BUILD)/test_poly_flat
+
 # mexec 真机验证目标：静态链接，避免 execveat 后再依赖动态加载器
 TARGETSRC := tests/mexec_target.c
 TARGETBIN := $(BUILD)/mexec_target
@@ -53,7 +57,7 @@ TARGETBIN := $(BUILD)/mexec_target
 all: $(BUILD)/test_packer $(BUILD)/test_bind \
      $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly \
      $(BUILD)/test_poly_win64 $(BUILD)/test_shaped \
-     $(BUILD)/test_flatten
+     $(BUILD)/test_flatten $(BUILD)/test_poly_flat
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -91,6 +95,9 @@ $(SHAPEDBIN): $(OBJ) $(SHAPEDSRC) | $(BUILD)
 $(FLATBIN): $(OBJ) $(FLATSRC) | $(BUILD)
 	$(CC) $(CFLAGS) $(OBJ) $(FLATSRC) -o $@ $(LDFLAGS)
 
+$(PFLBIN): $(OBJ) $(PFLSRC) | $(BUILD)
+	$(CC) $(CFLAGS) $(OBJ) $(PFLSRC) -o $@ $(LDFLAGS)
+
 # 与 02_c2 联编：真实会话密钥 -> 制品绑定 -> 解包
 C2DIR   := ../02_c2
 C2OBJ   := $(BUILD)/c2.o $(BUILD)/c2_frame.o
@@ -109,7 +116,7 @@ $(INTGBIN): $(OBJ) $(C2OBJ) $(INTGSRC) | $(BUILD)
 test: $(BUILD)/test_packer $(BUILD)/test_bind \
       $(BUILD)/test_c2_packer $(BUILD)/test_v3 $(BUILD)/test_poly \
       $(BUILD)/test_poly_win64 $(BUILD)/test_shaped \
-      $(BUILD)/test_flatten
+      $(BUILD)/test_flatten $(BUILD)/test_poly_flat
 	./$(TESTBIN)
 	./$(BINDBIN)
 	./$(INTGBIN)
@@ -118,6 +125,7 @@ test: $(BUILD)/test_packer $(BUILD)/test_bind \
 	./$(WPOLYBIN)
 	./$(SHAPEDBIN)
 	./$(FLATBIN)
+	./$(PFLBIN)
 
 static: CFLAGS += -static
 static: clean $(TESTBIN)

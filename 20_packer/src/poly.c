@@ -4,6 +4,7 @@
  */
 
 #include "poly.h"
+#include "flatten.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,7 @@ struct poly_ctx {
     size_t    ct_off;
     int       have;
     int       abi;
+    int       flatten;
 };
 
 static uint64_t xs64(uint64_t *s)
@@ -514,18 +516,43 @@ typedef struct {
     int rJunk;  /* 垃圾指令专用 */
 } regs;
 
-/* 从池中取出第一个满足条件的寄存器并将其移除 */
-static int take_if(int *pool, int *n, int abi)
+/*
+ * 跨块角色（rB / rP / rS / rK）必须避开 rax(0) 与 rcx(1)。
+ *
+ * 扁平化开启时，分发器每一轮都执行 `mov eax,[rsp+state_d]` + `cmp`，
+ * 因此 eax 在每个块之间必定被覆盖；rcx 在垃圾块守卫里也被改写。若某个
+ * 需要跨块存活的值（S 盒基址、密钥基址、载荷指针）落在 eax 上，它会在
+ * 块与块之间被悄悄改掉——存根不会崩，只是解出 garbage，表现为"偶发失败"，
+ * 极难定位。故四类跨块角色一律排除这两个寄存器。
+ *
+ * 块内临时寄存器不受此限：它们在块内用完即弃，块末尾的跨块值都存在
+ * 非 eax/ecx 的寄存器里。
+ */
+static int take_cross(int *pool, int *n, int abi)
 {
     for (int k = 0; k < *n; k++) {
-        if (is_volatile_abi(pool[k], abi)) {
+        if (is_volatile_abi(pool[k], abi) && pool[k] != 0 && pool[k] != 1) {
             int v = pool[k];
             for (int q = k; q < *n - 1; q++) pool[q] = pool[q + 1];
             (*n)--;
             return v;
         }
     }
-    return pool[--(*n)];   /* 理论上不会走到：易失寄存器最少 7 个，只需 2 个 */
+    return pool[--(*n)];   /* 不会走到：易失非 ax/cx 的 SysV 有 7 个、Win64 有 5 个 */
+}
+
+/* 跨块但不要求易失（rS / rK 在保存动作之后才写，可以取非易失寄存器） */
+static int take_cross_any(int *pool, int *n)
+{
+    for (int k = 0; k < *n; k++) {
+        if (pool[k] != 0 && pool[k] != 1) {
+            int v = pool[k];
+            for (int q = k; q < *n - 1; q++) pool[q] = pool[q + 1];
+            (*n)--;
+            return v;
+        }
+    }
+    return pool[--(*n)];
 }
 
 static void alloc_regs(poly_ctx *p, regs *r)
@@ -538,19 +565,25 @@ static void alloc_regs(poly_ctx *p, regs *r)
         int t = pool[k]; pool[k] = pool[q]; pool[q] = t;
     }
     int n = 14;
-    r->rB    = take_if(pool, &n, p->abi);
-    r->rP    = take_if(pool, &n, p->abi);
-    r->rS    = pool[0];
-    r->rK    = pool[1];
-    r->rI    = pool[2];
-    r->rJ    = pool[3];
-    r->rWi   = pool[4];
-    r->rL    = pool[5];
-    r->rT    = pool[6];
-    r->rT2   = pool[7];
-    r->rA    = pool[8];
-    r->rB2   = pool[9];
-    r->rJunk = pool[10];
+    r->rB    = take_cross(pool, &n, p->abi);
+    r->rP    = take_cross(pool, &n, p->abi);
+    r->rS    = take_cross_any(pool, &n);
+    r->rK    = take_cross_any(pool, &n);
+    r->rI    = pool[0];
+    r->rJ    = pool[1];
+    r->rWi   = pool[2];
+    r->rL    = pool[3];
+    r->rT    = pool[4];
+    r->rT2   = pool[5];
+    r->rA    = pool[6];
+    r->rB2   = pool[7];
+    r->rJunk = pool[8];
+}
+
+/* 批量追加：把一段已生成的字节接到缓冲末尾 */
+static void eb_cat(ebuf *e, const uint8_t *src, size_t n)
+{
+    for (size_t k = 0; k < n; k++) eb1(e, src[k]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -841,6 +874,242 @@ static int gen_stub(poly_ctx *p, ebuf *e, size_t pay_len, size_t gap)
     return POLY_OK;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 扁平化存根                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 把解密流程切成 4 个基本块交给 flatten 压平。
+ *
+ * 为什么 prologue 不进块：
+ *   它要做 `sub rsp, frame_poly`，而 flatten 的块体约定要求 rsp 平衡
+ *   （分发器用 [rsp+state_d] 寻址，任何块改变 rsp 都会让后续比较错位）。
+ *   所以栈帧分配放在扁平化区域之前，块内一律不再动 rsp。
+ *
+ * 由此产生的两个位移修正（都是真机跑出来的，不是推演）：
+ *   1. flatten 自己还会 `sub rsp, frame_fl`。块体运行时 rsp 比 prologue
+ *      结束时又低了 frame_fl 字节，所以块内访问 [rsp+X] 的 X 必须加上
+ *      frame_fl —— 而这个值要等 fl_build 返回才知道（帧大小随机），
+ *      故先按 0 生成、拿到 frame_fl 后回填立即数。
+ *   2. epilogue 的恢复动作也面临同样问题，且 slot+frame_fl 可能超过
+ *      disp8 上限 127。故 epilogue 先 `add rsp, frame_fl` 把 rsp 还原到
+ *      prologue 结束时的位置，再用 disp8 恢复寄存器，最后 add 回 frame_poly。
+ *
+ * 两遍构建的原因：
+ *   rP = rB + delta 中的 delta 依赖"扁平化后的存根总长"，而总长又要等
+ *   块体定型后才能算出。同 seed 的 fl_build 逐字节可复现，且回填只改
+ *   立即数（不改变任何指令长度），所以第二遍的布局与第一遍完全一致——
+ *   用 l2 == l1 显式断言这一点，不等它悄悄成立。
+ */
+static int gen_stub_flat(poly_ctx *p, ebuf *e, size_t pay_len, size_t gap)
+{
+    regs r;
+    alloc_regs(p, &r);
+
+    int nsave_max = (p->abi == POLY_ABI_WIN64) ? NSAVE_MAX_WIN64 : NSAVE_MAX_SYSV;
+    const int *csp = (p->abi == POLY_ABI_WIN64) ? CALLEE_SAVED_WIN64 : CALLEE_SAVED_SYSV;
+
+    uint32_t koff = (uint32_t)(nsave_max * 8 + 8) + 8u * rnd(p, 7u);
+    uint32_t soff = (koff + 16u) + 8u * rnd(p, 9u);
+    uint32_t frame_poly = ((soff + 256u) + 15u) & ~15u;
+
+    const int allr[13] = { r.rB, r.rS, r.rK, r.rI, r.rJ, r.rWi, r.rP,
+                           r.rL, r.rT, r.rT2, r.rA, r.rB2, r.rJunk };
+    int save[NSAVE_MAX_WIN64]; int ns = 0;
+    for (int t = 0; t < nsave_max; t++) {
+        int c = csp[t];
+        for (int q = 0; q < 13; q++)
+            if (allr[q] == c) { save[ns++] = c; break; }
+    }
+    uint32_t slot[NSAVE_MAX_WIN64];
+    for (int t = 0; t < NSAVE_MAX_WIN64; t++) slot[t] = 8u * (uint32_t)t;
+    for (int t = ns - 1; t > 0; t--) {
+        uint32_t q = rnd(p, (uint32_t)(t + 1));
+        uint32_t tmp = slot[t]; slot[t] = slot[q]; slot[q] = tmp;
+    }
+
+    uint64_t klo = 0, khi = 0;
+    for (int k = 0; k < 8; k++) {
+        klo |= (uint64_t)p->key[k] << (8 * k);
+        khi |= (uint64_t)p->key[8 + k] << (8 * k);
+    }
+
+    /* ---------- prologue（不在扁平化区域内） ---------- */
+    ebuf pro; memset(&pro, 0, sizeof pro);
+    size_t P = 0;
+    int npad = (int)rnd(p, 3);
+    for (int t = 0; t < npad; t++) {
+        int k = (int)rnd(p, 5);
+        for (int q = 0; q < NOPLEN[k]; q++) eb1(&pro, NOPS[k][q]);
+        P += NOPLEN[k];
+    }
+    size_t rip_off;
+    if (rnd(p, 2)) {
+        i_call32(&pro, 0);
+        i_pop64(&pro, r.rB);
+        rip_off = P + 5u;
+    } else {
+        uint32_t ro = 8u + rnd(p, 40u);
+        i_lea_rip(&pro, r.rB, (int32_t)ro - (int32_t)(P + 7u));
+        rip_off = ro;
+    }
+    i_op_rsp_i32(&pro, 5, (int32_t)frame_poly);
+    for (int t = 0; t < ns; t++)
+        i_mov64_mr_d8(&pro, 4, (int)slot[t], save[t]);
+    size_t pro_len = pro.n;
+
+    /* ---------- 块 0：S 盒基址 / 密钥 / 载荷指针 / 长度 ---------- */
+    ebuf b0; memset(&b0, 0, sizeof b0);
+    size_t soff_at, koff_at, delta_at;
+    i_lea_rsp(&b0, r.rS, (int32_t)soff);
+    soff_at = b0.n - 4u;
+    m_junks(p, &b0, r.rJunk);
+    i_movabs64(&b0, r.rT, klo);
+    i_movabs64(&b0, r.rT2, khi);
+    i_lea_rsp(&b0, r.rK, (int32_t)koff);
+    koff_at = b0.n - 4u;
+    i_mov64_mr_d8(&b0, r.rK, 0, r.rT);
+    i_mov64_mr_d8(&b0, r.rK, 8, r.rT2);
+    m_junks(p, &b0, r.rJunk);
+    i_mov64_rr(&b0, r.rP, r.rB);
+    uint32_t variant = rnd(p, 3);
+    switch (variant) {
+    case 0: i_op64_ri32(&b0, 0, r.rP, 0); break;
+    case 1: i_lea_rm32(&b0, r.rP, r.rP, 0); break;
+    default: i_op64_ri32(&b0, 5, r.rP, 0); break;
+    }
+    delta_at = b0.n - 4u;
+    if (rnd(p, 2)) {
+        emit_rex(&b0, 0, 0, 0, r.rL);
+        eb1(&b0, (uint8_t)(0xB8u | (r.rL & 7)));
+        e32(&b0, (uint32_t)pay_len);
+    } else {
+        i_movabs64(&b0, r.rL, (uint64_t)pay_len);
+    }
+    m_junks(p, &b0, r.rJunk);
+
+    /* ---------- 块 1：S 盒初始化 S[x] = x ---------- */
+    ebuf b1; memset(&b1, 0, sizeof b1);
+    m_zero(p, &b1, r.rL);
+    size_t init_top = b1.n;
+    i_mov8_mr(&b1, r.rS, r.rL, r.rL);
+    m_inc(p, &b1, r.rL);
+    i_op32_ri32(&b1, 7, r.rL, 256u);
+    size_t j_init = i_jcc32(&b1, rnd(p, 2) ? 0x85u : 0x82u);
+    patch_jcc32(&b1, j_init, init_top);
+    m_junks(p, &b1, r.rJunk);
+
+    /* ---------- 块 2：KSA ---------- */
+    ebuf b2; memset(&b2, 0, sizeof b2);
+    m_zero(p, &b2, r.rI);
+    m_zero(p, &b2, r.rJ);
+    m_zero(p, &b2, r.rWi);
+    size_t ksa_top = b2.n;
+    m_load8(p, &b2, r.rT, r.rS, r.rI);
+    i_op32_rr(&b2, 0x01u, r.rJ, r.rT);
+    m_load8(p, &b2, r.rT2, r.rK, r.rWi);
+    i_op32_rr(&b2, 0x01u, r.rJ, r.rT2);
+    m_mod256(p, &b2, r.rJ);
+    i_mov8_rm(&b2, r.rA, r.rS, r.rI);
+    i_mov8_rm(&b2, r.rB2, r.rS, r.rJ);
+    i_mov8_mr(&b2, r.rS, r.rI, r.rB2);
+    i_mov8_mr(&b2, r.rS, r.rJ, r.rA);
+    m_inc(p, &b2, r.rI);
+    m_inc(p, &b2, r.rWi);
+    i_op32_ri32(&b2, 7, r.rWi, 16u);
+    size_t j_wi = i_jcc32(&b2, 0x85u);
+    m_zero(p, &b2, r.rWi);
+    patch_jcc32(&b2, j_wi, b2.n);
+    i_op32_ri32(&b2, 7, r.rI, 256u);
+    size_t j_ksa = i_jcc32(&b2, rnd(p, 2) ? 0x85u : 0x82u);
+    patch_jcc32(&b2, j_ksa, ksa_top);
+    m_junks(p, &b2, r.rJunk);
+
+    /* ---------- 块 3：PRGA + epilogue ---------- */
+    ebuf b3; memset(&b3, 0, sizeof b3);
+    m_zero(p, &b3, r.rI);
+    m_zero(p, &b3, r.rJ);
+    m_zero(p, &b3, r.rL);
+    size_t prga_top = b3.n;
+    m_inc(p, &b3, r.rI);
+    m_mod256(p, &b3, r.rI);
+    m_load8(p, &b3, r.rT, r.rS, r.rI);
+    i_op32_rr(&b3, 0x01u, r.rJ, r.rT);
+    m_mod256(p, &b3, r.rJ);
+    i_mov8_rm(&b3, r.rA, r.rS, r.rI);
+    i_mov8_rm(&b3, r.rB2, r.rS, r.rJ);
+    i_mov8_mr(&b3, r.rS, r.rI, r.rB2);
+    i_mov8_mr(&b3, r.rS, r.rJ, r.rA);
+    m_load8(p, &b3, r.rT, r.rS, r.rI);
+    m_load8(p, &b3, r.rT2, r.rS, r.rJ);
+    i_op32_rr(&b3, 0x01u, r.rT, r.rT2);
+    m_mod256(p, &b3, r.rT);
+    i_mov8_rm(&b3, r.rA, r.rS, r.rT);
+    i_mov8_rm(&b3, r.rB2, r.rP, r.rL);
+    i_xor8_rr(&b3, r.rB2, r.rA);
+    i_mov8_mr(&b3, r.rP, r.rL, r.rB2);
+    m_inc(p, &b3, r.rL);
+    i_op32_ri32(&b3, 7, r.rL, (uint32_t)pay_len);
+    size_t j_prga = i_jcc32(&b3, 0x85u);
+    patch_jcc32(&b3, j_prga, prga_top);
+    m_junks(p, &b3, r.rJunk);
+
+    /*
+     * epilogue 必须放在块 3 内部：flatten 的出口段以 ret 结尾，
+     * 若让控制流走到那里就会返回调用者而不是跳向明文载荷。块体内的
+     * jmp rP 先执行，出口段的 ret 永远不可达。
+     */
+    i_op_rsp_i32(&b3, 0, 0);                 /* add rsp, frame_fl（回填） */
+    size_t fl_at = b3.n - 4u;
+    for (int t = ns - 1; t >= 0; t--)
+        i_mov64_rm_d8(&b3, save[t], 4, (int)slot[t]);
+    i_op_rsp_i32(&b3, 0, (int32_t)frame_poly);
+    i_jmp64(&b3, r.rP);
+
+    /* ---------- 两遍构建 ---------- */
+    uint64_t fseed = xs64(&p->rng);
+    size_t   ngarb = 2u + rnd(p, 5u);
+
+    fl_block blk[4];
+    blk[0].code = b0.b; blk[0].len = b0.n; blk[0].next = 1;
+    blk[1].code = b1.b; blk[1].len = b1.n; blk[1].next = 2;
+    blk[2].code = b2.b; blk[2].len = b2.n; blk[2].next = 3;
+    blk[3].code = b3.b; blk[3].len = b3.n; blk[3].next = -1;
+
+    uint8_t *o1 = NULL; size_t l1 = 0; uint32_t ff = 0;
+    if (fl_build(fseed, blk, 4, ngarb, &o1, &l1, &ff) != FL_OK) return POLY_ERR_MEM;
+    free(o1);
+
+    uint32_t delta = (uint32_t)(pro_len + l1 - rip_off + gap);
+    if (variant == 2) delta = (uint32_t)(0u - delta);
+    patch32(&b0, delta_at, delta);
+    patch32(&b0, soff_at,  soff + ff);
+    patch32(&b0, koff_at,  koff + ff);
+    patch32(&b3, fl_at,    ff);
+
+    uint8_t *o2 = NULL; size_t l2 = 0; uint32_t ff2 = 0;
+    if (fl_build(fseed, blk, 4, ngarb, &o2, &l2, &ff2) != FL_OK) return POLY_ERR_MEM;
+    if (l2 != l1 || ff2 != ff) { free(o2); return POLY_ERR_MEM; }
+
+    eb_cat(e, pro.b, pro.n);
+    eb_cat(e, o2, l2);
+    free(o2);
+    return POLY_OK;
+}
+
+int poly_set_flatten(poly_ctx *p, int on)
+{
+    if (!p) return POLY_ERR_PARAM;
+    p->flatten = on ? 1 : 0;
+    return 0;
+}
+
+int poly_flatten(poly_ctx *p)
+{
+    return p ? p->flatten : POLY_ERR_PARAM;
+}
+
 /* ------------------------------------------------------------------ */
 /* 对外接口                                                            */
 /* ------------------------------------------------------------------ */
@@ -861,7 +1130,8 @@ int poly_build(poly_ctx *p, const uint8_t *payload, size_t pay_len,
 
     ebuf e;
     memset(&e, 0, sizeof(e));
-    int rc = gen_stub(p, &e, pay_len, gap);
+    int rc = p->flatten ? gen_stub_flat(p, &e, pay_len, gap)
+                        : gen_stub(p, &e, pay_len, gap);
     if (rc != POLY_OK) return rc;
 
     uint8_t *ct = NULL;

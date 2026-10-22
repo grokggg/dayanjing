@@ -259,11 +259,13 @@ static size_t gen_opaque_guard(uint64_t *s, eb *e)
 /* ============================ 构建 ============================ */
 
 int fl_build(uint64_t seed, const fl_block *blocks, size_t nblk,
-             size_t ngarbage, uint8_t **out, size_t *out_len)
+             size_t ngarbage, uint8_t **out, size_t *out_len,
+             uint32_t *frame_out)
 {
     if (!out || !out_len) return FL_ERR_PARAM;
     *out = NULL;
     *out_len = 0;
+    if (frame_out) *frame_out = 0;
 
     if (!blocks || nblk == 0 || nblk > FL_MAX_BLOCKS) return FL_ERR_PARAM;
     if (ngarbage > FL_MAX_GARBAGE) return FL_ERR_PARAM;
@@ -457,6 +459,7 @@ int fl_build(uint64_t seed, const fl_block *blocks, size_t nblk,
 
     *out     = e.b;
     *out_len = e.n;
+    if (frame_out) *frame_out = (uint32_t)L.frame;
     e.b = NULL;
     eb_free(&e);
     return FL_OK;

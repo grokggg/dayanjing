@@ -129,22 +129,22 @@ static void t_param(void)
     size_t  bl = emit_block(body, 0);
     fl_block b1 = { body, bl, -1 };
 
-    CHECK(fl_build(1, NULL, 1, 0, &out, &olen) == FL_ERR_PARAM, "NULL blocks -> PARAM");
-    CHECK(fl_build(1, &b1, 0, 0, &out, &olen) == FL_ERR_PARAM, "nblk=0 -> PARAM");
-    CHECK(fl_build(1, &b1, FL_MAX_BLOCKS + 1, 0, &out, &olen) == FL_ERR_PARAM,
+    CHECK(fl_build(1, NULL, 1, 0, &out, &olen, NULL) == FL_ERR_PARAM, "NULL blocks -> PARAM");
+    CHECK(fl_build(1, &b1, 0, 0, &out, &olen, NULL) == FL_ERR_PARAM, "nblk=0 -> PARAM");
+    CHECK(fl_build(1, &b1, FL_MAX_BLOCKS + 1, 0, &out, &olen, NULL) == FL_ERR_PARAM,
           "nblk 超上限 -> PARAM");
-    CHECK(fl_build(1, &b1, 1, FL_MAX_GARBAGE + 1, &out, &olen) == FL_ERR_PARAM,
+    CHECK(fl_build(1, &b1, 1, FL_MAX_GARBAGE + 1, &out, &olen, NULL) == FL_ERR_PARAM,
           "ngarbage 超上限 -> PARAM");
-    CHECK(fl_build(1, &b1, 1, 0, NULL, &olen) == FL_ERR_PARAM, "NULL out -> PARAM");
+    CHECK(fl_build(1, &b1, 1, 0, NULL, &olen, NULL) == FL_ERR_PARAM, "NULL out -> PARAM");
 
     fl_block bad = { body, bl, 5 };           /* next 越界 */
-    CHECK(fl_build(1, &bad, 1, 0, &out, &olen) == FL_ERR_PARAM, "next 越界 -> PARAM");
+    CHECK(fl_build(1, &bad, 1, 0, &out, &olen, NULL) == FL_ERR_PARAM, "next 越界 -> PARAM");
 
     fl_block loop = { body, bl, 0 };          /* 自环，无出口 */
-    CHECK(fl_build(1, &loop, 1, 0, &out, &olen) == FL_ERR_NOEXIT, "无出口 -> NOEXIT");
+    CHECK(fl_build(1, &loop, 1, 0, &out, &olen, NULL) == FL_ERR_NOEXIT, "无出口 -> NOEXIT");
 
     fl_block nocode = { NULL, 16, -1 };       /* len>0 但 code 为空 */
-    CHECK(fl_build(1, &nocode, 1, 0, &out, &olen) == FL_ERR_PARAM, "code 空 -> PARAM");
+    CHECK(fl_build(1, &nocode, 1, 0, &out, &olen, NULL) == FL_ERR_PARAM, "code 空 -> PARAM");
 }
 
 /* 非物理顺序：0 -> 2 -> 1 -> exit，seq 应为 132 */
@@ -159,7 +159,7 @@ static void t_reorder(void)
     };
 
     uint8_t *out = NULL; size_t olen = 0;
-    int rc = fl_build(0xC0FFEE01ULL, blocks, 3, 4, &out, &olen);
+    int rc = fl_build(0xC0FFEE01ULL, blocks, 3, 4, &out, &olen, NULL);
     CHECK(rc == FL_OK && out && olen > 0, "构建成功（3 真块 + 4 垃圾块）");
     if (rc != FL_OK) return;
 
@@ -192,7 +192,7 @@ static void t_linear(void)
     };
 
     uint8_t *out = NULL; size_t olen = 0;
-    int rc = fl_build(0x1234ABCDULL, blocks, 3, 0, &out, &olen);
+    int rc = fl_build(0x1234ABCDULL, blocks, 3, 0, &out, &olen, NULL);
     CHECK(rc == FL_OK, "构建成功（含空块体、无垃圾块）");
     if (rc != FL_OK) return;
 
@@ -228,7 +228,7 @@ static void t_many_seeds(void)
     for (int t = 0; t < 300; t++) {
         uint8_t *out = NULL; size_t olen = 0;
         int rc = fl_build(0x5EED0000ULL + (uint64_t)t * 2654435761u,
-                          blocks, 4, 6, &out, &olen);
+                          blocks, 4, 6, &out, &olen, NULL);
         if (rc != FL_OK) { bad_rc++; continue; }
         void *p = code_load(out, olen);
         if (!p) { bad_rc++; free(out); continue; }
@@ -293,7 +293,7 @@ static void t_garbage_unreachable(void)
     for (int t = 0; t < 40; t++) {
         uint8_t *out = NULL; size_t olen = 0;
         if (fl_build(0x9A9A0000ULL + (uint64_t)t * 7919u, blocks, 2, 5,
-                     &out, &olen) != FL_OK) continue;
+                     &out, &olen, NULL) != FL_OK) continue;
         void *p = code_load(out, olen);
         if (!p) { free(out); continue; }
 
@@ -339,7 +339,7 @@ static void t_no_signature(void)
     for (int i = 0; i < NS; i++) {
         s[i] = NULL; sl[i] = 0;
         if (fl_build(0xA5A50000ULL + (uint64_t)i * 40503u,
-                     blocks, 3, 5, &s[i], &sl[i]) != FL_OK) continue;
+                     blocks, 3, 5, &s[i], &sl[i], NULL) != FL_OK) continue;
         built++;
         if (sl[i] < minlen) minlen = sl[i];
     }

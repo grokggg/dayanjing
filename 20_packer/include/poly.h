@@ -74,6 +74,21 @@ void      poly_free(poly_ctx *p);
 int       poly_abi(poly_ctx *p);
 
 /*
+ * 开启/关闭控制流扁平化（默认关闭，on 取 0 或 1）。返回 0 表示已设置。
+ *
+ * 开启后，存根的解密流程不再是线性布局，而是被切成 4 个基本块后交给
+ * 20_packer/flatten 压平：块物理排列顺序随机、块间转移是 xor 密文态而非
+ * 立即数、分发器里混有永不命中的垃圾分支。执行序与物理序完全解耦，
+ * 静态重建原始 CFG 需要值域分析。
+ *
+ * 关闭时为原来的线性布局（段内顺序即执行序），用于对照与回归。
+ */
+int       poly_set_flatten(poly_ctx *p, int on);
+
+/* 取回当前扁平化开关（0/1）；p 为空返回 POLY_ERR_PARAM。 */
+int       poly_flatten(poly_ctx *p);
+
+/*
  * 生成一个多态制品。
  *   payload / pay_len : 待包裹的明文载荷（位置无关机器码）
  *   out / out_len     : 出参，malloc 分配，调用方 free
