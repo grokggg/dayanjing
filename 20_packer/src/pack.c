@@ -21,7 +21,15 @@ static const uint8_t PK_MAGIC[PK_MAGIC_LEN] = {
     'D', 'J', 'P', 'A', 'K', 0x01, 0x00, 0x00
 };
 
-static const uint8_t PK_INFO[] = "dayanjing:packer:v1";
+/* HKDF-Expand 的 info。原先写成可读串，会在 .rodata 留下
+   "dayanjing:packer:v1"；改为异或存放，字节值不变（见 pack_int.h）。 */
+static const uint8_t PK_INFO_OBF[] = {
+    PK_LB('d'), PK_LB('a'), PK_LB('y'), PK_LB('a'), PK_LB('n'),
+    PK_LB('j'), PK_LB('i'), PK_LB('n'), PK_LB('g'), PK_LB(':'),
+    PK_LB('p'), PK_LB('a'), PK_LB('c'), PK_LB('k'), PK_LB('e'),
+    PK_LB('r'), PK_LB(':'), PK_LB('v'), PK_LB('1')
+};
+#define PK_INFO_LEN (sizeof(PK_INFO_OBF))
 
 const char *pk_errstr(int e)
 {
@@ -106,13 +114,20 @@ int pk_derive_key(const uint8_t *salt, size_t salt_len,
                          uint8_t key[PK_KEY_LEN])
 {
     uint8_t prk[HKDF_HASH_LEN];
+    uint8_t info[PK_INFO_LEN];
 
     if (!seed) return PK_ERR_ARG;
     if (hkdf_extract(salt, salt_len, seed, seed_len, prk) != HASH_OK)
         return PK_ERR_ARG;
-    if (hkdf_expand(prk, PK_INFO, sizeof(PK_INFO) - 1u,
-                    key, PK_KEY_LEN) != HASH_OK)
+    PK_LABEL_DEC(info, PK_INFO_OBF, PK_INFO_LEN);
+    if (hkdf_expand(prk, info, PK_INFO_LEN,
+                    key, PK_KEY_LEN) != HASH_OK) {
+        memset(info, 0, sizeof(info));
+        memset(prk, 0, sizeof(prk));
         return PK_ERR_ARG;
+    }
+    memset(info, 0, sizeof(info));
+    memset(prk, 0, sizeof(prk));
     return PK_OK;
 }
 

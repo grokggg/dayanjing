@@ -66,8 +66,24 @@ static const uint8_t V4_MAGIC[PK_MAGIC_LEN] = {
     0x9e, 0x2b, 0xc7, 0x51, 0xa4, 0x36, 0xf0, 0x1d
 };
 
-static const uint8_t SHAPE_SALT[] = "dayanjing:packer:v4:shape";
-static const uint8_t SHAPE_INFO[] = "dayanjing:packer:v4:mask";
+/* 掩码派生的 salt / info。与原可读串逐字节相同，异或存放以避免
+   .rodata 中出现 "dayanjing:packer:*"（见 pack_int.h）。 */
+static const uint8_t SHAPE_SALT_OBF[] = {
+    PK_LB('d'), PK_LB('a'), PK_LB('y'), PK_LB('a'), PK_LB('n'),
+    PK_LB('j'), PK_LB('i'), PK_LB('n'), PK_LB('g'), PK_LB(':'),
+    PK_LB('p'), PK_LB('a'), PK_LB('c'), PK_LB('k'), PK_LB('e'),
+    PK_LB('r'), PK_LB(':'), PK_LB('v'), PK_LB('4'), PK_LB(':'),
+    PK_LB('s'), PK_LB('h'), PK_LB('a'), PK_LB('p'), PK_LB('e')
+};
+static const uint8_t SHAPE_INFO_OBF[] = {
+    PK_LB('d'), PK_LB('a'), PK_LB('y'), PK_LB('a'), PK_LB('n'),
+    PK_LB('j'), PK_LB('i'), PK_LB('n'), PK_LB('g'), PK_LB(':'),
+    PK_LB('p'), PK_LB('a'), PK_LB('c'), PK_LB('k'), PK_LB('e'),
+    PK_LB('r'), PK_LB(':'), PK_LB('v'), PK_LB('4'), PK_LB(':'),
+    PK_LB('m'), PK_LB('a'), PK_LB('s'), PK_LB('k')
+};
+#define SHAPE_SALT_LEN (sizeof(SHAPE_SALT_OBF))
+#define SHAPE_INFO_LEN (sizeof(SHAPE_INFO_OBF))
 
 /* ---------- 掩码派生 ---------- */
 
@@ -83,14 +99,18 @@ static int pk_shape_mask(const uint8_t *seed, size_t seed_len,
                          uint8_t mask[PK_HDR_V3_LEN])
 {
     uint8_t prk[HKDF_HASH_LEN];
-    uint8_t info[sizeof(SHAPE_INFO) - 1u + PK_NONCE_LEN];
+    uint8_t salt[SHAPE_SALT_LEN];
+    uint8_t info[SHAPE_INFO_LEN + PK_NONCE_LEN];
 
-    if (hkdf_extract(SHAPE_SALT, sizeof(SHAPE_SALT) - 1u,
-                     seed, seed_len, prk) != HASH_OK)
+    PK_LABEL_DEC(salt, SHAPE_SALT_OBF, SHAPE_SALT_LEN);
+    if (hkdf_extract(salt, SHAPE_SALT_LEN, seed, seed_len, prk) != HASH_OK) {
+        memset(salt, 0, sizeof(salt));
         return PK_ERR_ARG;
+    }
+    memset(salt, 0, sizeof(salt));
 
-    memcpy(info, SHAPE_INFO, sizeof(SHAPE_INFO) - 1u);
-    memcpy(info + sizeof(SHAPE_INFO) - 1u, nonce, PK_NONCE_LEN);
+    PK_LABEL_DEC(info, SHAPE_INFO_OBF, SHAPE_INFO_LEN);
+    memcpy(info + SHAPE_INFO_LEN, nonce, PK_NONCE_LEN);
 
     if (hkdf_expand(prk, info, sizeof(info), mask, PK_HDR_V3_LEN) != HASH_OK) {
         memset(prk, 0, sizeof(prk));
