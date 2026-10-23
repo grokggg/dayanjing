@@ -32,7 +32,7 @@
   python3 scripts/mutation_audit.py --sample 2 # 抽样（常态化用，控制耗时）
   python3 scripts/mutation_audit.py --only M1,M4
 """
-import os, sys, shutil, subprocess, hashlib, random, time, signal, atexit
+import os, sys, shutil, subprocess, hashlib, random, time, signal, atexit, re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -190,6 +190,31 @@ MUTATIONS = [
         # 与 M9 同源的另一类破坏：功能完全正确（返回值一样），只是
         # 提前退出。插桩点在循环体最前面才能捕获它 —— 放在循环体
         # 末尾的话，写在末尾的 break 就逃过去了。
+    },
+    {
+        "id": "M14",
+        "desc": "00_crypto: 常量时间比较改为发现不同即 return 0（早退，功能等价）",
+        "file": "00_crypto/src/crypto_gcm.c",
+        "old": "        diff |= (uint8_t)(a[i] ^ b[i]);\n    }\n    return diff == 0;",
+        "new": "        diff |= (uint8_t)(a[i] ^ b[i]);\n        if (diff) return 0;\n    }\n    return diff == 0;",
+        "mod": "00_crypto",
+        "bin": "build/test_gcm",
+        # M13 是 break，M14 是 return。两者功能返回值都与原实现一致
+        # （全同 -> 1，任一不同 -> 0），差别只在退出方式。只做 M13 就
+        # 断言"早退已覆盖"是过度声称：改代码的人用 return 是同样自然
+        # 的写法，必须各自有变异钉住。
+    },
+    {
+        "id": "M15",
+        "desc": "00_crypto: 常量时间比较改为循环条件带 !diff（早退，最隐蔽的一种）",
+        "file": "00_crypto/src/crypto_gcm.c",
+        "old": "    uint8_t diff = 0;\n    for (size_t i = 0; i < len; i++) {",
+        "new": "    uint8_t diff = 0;\n    for (size_t i = 0; i < len && !diff; i++) {",
+        "mod": "00_crypto",
+        "bin": "build/test_gcm",
+        # 第三种早退写法：不动循环体，只改循环条件。比 break/return 更
+        # 隐蔽 —— 读循环体看不出问题。若只测了 M13/M14 就宣称"早退全覆盖"，
+        # 这一条会漏。
     },
     {
         "id": "M10",
@@ -383,24 +408,66 @@ LOCK = "/tmp/mutation_audit.lock"
 _OWN_LOCK = False
 
 
+def _lock_owner_alive():
+    """判断现存锁的持有者是否还活着。
+
+    不仅看 /proc/<pid> 是否存在，还要确认它确实是本脚本：
+    pid 会被复用，一个无关进程恰好占用该 pid 时，只看存在性会误判为
+    "还活着"，于是审计被一个根本不存在的实例挡住。
+    """
+    try:
+        txt = open(LOCK).read().strip()
+    except Exception:
+        return True, "?"   # 读不出来就保守认为活着，不擅自删
+    m = re.search(r"pid=(\d+)", txt)
+    if not m:
+        return True, (txt or "?")   # 格式不明，保守
+    pid = int(m.group(1))
+    if pid == os.getpid():
+        return True, txt
+    if not os.path.exists("/proc/%d" % pid):
+        return False, txt
+    try:
+        cmd = open("/proc/%d/cmdline" % pid, "rb").read().decode("utf-8", "replace")
+    except Exception:
+        cmd = ""
+    if "mutation_audit" not in cmd:
+        return False, txt          # pid 被别的进程复用，非本脚本实例
+    return True, txt
+
+
 def acquire_lock():
     """单实例锁。
 
     两个审计并发时，A 还原文件的瞬间 B 正要移回 .mutbak —— 实测出现过
     FileNotFoundError: .mutbak 不存在，且源码随后被永久留在变异状态。
     并发不是理论风险：上层超时杀掉进程后，孤儿进程仍在跑。
+
+    【陈旧锁必须自动清除】
+    持有者若被 SIGKILL（atexit 来不及跑），锁文件会永久残留，此后
+    每一次审计都被这一行挡住 —— 常态化下表现为"变异审计从某天起再也
+    没跑过"，而报告上不会有任何提示。本轮实测就被它阻塞了两次。
+    故：持有者已死或 pid 已被复用时自动清锁继续，并留 WARN 可见。
     """
     global _OWN_LOCK
     try:
         fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
+        alive, owner = _lock_owner_alive()
+        if alive:
+            print("[FATAL] 另一个审计实例正在运行（%s）。"
+                  "若确认已死，手动删除 %s" % (owner, LOCK))
+            sys.exit(2)
+        print("[WARN] 检测到陈旧锁（%s，持有者已不在），自动清除后继续" % owner)
         try:
-            owner = open(LOCK).read().strip()
-        except Exception:
-            owner = "?"
-        print("[FATAL] 另一个审计实例正在运行（%s）。"
-              "若确认已死，手动删除 %s" % (owner, LOCK))
-        sys.exit(2)
+            os.unlink(LOCK)
+        except OSError:
+            pass
+        try:
+            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            print("[FATAL] 清锁后仍无法获取 %s，可能真有并发实例" % LOCK)
+            sys.exit(2)
     os.write(fd, ("pid=%d" % os.getpid()).encode())
     os.close(fd)
     _OWN_LOCK = True

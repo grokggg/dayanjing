@@ -101,6 +101,28 @@ for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
     run_c "$m"
 done
 
+# 常量时间比较的【机器码级】守卫。
+#
+# 为什么单列一项，而不是并入 00_crypto 的 run_c：
+#   mutation_audit 的 M13/M14/M15 捕获的是【源码级】早退。但源码语义正确
+#   不等于最终机器码无早退 —— 编译器理论上可把无副作用的累积循环优化成
+#   条件跳出。那一层源码测试永远测不到，只能审查汇编。人审一次会随时间
+#   腐烂（换编译器、改代码就没人再查），故固化为可复跑判据并纳入回归。
+#
+# 依赖 build/crypto_gcm.o（生产构建，不带 CRYPTO_CT_INSTRUMENT），
+# 该产物已由上方 00_crypto 的 run_c 构建。
+run_ct_asm() {
+    printf "=== %-16s " "ct_asm_guard"
+    if (cd "$ROOT/00_crypto" && python3 scripts/check_ct_asm.py >/tmp/t_ct_asm.log 2>&1); then
+        echo "PASS"; grep -E "^\[PASS\]" /tmp/t_ct_asm.log | sed 's/^/    /'
+        passed=$((passed+1))
+    else
+        echo "FAIL"; cat /tmp/t_ct_asm.log
+        failed=$((failed+1))
+    fi
+}
+run_ct_asm
+
 # 单体植入体：全仓唯一"把所有能力链进同一个可部署二进制"的验证。
 # 形态与 run_c 的 test_* 不同（单个可执行 + --selftest），故单独处理。
 #
