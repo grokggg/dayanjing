@@ -248,7 +248,11 @@ if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     if timeout 1200 python3 "$ROOT/scripts/mutation_audit.py" $MUT_ARGS \
         > /tmp/mut.log 2>&1; then
         echo "  [PASS] mutation_audit ($MUT_MODE)"
-        grep -E "^捕获|^存活|^审计失效" /tmp/mut.log | sed 's/^/         /'
+        # 必须带上"已知盲区"两栏：它们是 SURVIVED 但审计不失败的项，
+        # 若只 grep 前三项，回归报告会完全看不见"哪些缺陷测不了"，
+        # 等于把盲区单列出来的努力白费掉。
+        grep -E "^捕获|^存活|^审计失效|^符合预期|^已知盲区|^\[!\]|^    M[0-9]" \
+            /tmp/mut.log | sed 's/^/         /'
         passed=$((passed + 1))
     else
         echo "  [FAIL] mutation_audit ($MUT_MODE)  (见 /tmp/mut.log)"
