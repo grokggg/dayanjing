@@ -227,5 +227,35 @@ else
     echo "=== deploy_crossns   SKIP(无 root/netns 能力) ==="
 fi
 
+# ---------------------------------------------------------------------------
+# 变异审计：把"此前声称已修复"的缺陷注入回退，验证测试是否真能捕获。
+# 放在最后：它会改源码再恢复，中途跑会污染后续用例的构建产物。
+#
+# 常态化用抽样（默认 1 个）：全量 6 个逐个重建太慢，曾导致整个回归超时。
+# 每次抽样不同，长期收敛到全覆盖；要一次性全量用 MUTATION=full。
+#
+# 判定：存活(测试仍全绿) 与 审计失效(锚点腐烂/挂起) 都计入 failed。
+# 后者尤其不能放过——锚点失效若记 SKIP，变异集合会静默腐烂，
+# 报告上永远"0 存活"，实际审计面在缩小。
+MUT_MODE=${MUTATION:-sample:1}
+if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
+    echo "=== mutation_audit ==="
+    case "$MUT_MODE" in
+        full)     MUT_ARGS="" ;;
+        sample:*) MUT_ARGS="--sample ${MUT_MODE#sample:}" ;;
+        *)        MUT_ARGS="" ;;
+    esac
+    if timeout 1200 python3 "$ROOT/scripts/mutation_audit.py" $MUT_ARGS \
+        > /tmp/mut.log 2>&1; then
+        echo "  [PASS] mutation_audit ($MUT_MODE)"
+        grep -E "^捕获|^存活|^审计失效" /tmp/mut.log | sed 's/^/         /'
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] mutation_audit ($MUT_MODE)  (见 /tmp/mut.log)"
+        sed -n '/=== 变异审计结果 ===/,$p' /tmp/mut.log
+        failed=$((failed + 1))
+    fi
+fi
+
 echo "-------- passed: $passed  failed: $failed  skipped: $skipped --------"
 exit $failed
