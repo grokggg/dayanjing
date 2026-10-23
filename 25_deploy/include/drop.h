@@ -24,6 +24,10 @@
 #ifndef DROP_H
 #define DROP_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -142,5 +146,9 @@ int dp_asm_exec(const dp_asm_t *a, const uint8_t *seed, size_t seed_len);
  * 成功且载荷终结进程时不返回；载荷主动返回则返回 DP_OK 并释放映射。
  */
 int dp_asm_exec_pic(const dp_asm_t *a);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* DROP_H */

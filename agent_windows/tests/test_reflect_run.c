@@ -29,39 +29,48 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* ---------------- 合成 PE 布局 ---------------- */
+#include "synth_pe.h"
 
-#define IMAGE_BASE   0x140000000ULL
-#define SECT_ALIGN   0x1000u
-#define FILE_ALIGN   0x200u
-#define HDR_SIZE     0x400u
+/*
+ * 旧名别名：本文件此前自带一份合成 PE 构造器。抽出共享文件后保留这些别名，
+ * 使用例代码无需批量改名 —— 但布局常量只有一处定义，不会再次分叉。
+ */
+#define IMAGE_BASE   SYNTH_IMAGE_BASE
+#define SECT_ALIGN   SYNTH_SECT_ALIGN
+#define FILE_ALIGN   SYNTH_FILE_ALIGN
+#define HDR_SIZE     SYNTH_HDR_SIZE
+#define TEXT_RVA     SYNTH_TEXT_RVA
+#define TEXT_RAW     SYNTH_TEXT_RAW
+#define RDATA_RVA    SYNTH_RDATA_RVA
+#define RDATA_RAW    SYNTH_RDATA_RAW
+#define SIZE_IMAGE   SYNTH_SIZE_IMAGE
+#define FILE_SIZE    SYNTH_FILE_SIZE
+#define STUB_ENTRY   SYNTH_STUB_ENTRY
+#define STUB_TLS     SYNTH_STUB_TLS
+#define SLOT_RVA     SYNTH_SLOT_RVA
+#define MARK_RVA     SYNTH_MARK_RVA
+#define RELOC_RVA    SYNTH_RELOC_RVA
+#define DLLNAME_RVA  SYNTH_DLLNAME_RVA
+#define IMPDESC_RVA  SYNTH_IMPDESC_RVA
+#define ILT_RVA      SYNTH_ILT_RVA
+#define IAT_RVA      SYNTH_IAT_RVA
+#define HINTNM_RVA   SYNTH_HINTNM_RVA
+#define TLSDIR_RVA   SYNTH_TLSDIR_RVA
+#define TLSCB_RVA    SYNTH_TLSCB_RVA
+#define REC_ENTRY_RVA SYNTH_REC_ENTRY_RVA
+#define REC_TLS_RVA   SYNTH_REC_TLS_RVA
+#define REC_COUNT     SYNTH_REC_COUNT
+#define REC_BASE      SYNTH_REC_BASE
+#define REC_REASON    SYNTH_REC_REASON
+#define REC_PTR       SYNTH_REC_PTR
+#define REC_SEQ       SYNTH_REC_SEQ
+#define TF(rva) ((rva) - SYNTH_TEXT_RVA + SYNTH_TEXT_RAW)
+#define RF(rva) ((rva) - SYNTH_RDATA_RVA + SYNTH_RDATA_RAW)
 
-#define TEXT_RVA     0x1000u
-#define TEXT_RAW     0x400u
-#define RDATA_RVA    0x2000u
-#define RDATA_RAW    0x1400u
-
-#define SIZE_IMAGE   0x3000u
-#define FILE_SIZE    0x2400u
-
-/* .text 内部布局 */
-#define STUB_ENTRY   0x1000u   /* 入口点桩 */
-#define STUB_TLS     0x1100u   /* TLS 回调桩 */
-#define SLOT_RVA     0x1200u   /* DIR64 重定位槽，初值 = IMAGE_BASE + MARK_RVA */
-#define MARK_RVA     0x1300u   /* 标记数据 "MARK" */
-#define RELOC_RVA    0x1400u   /* 重定位块 */
-
-/* .rdata 内部布局 */
-#define DLLNAME_RVA  0x2000u
-#define IMPDESC_RVA  0x2010u
-#define ILT_RVA      0x2040u
-#define IAT_RVA      0x2050u
-#define HINTNM_RVA   0x2060u
-#define TLSDIR_RVA   0x2100u
-#define TLSCB_RVA    0x2200u
-
-#define TF(rva) ((rva) - TEXT_RVA + TEXT_RAW)
-#define RF(rva) ((rva) - RDATA_RVA + RDATA_RAW)
+/* 局部字节写辅助（仅用例内部改字节用；PE 构造本身在 synth_pe.c） */
+static void wr16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
+static void wr32(uint8_t *p, uint32_t v)
+{ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
 
 static int g_pass, g_fail;
 
@@ -79,157 +88,6 @@ static int g_pass, g_fail;
  *   and rsp,-16，结果把 call 压入的返回地址移走了 —— callee 的 ret 弹到垃圾
  *   地址，进程 SIGSEGV。改为纯内存写入后，栈与对齐都不再是变量。
  */
-#define REC_ENTRY_RVA  0x1500u   /* 入口点记录区 */
-#define REC_TLS_RVA    0x1540u   /* TLS 回调记录区 */
-#define REC_COUNT      0x00u
-#define REC_BASE       0x08u
-#define REC_REASON     0x10u
-#define REC_PTR        0x18u
-#define REC_SEQ        0x20u
-
-static volatile uint64_t g_seq;
-
-static uint64_t rec_get(uint8_t *region, uint32_t rec_rva, uint32_t field)
-{
-    uint64_t v;
-    memcpy(&v, region + rec_rva + field, 8);
-    return v;
-}
-
-/* ---------------- 桩代码生成 ---------------- */
-
-/*
- * 桩（66 字节），入参按 Windows x64 约定为 rcx=base / rdx=reason：
- *   mov [rcx+rec+0x08], rcx            ; 记录 base
- *   mov [rcx+rec+0x10], rdx            ; 记录 reason
- *   mov rax, [rcx+SLOT_RVA]            ; 读取经重定位的指针
- *   mov [rcx+rec+0x18], rax            ; 记录该指针
- *   movabs rax, &g_seq
- *   inc qword [rax]
- *   mov rdx, [rax]
- *   mov [rcx+rec+0x20], rdx            ; 记录全局序号（用于判定执行顺序）
- *   inc qword [rcx+rec+0x00]           ; 记录执行次数
- *   mov rax, imm32(1)                  ; 返回值（DllMain TRUE）
- *   ret
- */
-static void emit_stub(uint8_t *b, uint32_t file_off, uint32_t rec_rva, int ret_true)
-{
-    uint8_t *p = b + file_off;
-    uint64_t seq_addr = (uint64_t)(uintptr_t)&g_seq;
-    uint32_t d;
-
-    memset(p, 0, 66);
-
-    d = rec_rva + REC_BASE;
-    p[0]=0x48; p[1]=0x89; p[2]=0x89; memcpy(p+3, &d, 4);          /* [rcx+d], rcx */
-    d = rec_rva + REC_REASON;
-    p[7]=0x48; p[8]=0x89; p[9]=0x91; memcpy(p+10, &d, 4);         /* [rcx+d], rdx */
-    d = SLOT_RVA;
-    p[14]=0x48; p[15]=0x8b; p[16]=0x81; memcpy(p+17, &d, 4);      /* rax, [rcx+d] */
-    d = rec_rva + REC_PTR;
-    p[21]=0x48; p[22]=0x89; p[23]=0x81; memcpy(p+24, &d, 4);      /* [rcx+d], rax */
-    p[28]=0x48; p[29]=0xb8; memcpy(p+30, &seq_addr, 8);           /* movabs rax */
-    p[38]=0x48; p[39]=0xff; p[40]=0x00;                           /* inc qword [rax] */
-    p[41]=0x48; p[42]=0x8b; p[43]=0x10;                           /* mov rdx,[rax] */
-    d = rec_rva + REC_SEQ;
-    p[44]=0x48; p[45]=0x89; p[46]=0x91; memcpy(p+47, &d, 4);      /* [rcx+d], rdx */
-    d = rec_rva + REC_COUNT;
-    p[51]=0x48; p[52]=0xff; p[53]=0x81; memcpy(p+54, &d, 4);      /* inc qword */
-    p[58]=0x48; p[59]=0xc7; p[60]=0xc0;
-    p[61]= (uint8_t)(ret_true ? 1 : 0); p[62]=0; p[63]=0; p[64]=0; /* mov rax, imm32 */
-    p[65]=0xc3;                                                   /* ret */
-}
-
-/* 入口点返回 FALSE 的桩：仅把返回值改为 0 */
-static void emit_stub_false(uint8_t *b, uint32_t file_off)
-{
-    emit_stub(b, file_off, REC_ENTRY_RVA, 0);
-}
-
-/* ---------------- PE 构造 ---------------- */
-
-static void wr16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
-static void wr32(uint8_t *p, uint32_t v)
-{ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
-static void wr64(uint8_t *p, uint64_t v)
-{ uint32_t i; for (i=0;i<8;i++) p[i]=(uint8_t)(v >> (8*i)); }
-
-static void build_pe(uint8_t *b, size_t cap, int with_entry, int with_tls)
-{
-    uint8_t *opt, *dd, *sh;
-
-    if (cap < FILE_SIZE) return;
-    memset(b, 0, cap);
-
-    wr16(b + 0, 0x5A4D);
-    wr32(b + 0x3C, 0x40);
-
-    b[0x40]='P'; b[0x41]='E'; b[0x42]=0; b[0x43]=0;
-    wr16(b + 0x44, 0x8664);          /* AMD64 */
-    wr16(b + 0x46, 2);               /* NumberOfSections */
-    wr16(b + 0x54, 240);             /* SizeOfOptionalHeader */
-    wr16(b + 0x56, 0x2022);          /* EXECUTABLE_IMAGE|LARGE_ADDRESS_AWARE|DLL */
-
-    opt = b + 0x58;
-    wr16(opt + 0,  0x020B);          /* PE32+ */
-    wr32(opt + 16, with_entry ? STUB_ENTRY : 0);   /* AddressOfEntryPoint */
-    wr64(opt + 24, IMAGE_BASE);
-    wr32(opt + 32, SECT_ALIGN);
-    wr32(opt + 36, FILE_ALIGN);
-    wr32(opt + 56, SIZE_IMAGE);
-    wr32(opt + 60, HDR_SIZE);
-    wr16(opt + 68, 3);               /* Subsystem = CUI */
-    wr16(opt + 70, 0x8160);
-    wr32(opt + 108, 16);             /* NumberOfRvaAndSizes */
-
-    dd = opt + 112;
-    wr32(dd + 1*8,     IMPDESC_RVA); wr32(dd + 1*8 + 4, 40);   /* Import */
-    wr32(dd + 5*8,     RELOC_RVA);   wr32(dd + 5*8 + 4, 12);   /* BaseReloc */
-    if (with_tls) {
-        wr32(dd + 9*8, TLSDIR_RVA);  wr32(dd + 9*8 + 4, 40);   /* TLS */
-    }
-
-    sh = b + 0x148;
-    memcpy(sh + 0, ".text\0\0\0", 8);
-    wr32(sh + 8,  0x1000);           /* VirtualSize */
-    wr32(sh + 12, TEXT_RVA);
-    wr32(sh + 16, 0x1000);           /* SizeOfRawData */
-    wr32(sh + 20, TEXT_RAW);
-    wr32(sh + 36, 0x60000020);       /* CODE|EXECUTE|READ */
-
-    memcpy(sh + 40, ".rdata\0\0", 8);
-    wr32(sh + 48, 0x1000);
-    wr32(sh + 52, RDATA_RVA);
-    wr32(sh + 56, 0x1000);
-    wr32(sh + 60, RDATA_RAW);
-    wr32(sh + 76, 0x40000040);       /* INITIALIZED_DATA|READ */
-
-    /* .text 内容 */
-    emit_stub(b, TF(STUB_ENTRY), REC_ENTRY_RVA, 1);
-    emit_stub(b, TF(STUB_TLS),   REC_TLS_RVA,   1);
-    wr64(b + TF(SLOT_RVA), IMAGE_BASE + MARK_RVA);
-    memcpy(b + TF(MARK_RVA), "MARK", 4);
-    wr32(b + TF(RELOC_RVA), TEXT_RVA);                        /* PageRVA */
-    wr32(b + TF(RELOC_RVA) + 4, 12);                          /* BlockSize */
-    wr16(b + TF(RELOC_RVA) + 8, (uint16_t)((10u << 12) | 0x200u));  /* DIR64 @0x1200 */
-
-    /* .rdata 内容 */
-    memcpy(b + RF(DLLNAME_RVA), "TESTLIB.DLL", 12);
-    wr32(b + RF(IMPDESC_RVA) + 0,  ILT_RVA);
-    wr32(b + RF(IMPDESC_RVA) + 12, DLLNAME_RVA);
-    wr32(b + RF(IMPDESC_RVA) + 16, IAT_RVA);
-    wr64(b + RF(ILT_RVA), HINTNM_RVA);
-    wr64(b + RF(IAT_RVA), HINTNM_RVA);
-    wr16(b + RF(HINTNM_RVA), 0);
-    memcpy(b + RF(HINTNM_RVA) + 2, "TestFunc", 9);
-
-    if (with_tls) {
-        wr64(b + RF(TLSDIR_RVA) + 24, IMAGE_BASE + TLSCB_RVA);
-        wr64(b + RF(TLSCB_RVA), IMAGE_BASE + STUB_TLS);
-    }
-}
-
-/* ---------------- 回调 ---------------- */
 
 typedef struct { uint64_t off; size_t len; int prot; } prot_rec_t;
 
@@ -297,19 +155,19 @@ static int t_call(void *ud, uint64_t va, uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
-#define ECOUNT(reg) rec_get((reg), REC_ENTRY_RVA, REC_COUNT)
-#define TCOUNT(reg) rec_get((reg), REC_TLS_RVA,   REC_COUNT)
-#define EBASE(reg)  rec_get((reg), REC_ENTRY_RVA, REC_BASE)
-#define TBASE(reg)  rec_get((reg), REC_TLS_RVA,   REC_BASE)
-#define EREASON(rg) rec_get((rg),  REC_ENTRY_RVA, REC_REASON)
-#define TREASON(rg) rec_get((rg),  REC_TLS_RVA,   REC_REASON)
-#define EPTR(reg)   rec_get((reg), REC_ENTRY_RVA, REC_PTR)
-#define ESEQ(reg)   rec_get((reg), REC_ENTRY_RVA, REC_SEQ)
-#define TSEQ(reg)   rec_get((reg), REC_TLS_RVA,   REC_SEQ)
+#define ECOUNT(reg) synth_pe_rec((reg), REC_ENTRY_RVA, REC_COUNT)
+#define TCOUNT(reg) synth_pe_rec((reg), REC_TLS_RVA,   REC_COUNT)
+#define EBASE(reg)  synth_pe_rec((reg), REC_ENTRY_RVA, REC_BASE)
+#define TBASE(reg)  synth_pe_rec((reg), REC_TLS_RVA,   REC_BASE)
+#define EREASON(rg) synth_pe_rec((rg),  REC_ENTRY_RVA, REC_REASON)
+#define TREASON(rg) synth_pe_rec((rg),  REC_TLS_RVA,   REC_REASON)
+#define EPTR(reg)   synth_pe_rec((reg), REC_ENTRY_RVA, REC_PTR)
+#define ESEQ(reg)   synth_pe_rec((reg), REC_ENTRY_RVA, REC_SEQ)
+#define TSEQ(reg)   synth_pe_rec((reg), REC_TLS_RVA,   REC_SEQ)
 
 static void reset_recs(void)
 {
-    g_seq = 0;
+    synth_pe_seq_reset();
     g_nprot = 0; g_prot_calls = 0; g_prot_fail_at = -1000;
     g_resolve_calls = 0;
 }
@@ -382,7 +240,7 @@ static void t_run_ok(void)
     CHECK("TLS 先于入口点执行", TSEQ(region) != 0 && ESEQ(region) != 0 && TSEQ(region) < ESEQ(region));
 
     /* 权限 */
-    CHECK("完成设权的节区数 == 2", r.n_sections_prot == 2);
+    CHECK("完成设权的节区数 == 3（含 .data）", r.n_sections_prot == 3);
     CHECK("头部区按只读设权",
           g_nprot >= 1 && g_prot[0].off == 0 && g_prot[0].len == HDR_SIZE
           && g_prot[0].prot == RR_P_R);
@@ -544,10 +402,14 @@ static void t_entry_false(void)
     size_t      rsz = SIZE_IMAGE;
     uint8_t    *region;
 
-    /* 入口桩改为返回 0（DllMain FALSE） */
+    /*
+     * 入口桩改为返回 0（DllMain FALSE）。
+     * 只改写 imm32 的最低位字节 —— 原实现是整段重建桩（emit_stub_false），
+     * 若在这里先 memset 清零再改字节，桩体会变成一串 0x00，执行即崩溃，
+     * 而崩溃点距用例意图极远。
+     */
     memcpy(pe2, g_pe, FILE_SIZE);
-    memset(pe2 + TF(STUB_ENTRY), 0, 33);
-    emit_stub_false(pe2, TF(STUB_ENTRY));
+    synth_pe_set_entry_ret(pe2, 0);
 
     region = (uint8_t *)mmap(NULL, rsz, PROT_READ | PROT_WRITE | PROT_EXEC,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -575,7 +437,7 @@ static void t_noentry(void)
     uint8_t    *region;
 
     /* 无入口点（AddressOfEntryPoint=0）且无 TLS 目录 */
-    build_pe(pe2, sizeof(pe2), 0, 0);
+    synth_pe_build(pe2, sizeof(pe2), 0, 0);
 
     region = (uint8_t *)mmap(NULL, rsz, PROT_READ | PROT_WRITE | PROT_EXEC,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -597,7 +459,7 @@ int main(void)
 {
     g_pe = (uint8_t *)malloc(FILE_SIZE);
     if (!g_pe) { printf("[FAIL] malloc\n"); return 1; }
-    build_pe(g_pe, FILE_SIZE, 1, 1);
+    synth_pe_build(g_pe, FILE_SIZE, 1, 1);
 
     t_prot_derive();
     t_run_ok();

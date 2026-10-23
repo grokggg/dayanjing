@@ -14,6 +14,10 @@
 #ifndef DROP_HTTP_H
 #define DROP_HTTP_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,5 +51,9 @@ int dp_http_build_decoy(uint8_t *out, size_t cap, size_t *olen);
    任一不符返回错误 —— 把诱饵页当块收下会污染组装缓冲区。 */
 int dp_http_parse_response(const uint8_t *resp, size_t rlen,
                            const uint8_t **body, size_t *blen);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* DROP_HTTP_H */

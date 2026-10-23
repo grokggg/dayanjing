@@ -60,8 +60,13 @@ $(BUILD)/dep/defense_evade.o: ../19_defense/src/evade.c | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # 每个测试二进制 = 该测试源码 + 跨平台内核源码 + 复用的外部模块
-$(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) $(DEP_OBJS) | dirs
-	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) -o $@ $(LDLIBS)
+# synth_pe.c 是测试共用的合成 PE 构造器（test_reflect_run 与 test_stager_win 共用），
+# 见 tests/synth_pe.h 顶部关于"为何不复制一份"的说明。
+$(BUILD)/synth_pe.o: tests/synth_pe.c tests/synth_pe.h | dirs
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o | dirs
+	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o -o $@ $(LDLIBS)
 
 test: $(TEST_BINS)
 	@fail=0; \
@@ -98,7 +103,10 @@ clean:
 # ---------------------------------------------------------------------------
 SHIM_BUILD := build/winshim
 SHIM_I     := -Iinclude -Itests/winsdk_shim -I../17_loader/include -D_WIN32
-SHIM_CXX   := $(CXX) -std=c++14 -O1 -Wall -Wextra -Wno-unknown-pragmas $(SHIM_I)
+SHIM_CXX   := $(CXX) -std=c++14 -O1 -Wall -Wextra -Wno-unknown-pragmas $(SHIM_I) \
+              -I../25_deploy/include -I../20_packer/include -D_GNU_SOURCE
+SHIM_CC    := $(CC) -std=c11 -O1 -Wall -Wextra $(SHIM_I) \
+              -I../25_deploy/include -I../20_packer/include -I../00_crypto/include -D_GNU_SOURCE
 
 .PHONY: winshim winshim-build
 
@@ -134,7 +142,32 @@ winshim-build:
 	      $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_implant_main.o -o $(SHIM_BUILD)/test_implant_main
 
+	# Windows 投送链端到端：Winsock 拉块 -> 组装 -> 解包 -> 反射装载 -> 真执行
+	#
+	# 服务端也走 shim 的 Winsock（转发宿主真实 TCP），因此 stager 必须真的
+	# 连上、真的解析 HTTP 报文才能拿到块 —— 不是 mock 恒返回成功。
+	#
+	# C 与 C++ 分开编译：投递层是 C11 源码，用 -x c++ 会撞上 C++ 的类型严格性
+	# （void* 不再隐式转换）。shim 头文件（winsock2.h / winmem.h）刻意做成
+	# C/C++ 双可用，头文件侧则统一用 extern "C" 保证跨语言链接。
+	$(SHIM_CC) -c src/drop_stager_win.c -o $(SHIM_BUILD)/drop_stager_win.o
+	$(SHIM_CC) -c ../25_deploy/src/drop.c -o $(SHIM_BUILD)/s_drop.o
+	$(SHIM_CC) -c ../25_deploy/src/drop_http.c -o $(SHIM_BUILD)/s_drop_http.o
+	$(SHIM_CC) -c ../25_deploy/src/drop_pe.c -o $(SHIM_BUILD)/s_drop_pe.o
+	$(SHIM_CC) -c tests/synth_pe.c -o $(SHIM_BUILD)/s_synth_pe.o
+	$(SHIM_CC) -c tests/stager_srv.c -o $(SHIM_BUILD)/s_stager_srv.o
+	$(SHIM_CXX) -c tests/winsdk_shim/shim_winsock.cpp -o $(SHIM_BUILD)/shim_winsock.o
+	$(SHIM_CXX) -c tests/test_stager_win.cpp -o $(SHIM_BUILD)/test_stager_win.o
+	$(CXX) $(SHIM_BUILD)/test_stager_win.o $(SHIM_BUILD)/drop_stager_win.o \
+	      $(SHIM_BUILD)/s_drop.o $(SHIM_BUILD)/s_drop_http.o \
+	      $(SHIM_BUILD)/s_drop_pe.o $(SHIM_BUILD)/s_synth_pe.o \
+	      $(SHIM_BUILD)/s_stager_srv.o $(SHIM_BUILD)/reflect_run.o \
+	      $(SHIM_BUILD)/pe.o $(SHIM_BUILD)/reflect.o \
+	      $(SHIM_BUILD)/shim_winsock.o $(SHIM_BUILD)/shim_impl.o \
+	      ../20_packer/build/*.o -o $(SHIM_BUILD)/test_stager_win -lpthread
+
 winshim: winshim-build
 	@./$(SHIM_BUILD)/test_mf_logic
 	@./$(SHIM_BUILD)/test_persist_win
 	@./$(SHIM_BUILD)/test_implant_main
+	@./$(SHIM_BUILD)/test_stager_win
