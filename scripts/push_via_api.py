@@ -132,6 +132,15 @@ def main():
     start_sha = sys.argv[1]
     commits = sys.argv[2:]
 
+    # Git Data API 不接受短 SHA（/git/commits/<sha> 会 404），而远程 SHA
+    # 又不存在于本地（平行历史），git rev-parse 展开不了。所以先经 refs
+    # 端点取完整 SHA —— 短 SHA 在这里是允许的。
+    if len(start_sha) < 40:
+        ref = gh("GET", f"/repos/{REPO}/git/refs/heads/{BRANCH}")
+        full_remote = ref["object"]["sha"]
+        print(f"展开短 SHA: {start_sha} -> {full_remote[:8]}")
+        start_sha = full_remote
+
     # 起点 tree 必须与本地起点提交的 tree 一致
     start_local = f"{commits[0]}^"
     local_start_tree = git("rev-parse", f"{start_local}^{{tree}}").strip()
