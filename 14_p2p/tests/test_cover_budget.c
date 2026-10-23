@@ -107,6 +107,40 @@ static void test_unknown(void) {
           "探测失败：既有预算未被改");
 }
 
+/*
+ * 探测失败不得**永久污染**状态。
+ *
+ * 若把 bw=0 当成真实带宽写入 min_link_kbps，则 known 被置位、最小值归零，
+ * 而 0 不比任何值大 —— 后续无论探测到多好的带宽，最小值永远停在 0，
+ * derive 永远返回 UNKNOWN，覆盖静默消失。
+ *
+ * 它的表现极具误导性：换电路、换链路、重探测全都"成功"，预算却始终解
+ * 不出来，而调用方读到的错误码与第一次探测失败时完全一样。只断言
+ * "apply 返回 UNKNOWN" 抓不到它 —— 变异后返回值同样是 UNKNOWN，
+ * 差别在于状态已被毒化、再也回不来。
+ *
+ * 所以这里必须做**恢复性**断言：失败之后再给一次真实带宽，必须能推导。
+ */
+static void test_probe_failure_no_poison(void) {
+    p2p_cover_budget_t b;
+
+    p2p_cover_budget_init(&b, 50000u, 3000);
+
+    (void)p2p_cover_budget_note_hop(&b, 4000u, 3000);
+    check(p2p_cover_budget_derive(&b) == P2P_COVER_BUDGET_OK,
+          "有效探测后可推导预算");
+
+    /* 一次探测失败插在中间 */
+    (void)p2p_cover_budget_note_hop(&b, 0u, 3100);
+
+    /* 重新探测到更窄的真实带宽 1000 kbps：必须生效，不能被前一次失败吞掉 */
+    (void)p2p_cover_budget_note_hop(&b, 1000u, 3200);
+    check(p2p_cover_budget_derive(&b) == P2P_COVER_BUDGET_OK,
+          "探测失败后重新探测仍可推导（失败未永久毒化最小跳）");
+    check(p2p_cover_budget_get(&b) == p2p_cover_budget_from_kbps(1000u, 50000u),
+          "重新探测后预算按新带宽 1000 kbps 计算");
+}
+
 static void test_bucket(void) {
     p2p_cover_budget_t b;
     p2p_cover_t cov;
@@ -394,6 +428,7 @@ int main(void) {
     test_conversion();
     test_overflow_clamp();
     test_unknown();
+    test_probe_failure_no_poison();
     test_bucket();
     test_reset();
     test_conflict();

@@ -32,7 +32,7 @@
   python3 scripts/mutation_audit.py --sample 2 # 抽样（常态化用，控制耗时）
   python3 scripts/mutation_audit.py --only M1,M4
 """
-import os, sys, shutil, subprocess, hashlib, random
+import os, sys, shutil, subprocess, hashlib, random, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -104,6 +104,31 @@ MUTATIONS = [
         "mod": "17_loader",
         "bin": "build/test_loader",
     },
+    {
+        "id": "M7",
+        "desc": "14_p2p: 带宽探测失败(bw=0)不再返回 UNKNOWN（覆盖被静默禁用）",
+        "file": "14_p2p/src/cover_budget.c",
+        "old": "if (bw_kbps == 0) return B_UNKNOWN;",
+        "new": "if (0) return B_UNKNOWN;",
+        "mod": "14_p2p",
+        "bin": "build/test_cover_budget",
+        # 14_p2p 的 all 目标不含 test_cover_budget（它只在 test 目标里）。
+        "target": "build/test_cover_budget",
+        # 这类缺陷最危险的地方：它不报错。探测失败被当成"带宽真的是 0"，
+        # 预算算出 0，覆盖流量静默消失，链路退化成无覆盖的静默链路，
+        # 而调用方读到的仍是 OK。所以必须有一条变异钉住它。
+    },
+    {
+        "id": "M8",
+        "desc": "agent_windows: 节区 W+X 不再拒绝（内存中留下 RWX 页）",
+        "file": "agent_windows/src/reflect_run.c",
+        "old": "if ((p & RR_P_X) && (p & RR_P_W)) return RR_ERR_WX;",
+        "new": "if (0) return RR_ERR_WX;",
+        "mod": "agent_windows",
+        "bin": "build/linux/test_reflect_run",
+        # 注意：test_reflect_run 在默认目标 all 的 TESTS 里（与 M5 的
+        # test_implant_main 不同），所以这里不需要显式 target。
+    },
 ]
 
 
@@ -132,6 +157,9 @@ def heal():
                 bak = os.path.join(dirpath, fn)
                 orig = bak[: -len(".mutbak")]
                 shutil.move(bak, orig)
+                # 同 run_one 的 finally：推高 mtime，否则 make 认为 .o 更新
+                # 而跳过重编译，残留的变异目标码会继续参与后续构建。
+                os.utime(orig, None)
                 healed.append(os.path.relpath(orig, ROOT))
     return healed
 
@@ -194,13 +222,28 @@ def run_one(m):
         if blob_hash(path) == before_hash:
             return (m["id"], "ERROR", "变异未改变文件内容（old/new 相同？）")
 
+        binpath = os.path.join(ROOT, m["mod"], m["bin"])
+
+        t_build = time.time()
         rc, out = build(m["mod"], m.get("target"))
         if rc != 0:
             return (m["id"], "ERROR", "构建失败: %s" % out.strip()[:160])
 
-        binpath = os.path.join(ROOT, m["mod"], m["bin"])
         if not os.path.exists(binpath):
             return (m["id"], "ERROR", "测试二进制不存在: %s" % m["bin"])
+
+        # 通用守卫：二进制必须**真的被这次构建更新过**。
+        #
+        # 否则跑的是陈旧产物，SURVIVED 就成了假结论 —— 测试全绿只因为它
+        # 压根没包含变异代码。这类失效已三次出现（M5 的 winshim、M7 的
+        # test_cover_budget 都只在非默认目标里），每次都表现为"测试仍全绿"。
+        #
+        # 与其逐个手工指定 target，不如让脚本自己判定：构建没产出新的二进制
+        # 就直接判 ERROR。留 2 秒余量给文件系统时间戳粒度。
+        if os.path.getmtime(binpath) < t_build - 2:
+            return (m["id"], "ERROR",
+                    "构建未更新 %s（跑的是陈旧产物，判定无意义）—— 需显式 target"
+                    % m["bin"])
 
         trc, tout = sh("./" + m["bin"], os.path.join(ROOT, m["mod"]), 600)
         if trc == -999:
@@ -219,6 +262,16 @@ def run_one(m):
             # 恢复失败必须显式报错：否则下一次构建就带着变异代码。
             print("[FATAL] %s 恢复失败: %s -> %s，请检查工作区" % (m["id"], before_hash, after))
             sys.exit(2)
+        # 还原后必须把 mtime 推到当前。
+        #
+        # copy2 保留了原始 mtime，move 回去后源码时间戳回到过去，make 会
+        # 认为 .o 比源码新从而**跳过重编译** —— 于是变异产生的目标码留在
+        # 构建产物里，源码看起来是干净的。后果是审计跑完之后，后续任何构建
+        # 和测试都在跑被注入的缺陷代码，而没人知道。
+        #
+        # 实测触发：M7 之后 14_p2p 的测试出现 3 项失败（其中一项是原本通过的
+        # 既有断言），而 git status 显示源码干净、无 .mutbak 残留。
+        os.utime(path, None)
 
 
 def main():
