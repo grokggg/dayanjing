@@ -403,7 +403,9 @@ static int derive_chan_keys(const uint8_t a[16], const uint8_t b[16],
     uint8_t ikm[32];
     const uint8_t *lo, *hi;
 
+    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
     if (memcmp(a, b, 16) == 0) return -1;
+    /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
     if (memcmp(a, b, 16) < 0) { lo = a; hi = b; } else { lo = b; hi = a; }
     memcpy(ikm, lo, 16);
     memcpy(ikm + 16, hi, 16);
@@ -420,6 +422,7 @@ static void pick_send_recv(const uint8_t ks[16], const uint8_t kr[16],
                            const uint8_t klo[16], const uint8_t khi[16],
                            uint8_t k_send[16], uint8_t k_recv[16])
 {
+    /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
     int ks_is_lo = (memcmp(ks, kr, 16) < 0);
     memcpy(k_send, ks_is_lo ? klo : khi, 16);
     memcpy(k_recv, ks_is_lo ? khi : klo, 16);

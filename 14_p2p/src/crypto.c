@@ -47,6 +47,7 @@ int p2p_tunnel_init(p2p_tunnel_t *t,
                     const uint8_t nonce_pfx[P2P_NONCE_PFX_LEN]) {
     if (!t || !k_send || !k_recv || !nonce_pfx) return P2P_C_ERR_ARG;
     /* 单向密钥分离：两方向密钥相同意味着单密钥退化，直接拒绝 */
+    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
     if (memcmp(k_send, k_recv, P2P_KEY_LEN) == 0) return P2P_C_ERR_ARG;
 
     memset(t, 0, sizeof(*t));
@@ -68,8 +69,10 @@ int p2p_tunnel_init_from_session(p2p_tunnel_t *t,
                                  const uint8_t peer_id[P2P_C_ID_LEN]) {
     if (!t || !k_c2s || !k_s2c || !local_id || !peer_id) return P2P_C_ERR_ARG;
     /* 与自身建隧道没有意义，且会让方向判定退化 */
+    /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
     if (memcmp(local_id, peer_id, P2P_C_ID_LEN) == 0) return P2P_C_ERR_ARG;
     /* 会话密钥退化（单向分离失效）时不应派生出隧道密钥 */
+    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
     if (memcmp(k_c2s, k_s2c, P2P_KEY_LEN) == 0) return P2P_C_ERR_ARG;
 
     /* IKM = k_c2s || k_s2c，两个方向共同贡献熵 */
@@ -82,6 +85,7 @@ int p2p_tunnel_init_from_session(p2p_tunnel_t *t,
      * 若用 local || peer，两端得到的 info 不同 -> OKM 不同 -> 密钥对不上。
      */
     const uint8_t *lo = local_id, *hi = peer_id;
+    /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
     if (memcmp(local_id, peer_id, P2P_C_ID_LEN) > 0) { lo = peer_id; hi = local_id; }
 
     uint8_t info[sizeof(P2P_TUNNEL_LABEL) - 1 + P2P_C_ID_LEN * 2];
@@ -105,6 +109,7 @@ int p2p_tunnel_init_from_session(p2p_tunnel_t *t,
     const uint8_t *np        = okm + P2P_KEY_LEN * 2;
 
     const uint8_t *k_send, *k_recv;
+    /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
     if (memcmp(local_id, peer_id, P2P_C_ID_LEN) < 0) {
         k_send = k_forward; k_recv = k_reverse;   /* local 是 lo */
     } else {

@@ -42,8 +42,90 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALLOW = os.path.join(ROOT, "scripts", "secret_cmp_allow.json")
 BANNED = "SECRET"
 
+# 源码里标注判据的标记。值必须与 allowlist 的分类一致，由本脚本校验。
+# 判据只存在于 JSON 时，改代码的人看不到，重构时容易把某个 SECRET 点
+# 悄悄改回 memcmp 而不知道为什么被拦 —— 所以注释必须由脚本强制同步。
+MARK = "SEC-CMP"
+
+# 各分类的默认理由。具体调用点若有更强的证据，用 --why 覆盖。
+REASON = {
+    "PUBLIC": "双方均为公开数据（传输中可见或可自行计算），无秘密可泄露",
+    "ID": "标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测",
+    "DEGENERATE": "退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言",
+    "ORDER": "排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID",
+    "PATTERN": "内存模式/特征扫描，非秘密比较",
+    "SECRET": "秘密或认证判据，必须改用 crypto_constant_time_eq",
+}
+
 # 只扫产品代码；测试里的 memcmp 不参与（它们比较的是自己构造的期望值）
 SRC_GLOBS = ("src", "include")
+
+_CACHE = {}
+
+
+def cls(v):
+    """allowlist 的值可为分类字符串，也可为 {"class":..,"why":..}。"""
+    if isinstance(v, dict):
+        return v.get("class", "")
+    return v if isinstance(v, str) else ""
+
+
+def why(v):
+    return v.get("why", "") if isinstance(v, dict) else ""
+
+
+def _lines(rel):
+    """带缓存地读取仓库内相对路径。"""
+    if rel not in _CACHE:
+        _CACHE[rel] = open(os.path.join(ROOT, rel), encoding="utf-8",
+                           errors="replace").read().splitlines()
+    return _CACHE[rel]
+
+
+def mark_at(rel, idx):
+    """返回第 idx 行（0 基）上方那条注释里的分类；无则 None。"""
+    try:
+        lines = _lines(rel)
+    except Exception:
+        return None
+    j = idx - 1
+    while j >= 0:
+        s = lines[j].strip()
+        if s.startswith("/*") and MARK in s:
+            for tok in s.replace("/*", " ").replace("*/", " ").split():
+                if tok.startswith(MARK + ":"):
+                    return tok.split(":", 2)[1].split(":")[0]
+            return None
+        if s == "" or s.startswith("/*") or s.startswith("*"):
+            j -= 1
+            continue
+        return None
+    return None
+
+
+def orphan_marks():
+    """扫 src/include 里所有标注，返回不属于任何 memcmp 调用点的孤儿。"""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("build", ".git", "__pycache__", "tests")]
+        if not any(p in dirpath.split(os.sep) for p in SRC_GLOBS):
+            continue
+        for fn in filenames:
+            if not fn.endswith((".c", ".h", ".cpp")):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), ROOT)
+            try:
+                lines = _lines(rel)
+            except Exception:
+                continue
+            for i, ln in enumerate(lines):
+                if MARK in ln and "/*" in ln:
+                    nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                    # 标注必须紧邻它说明的那条比较语句
+                    if "memcmp" not in nxt and "constant_time_eq" not in nxt:
+                        out.append((rel, i + 1, ln.strip()[:120]))
+    return out
 
 
 def norm(line):
@@ -117,6 +199,34 @@ def main():
         print("[INFO] 已写入 %d 条分类（allowlist 现有 %d 条）" % (n, len(allow)))
         return 0
 
+    # --why 文件:行号=理由 —— 给某条分类附上具体证据（覆盖该分类的默认理由）
+    if "--why" in args:
+        specs = []
+        i = args.index("--why") + 1
+        while i < len(args) and not args[i].startswith("--"):
+            specs.append(args[i])
+            i += 1
+        byline = {(f, ln): "%s|%s" % (f, text) for f, ln, text in sites}
+        n = 0
+        for sp in specs:
+            try:
+                loc, reason = sp.split("=", 1)
+                f, ln = loc.rsplit(":", 1)
+                key = byline[(f, int(ln))]
+            except Exception:
+                print("[FAIL] 无法定位 %s" % sp)
+                return 2
+            c = cls(allow.get(key))
+            if not c:
+                print("[FAIL] %s 尚未分类，先 --classify 再 --why" % sp)
+                return 2
+            allow[key] = {"class": c, "why": reason}
+            n += 1
+        json.dump(allow, open(ALLOW, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=2, sort_keys=True)
+        print("[INFO] 已写入 %d 条证据（allowlist 现有 %d 条）" % (n, len(allow)))
+        return 0
+
     if "--prune" in args:
         seen = {"%s|%s" % (f, t) for f, _, t in sites}
         before = len(allow)
@@ -133,8 +243,8 @@ def main():
         seen.add(key)
         if key not in allow:
             unknown.append((f, ln, text))
-        elif allow[key] == BANNED:
-            banned.append((f, ln, text, allow[key]))
+        elif cls(allow[key]) == BANNED:
+            banned.append((f, ln, text, cls(allow[key])))
     for k in allow:
         if k not in seen:
             stale.append(k)
@@ -172,10 +282,38 @@ def main():
         print("[HINT] 判定后写入 scripts/secret_cmp_allow.json；"
               "若比较的是秘密/认证值，分类填 SECRET 并把代码改成 crypto_constant_time_eq")
 
-    if banned or unknown:
+    # 源码注释与 allowlist 必须一致：判据要写在改代码的人看得见的地方。
+    annot_bad, annot_miss = [], []
+    for f, ln, text in sites:
+        key = "%s|%s" % (f, text)
+        if key not in allow:
+            continue
+        want = cls(allow[key])
+        got = mark_at(f, ln - 1)
+        if got is None:
+            annot_miss.append((f, ln, want))
+        elif got != want:
+            annot_bad.append((f, ln, want, got))
+    orph = orphan_marks()
+
+    if annot_miss:
+        print("[FAIL] %d 处已分类调用点缺少源码判据注释：" % len(annot_miss))
+        for f, ln, want in annot_miss[:10]:
+            print("       %s:%d (分类 %s)" % (f, ln, want))
+        print("[HINT] 运行 scripts/annotate_secret_cmp.py 写入")
+    if annot_bad:
+        print("[FAIL] %d 处源码注释分类与 allowlist 不一致：" % len(annot_bad))
+        for f, ln, want, got in annot_bad[:10]:
+            print("       %s:%d allowlist=%s 注释=%s" % (f, ln, want, got))
+    if orph:
+        print("[FAIL] %d 条判据注释已失去对应调用点（代码改了但注释留着）：" % len(orph))
+        for f, ln, t in orph[:10]:
+            print("       %s:%d  %s" % (f, ln, t))
+
+    if banned or unknown or annot_bad or annot_miss or orph:
         print("[FAIL] 秘密比较守卫未通过")
         return 1
-    print("[PASS] 全仓 memcmp 均已分类，且无秘密比较使用 memcmp")
+    print("[PASS] 全仓 memcmp 均已分类、无秘密比较、判据注释与 allowlist 一致")
     return 0
 
 

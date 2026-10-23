@@ -15,6 +15,7 @@ int df_evade_find(const uint8_t *buf, size_t len, const uint8_t *pat, size_t ple
     if (len < plen)   return DF_ERR_ARGS;
 
     for (i = 0; i + plen <= len; i++) {
+        /* SEC-CMP:PATTERN: 内存模式/特征扫描，非秘密比较 */
         if (memcmp(buf + i, pat, plen) == 0) {
             if (out_off) *out_off = i;
             return DF_OK;

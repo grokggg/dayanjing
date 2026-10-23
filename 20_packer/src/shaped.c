@@ -131,6 +131,7 @@ static int pk_shape_mask(const uint8_t *seed, size_t seed_len,
  */
 static int shaped_hdr_parse(const uint8_t *h, pk_hdr *out)
 {
+    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
     if (memcmp(h, V4_MAGIC, PK_MAGIC_LEN) != 0) return PK_ERR_AUTH;
 
     out->version = get32(h + 8);

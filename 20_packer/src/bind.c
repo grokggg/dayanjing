@@ -42,6 +42,7 @@ int pk_session_seed(const uint8_t k_c2s[PK_SESSION_KEY_LEN],
     if (bind_ctx_len > 0 && !bind_ctx) return PK_ERR_ARG;
 
     /* 单向密钥退化会让"两个方向同一个密钥"，削弱分离性 —— 直接拒绝 */
+    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
     if (memcmp(k_c2s, k_s2c, PK_SESSION_KEY_LEN) == 0) return PK_ERR_DEGEN;
 
     memcpy(ikm, k_c2s, PK_SESSION_KEY_LEN);

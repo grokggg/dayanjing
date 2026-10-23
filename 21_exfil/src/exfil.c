@@ -133,6 +133,7 @@ int exfil_rec_encode(const exfil_rec_t *r,
 int exfil_rec_decode(const uint8_t *in, size_t in_len, exfil_rec_t *r) {
     if (!in || !r) return EXF_ERR_ARG;
     if (in_len < EXF_HDR_LEN) return EXF_ERR_LEN;
+    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
     if (memcmp(in, EXF_MAGIC4, 4) != 0) return EXF_ERR_FMT;
     if (in[4] != EXF_VER) return EXF_ERR_FMT;
     if (in[7] != 0) return EXF_ERR_FMT;                 /* rsv 必须 0 */

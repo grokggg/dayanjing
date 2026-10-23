@@ -61,10 +61,12 @@ rsa_err rsa_verify_sha256(const bn_t *n, uint32_t e,
     i++;
     size_t tlen = k - i;
     if (tlen != DI_SHA256_LEN + SHA256_DIGEST_LEN) return RSA_ERR_PAD;
+    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
     if (memcmp(p + i, DI_SHA256, DI_SHA256_LEN) != 0) return RSA_ERR_PAD;
 
     uint8_t h[SHA256_DIGEST_LEN];
     sha256(tbs, tbs_len, h);
+    /* SEC-CMP:PUBLIC: h 为 SHA256(tbs)，tbs 在握手中公开传输，攻击者可自行算出，比较它无从泄露 */
     if (memcmp(p + i + DI_SHA256_LEN, h, SHA256_DIGEST_LEN) != 0) return RSA_ERR_SIG;
 
     /* cmp 未使用，消除告警 */

@@ -304,6 +304,7 @@ static front_err parse_response(front_ctx *c, uint8_t *buf, size_t cap, size_t *
         const uint8_t *hp = p;
         size_t hl = (size_t)(hend - p);
         for (size_t i = 0; i + 15 < hl; i++) {
+            /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
             if ((hp[i] == 'C' || hp[i] == 'c') && !memcmp(hp + i, "Content-Length:", 15)) {
                 size_t j = i + 15;
                 while (j < hl && (hp[j] == ' ' || hp[j] == '\t')) j++;
@@ -312,9 +313,11 @@ static front_err parse_response(front_ctx *c, uint8_t *buf, size_t cap, size_t *
                 while (j < hl && hp[j] >= '0' && hp[j] <= '9') { v = v * 10 + (hp[j] - '0'); j++; any = 1; }
                 if (any) cl = v;
             }
+            /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
             if (!memcmp(hp + i, "Transfer-Encoding:", 18)) {
                 size_t j = i + 18;
                 while (j < hl && (hp[j] == ' ' || hp[j] == '\t')) j++;
+                /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
                 if (j + 7 <= hl && !memcmp(hp + j, "chunked", 7)) chunked = 1;
             }
         }

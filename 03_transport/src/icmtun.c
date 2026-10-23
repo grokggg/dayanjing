@@ -104,6 +104,7 @@ int tx_icmp_parse_echo(const uint8_t *pkt, size_t len,
     if (ic[0] != 0 && ic[0] != 8) return TX_ICMTUN_ERR_PROTO;
 
     const uint8_t *p = ic + TX_ICMP_HDR;
+    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
     if (memcmp(p, ICMTUN_MAGIC, 4) != 0) return TX_ICMTUN_ERR_PROTO;
 
     uint8_t fl = p[12];

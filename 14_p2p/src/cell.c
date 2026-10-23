@@ -29,6 +29,7 @@ int p2p_cell_init(p2p_cell_ctx_t *c,
                   const uint8_t k_recv[P2P_CELL_KEY_LEN],
                   const uint8_t pfx[P2P_CELL_PFX_LEN]) {
     if (!c || !k_send || !k_recv || !pfx) return P2P_CELL_ERR_ARG;
+    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
     if (memcmp(k_send, k_recv, P2P_CELL_KEY_LEN) == 0) return P2P_CELL_ERR_ARG;
     memcpy(c->k_send, k_send, P2P_CELL_KEY_LEN);
     memcpy(c->k_recv, k_recv, P2P_CELL_KEY_LEN);

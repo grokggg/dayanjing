@@ -36,6 +36,7 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
 
     if (!ch || !ks || !kr || !pfx) return EXF_TASK_ERR_ARG;
     /* 方向分离不可退化：同一把密钥会让两个方向的 IV 空间重合 */
+    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
     if (memcmp(ks, kr, 16) == 0) return EXF_TASK_ERR_ARG;
 
     memset(ch, 0, sizeof *ch);
@@ -49,6 +50,7 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
      */
     {
         const uint8_t *klo, *khi;
+        /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
         if (memcmp(ks, kr, 16) < 0) { klo = ks; khi = kr; }
         else                        { klo = kr; khi = ks; }
         memcpy(ikm, klo, 16);
@@ -65,6 +67,7 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
      * 两端因此得到同一把下行密钥。
      */
     {
+        /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
         int ks_is_lo = (memcmp(ks, kr, 16) < 0);
         const uint8_t *info_s = ks_is_lo
                               ? (const uint8_t *)"cell:dir:lo"

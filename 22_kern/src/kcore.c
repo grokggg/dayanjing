@@ -29,6 +29,7 @@ int kcore_open(kcore **out, const char *path)
     Elf64_Ehdr eh;
     ssize_t r = pread(fd, &eh, sizeof(eh), 0);
     if (r != (ssize_t)sizeof(eh)) { close(fd); return KERN_ERR_IO; }
+    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
     if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) { close(fd); return KERN_ERR_FORMAT; }
     if (eh.e_ident[EI_CLASS] != ELFCLASS64) { close(fd); return KERN_ERR_FORMAT; }
 

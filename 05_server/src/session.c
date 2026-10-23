@@ -46,6 +46,7 @@ session_t *st_lookup(session_table_t *t, const uint8_t *id) {
     if (!t || !id) return NULL;
     session_t *s = t->buckets[hash_id(id)];
     while (s) {
+        /* SEC-CMP:ID: 会话 ID 由服务端 ++idctr 单调自增生成，非随机凭证；攻击者无法提交猜测来探测 */
         if (memcmp(s->id, id, SESSION_ID_LEN) == 0) return s;
         s = s->hnext;
     }
@@ -57,6 +58,7 @@ int st_remove(session_table_t *t, const uint8_t *id) {
     unsigned h = hash_id(id);
     session_t **pp = &t->buckets[h];
     while (*pp) {
+        /* SEC-CMP:ID: 同上：会话 ID 为自增计数器，不是承载秘密的随机令牌 */
         if (memcmp((*pp)->id, id, SESSION_ID_LEN) == 0) {
             session_t *s = *pp;
             *pp = s->hnext;

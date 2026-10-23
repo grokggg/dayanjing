@@ -68,6 +68,7 @@ int x509_name_eq(const der_buf *a, const der_buf *b) {
     size_t la = 0, lb = 0;
     if (name_canon(a, ca, sizeof(ca), &la) != 0) return 0;
     if (name_canon(b, cb, sizeof(cb), &lb) != 0) return 0;
+    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
     return la == lb && (la == 0 || memcmp(ca, cb, la) == 0);
 }
 
@@ -419,11 +420,13 @@ x509_err x509_store_load_pem(x509_store *st, const char *path) {
     size_t bl = strlen(begin), el = strlen(end);
     int loaded = 0;
     for (size_t i = 0; i + bl < n; i++) {
+        /* SEC-CMP:PATTERN: 内存模式/特征扫描，非秘密比较 */
         if (memcmp(s + i, begin, bl) != 0) continue;
         const char *body = s + i + bl;
         size_t rest = n - (body - s);
         const char *e = NULL;
         for (size_t j = 0; j + el < rest; j++) {
+            /* SEC-CMP:PATTERN: 内存模式/特征扫描，非秘密比较 */
             if (memcmp(body + j, end, el) == 0) { e = body + j; break; }
         }
         if (!e) break;
