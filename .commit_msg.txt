@@ -1,0 +1,29 @@
+agent_windows: Windows 投送链端到端闭合（拉块→组装→解包→反射装载→真执行）
+
+Windows 侧此前各环节分开验证：能打包、能解包、能反射装载，但从未串成一条链。
+本轮补上中间接线，跑通完整生命周期。
+
+新增：
+- src/drop_stager_win.c: Windows stager，走 shim Winsock 转发宿主真实 TCP，
+  因此必须真的连上、真的解析 HTTP 报文才能拿到块，不是 mock 恒返回成功
+- tests/stager_srv.c: 真实服务端，含诱饵/断供/篡改三条负向路径
+- tests/synth_pe.c: 合成 PE 构造器，从 test_reflect_run 抽出共用。
+  两份各自维护的副本会导致改一处漏另一处，且两边仍各自通过
+- tests/winsdk_shim/shim_winsock.cpp: Winsock2 最小等价声明
+
+修复（均为实测逼出）：
+- 合成 PE 记录区原在 .text，装载后 .text 被设为 R|X 不可写 -> 桩代码写入即崩。
+  旧测试用全权限内存绕过真实设权，故从未暴露。已移入 .data
+- 点分十进制转网络地址时每段累加值未清零，"127.0.0.1" 算出错误地址，
+  表现仅为"连不上"，看不出是地址算错。已重写并独立验证
+- getsockname 少传指针，服务端取不到实际端口
+- 替换代码时残留一行清零，抹掉桩代码致执行即崩
+
+不变量（硬证据，非"地址摆对了"）：
+- TLS 先于入口点执行
+- 入口 rcx == region 基址、reason == 1（DLL_PROCESS_ATTACH）
+- 重定位在真实执行路径上生效：解引用得到 region+MARK
+- 断供 / 摘要不符 / 错误 seed 三种失败下绝不执行任何代码
+- 装载后明文已擦除
+
+test_stager_win 25/25   test_reflect_run 48/48   零编译警告

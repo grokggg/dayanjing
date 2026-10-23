@@ -36,6 +36,15 @@ run_c() {
     for t in $(find "$d/build" -type f -name 'test_*' ! -name '*.c' ! -name '*.o' -perm -u+x 2>/dev/null | sort); do
         timeout "$(tmo_for "$name")" "$t" >/tmp/t_$name.log 2>&1
         rc=$?
+        # 变异审计发现：被测进程在 ptrace_stop 等场景下，"timeout 已到期"
+        # 与"进程仍存活"可以同时成立，且 waitpid 可能返回 0，于是挂起的测试
+        # 被记为退出码 0 -> 误判 PASS。零输出是唯一可靠的挂起判据：
+        # 正常测试必定打印结果行。
+        if [ ! -s /tmp/t_$name.log ]; then
+            ok=0
+            echo "FAIL -> $t (零输出：疑似挂起/被杀，退出码 $rc 不可信)"
+            break
+        fi
         if [ $rc -eq 77 ]; then
             # 退出码 77 = 环境不具备（如无 root 读不了 /proc/kcore）。
             # 记为 SKIP：既不冒认通过，也不算作代码缺陷。
