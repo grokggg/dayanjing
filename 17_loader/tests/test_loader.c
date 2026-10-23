@@ -141,7 +141,7 @@ static void build_synth_pe(uint8_t *b, size_t cap)
     memcpy(b + RF(0x20E0), "SynthExport", 12);
 
     /* TLS 目录 @0x20F0，AddressOfCallBacks(VA) @ +20 */
-    wr32(b + RF(0x20F0) + 20, IMAGE_BASE + 0x2120);
+    wr64(b + RF(0x20F0) + 24, IMAGE_BASE + 0x2120);   /* AddressOfCallBacks: PE32+ @+24 */
     wr64(b + RF(0x2120), IMAGE_BASE + 0x1200);   /* 回调[0] */
     wr64(b + RF(0x2128), 0);                     /* 回调终止 */
 
@@ -295,6 +295,28 @@ int main(void)
         reflect_image_t ri2;
         rc = reflect_load(pe, sizeof(pe), region, 0x100, test_resolver, &calls, &ri2);
         CHECK("region 过小 -> NOSPACE", rc == LD_ERR_NOSPACE);
+    }
+    /*
+     * 回归：ImageBase >= 4GiB（MSVC 默认 0x140000000）时 TLS 回调必须仍能收集。
+     * 此前 AddressOfCallBacks 按 +20 偏移、4 字节读取：+20 在 64 位 TLS 目录里
+     * 是 SizeOfZeroFill（恒 0），于是"无回调"被静默判定；即便偏移对了，4 字节
+     * 读取也会把高位截掉得到 < ImageBase 的值而报 FORMAT。两者都不报错。
+     */
+    {
+        uint8_t pehb[FILE_SIZE];
+        reflect_image_t rihb;
+        const uint64_t HB = 0x140000000ULL;
+        memcpy(pehb, pe, sizeof(pehb));
+        wr64(pehb + 0x58 + 24, HB);                       /* ImageBase */
+        wr64(pehb + RF(0x20F0) + 24, HB + 0x2120);        /* AddressOfCallBacks */
+        wr64(pehb + RF(0x2120),      HB + 0x1200);        /* 回调[0] */
+        rc = reflect_load(pehb, sizeof(pehb), region, region_size,
+                          test_resolver, &calls, &rihb);
+        CHECK("ImageBase >= 4GiB 时反射加载成功", rc == LD_OK);
+        CHECK("ImageBase >= 4GiB 时 TLS 回调数 == 1", rihb.n_tls == 1);
+        CHECK("ImageBase >= 4GiB 时 TLS 回调地址 == region+0x1200",
+              rihb.n_tls == 1
+              && rihb.tls_cb[0] == (uint64_t)(uintptr_t)(region + 0x1200));
     }
     /* 不支持的重定位类型应显式报错，而不是静默跳过 */
     {

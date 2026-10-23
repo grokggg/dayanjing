@@ -178,7 +178,7 @@ int reflect_collect_tls(const pe_image_t *img, uint8_t *region, size_t region_si
                         uint64_t *cbs, size_t cap, size_t *n)
 {
     uint32_t dir_rva, off;
-    uint32_t cb_va;
+    uint64_t cb_va;        /* VA，不是 RVA：ImageBase 常 >= 4GiB，必须 64 位 */
     size_t   i;
     int r;
 
@@ -191,12 +191,27 @@ int reflect_collect_tls(const pe_image_t *img, uint8_t *region, size_t region_si
     if (r != LD_OK) return r;
     if ((size_t)off + (img->is64 ? 40u : 24u) > img->len) return LD_ERR_TRUNC;
 
-    /* AddressOfCallBacks：PE32+ @20，PE32 @12。存的是 VA，不是 RVA。 */
-    cb_va = ld_rd32(img->buf + off + (img->is64 ? 20u : 12u));
+    /*
+     * AddressOfCallBacks：IMAGE_TLS_DIRECTORY64 @ +24，IMAGE_TLS_DIRECTORY32
+     * @ +12。存的是 VA，不是 RVA。
+     *
+     * 修正：PE32+ 下该字段是 8 字节 ULONGLONG。此前按 +20 偏移、4 字节读取：
+     *   - 偏移 +20 在 64 位目录里是 SizeOfZeroFill，恒为 0，于是"无 TLS 回调"
+     *     被静默判定，reflect_load 照样返回 OK；
+     *   - 即便偏移对了，4 字节读取会把 ImageBase >= 4GiB（MSVC 默认
+     *     0x140000000）的 VA 截断，得到 < ImageBase 的值而报 FORMAT。
+     * 两者都导致 PE32+ 的 TLS 回调从未被真正收集，且都不报错。
+     */
+    if (img->is64) {
+        if ((size_t)off + 32u > img->len) return LD_ERR_TRUNC;
+        cb_va = ld_rd64(img->buf + off + 24u);
+    } else {
+        cb_va = ld_rd32(img->buf + off + 12u);
+    }
     if (cb_va == 0) return LD_OK;
 
     for (i = 0; i < cap; i++) {
-        uint32_t rva = (uint32_t)(cb_va - (uint32_t)img->image_base);
+        uint32_t rva = (uint32_t)(cb_va - img->image_base);
         uint32_t fo;
         uint64_t va;
 

