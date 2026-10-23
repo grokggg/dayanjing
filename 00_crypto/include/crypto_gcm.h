@@ -116,6 +116,22 @@ void ghash(const uint8_t h[GCM_BLOCK],
 /* 工具：固定时间比较，防止 tag 比对侧信道 */
 int crypto_constant_time_eq(const uint8_t *a, const uint8_t *b, size_t len);
 
+/*
+ * 常量时间比较的观测计数器 —— 仅当以 -DCRYPTO_CT_INSTRUMENT 编译时存在。
+ *
+ * 用途：把"验签是否走了常量时间原语"变成可断言的事实。
+ *   - 正常：gcm open 一次 -> 计数器 == GCM_TAG_LEN
+ *   - 若有人把 tag 比对换成 memcmp，或改成发现不同即 break 的早退写法，
+ *     计数器就不会等于 GCM_TAG_LEN，测试立即失败。
+ *
+ * 注意它测的是【源码级执行步数】，不是机器码级常量时间。后者仍需
+ * 人工审查生成的汇编（编译器理论上可把无副作用循环优化成早退）。
+ * 但源码级早退是最常见的破坏方式，且这一层能捕获 memcmp 替换。
+ */
+#ifdef CRYPTO_CT_INSTRUMENT
+extern size_t crypto_ct_steps;
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -13,6 +13,16 @@
 
 #include "crypto_gcm.h"
 
+/*
+ * 常量时间断言依赖插桩计数器 crypto_ct_steps，而它只在
+ * -DCRYPTO_CT_INSTRUMENT 下存在。若忘了加这个宏，下面的断言会被
+ * #ifdef 静默跳过 —— 测试全绿，但什么都没验。所以这里直接编译失败：
+ * 宁可构建不过，也不要"看起来通过"。
+ */
+#ifndef CRYPTO_CT_INSTRUMENT
+#error "test_gcm 必须用 -DCRYPTO_CT_INSTRUMENT 编译，否则常量时间断言会被静默跳过"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -311,6 +321,100 @@ static void test_boundaries(void)
     ASSERT(memcmp(rec15, buf15, 15) == 0, "boundary: 15-byte match");
 }
 
+/*
+ * 常量时间比较观测测试。
+ *
+ * 这里测的不是耗时（本环境测不出：3e6 次调用下 memcmp 与 ct_eq 的
+ * 耗时比差异都在噪声内，详见 scripts/mutation_audit.py 的 M9 注释），
+ * 而是【语义契约】：tag 比对必须走 crypto_constant_time_eq，且该
+ * 函数的循环体执行次数必须恒等于 len、与失配位置无关。
+ *
+ * 有了这一层，"把 tag 比较换成 memcmp" 就从"不可测的时序侧信道"
+ * 变成了"计数器不对 -> 测试失败"的确定性事实。
+ */
+static void test_constant_time(void)
+{
+    uint8_t key[GCM_KEY_LEN], iv[GCM_IV_LEN];
+    uint8_t pt[16], ct[16], rec[16], tag[GCM_TAG_LEN];
+    uint8_t a[32], b[32];
+
+    memset(key, 0x11, sizeof key);
+    memset(iv, 0x22, sizeof iv);
+    memset(pt, 0x33, sizeof pt);
+    memset(a, 0xAA, sizeof a);
+    memset(b, 0xAA, sizeof b);
+
+    /* 0) 插桩生效性。若宏未定义，本文件在预处理期就 #error，
+     *    不可能静默跳过 —— 静默跳过就是假通过。 */
+    crypto_ct_steps = 0;
+    ASSERT(crypto_ct_steps == 0, "计数器可清零（插桩已链接）");
+
+    /*
+     * 1) 防平凡性对照：计数器必须反映真实循环次数，而不是恒等于
+     *    某个写死的值。若有人把计数写成 crypto_ct_steps = len（放在
+     *    循环外），下面三条会一起失败。
+     */
+    crypto_ct_steps = 0;
+    (void)crypto_constant_time_eq(a, b, 4);
+    ASSERT(crypto_ct_steps == 4, "len=4 -> 步数 4");
+
+    crypto_ct_steps = 0;
+    (void)crypto_constant_time_eq(a, b, 16);
+    ASSERT(crypto_ct_steps == 16, "len=16 -> 步数 16");
+
+    crypto_ct_steps = 0;
+    (void)crypto_constant_time_eq(a, b, 32);
+    ASSERT(crypto_ct_steps == 32, "len=32 -> 步数 32");
+
+    /*
+     * 2) 失配位置无关性：第 0 位失配与第 15 位失配，步数必须相同。
+     *    若实现被改成"发现不同就 break"的早退写法，第 0 位会给出 1。
+     */
+    uint8_t b0[16], b15[16];
+    memset(b0, 0xAA, sizeof b0);
+    memcpy(b15, b0, sizeof b15);
+    b0[0] ^= 0x01;    /* 最早失配 */
+    b15[15] ^= 0x01;  /* 最晚失配 */
+
+    crypto_ct_steps = 0;
+    ASSERT(crypto_constant_time_eq(a, b0, 16) == 0, "第0位失配 -> 不等");
+    ASSERT(crypto_ct_steps == 16, "第0位失配 步数仍为 16");
+
+    crypto_ct_steps = 0;
+    ASSERT(crypto_constant_time_eq(a, b15, 16) == 0, "第15位失配 -> 不等");
+    ASSERT(crypto_ct_steps == 16, "第15位失配 步数仍为 16");
+
+    /*
+     * 3) GCM 验签路径必须调用常量时间原语 —— 这是捕获 memcmp 替换的
+     *    关键。若调用点被换成 memcmp，该函数根本不被调用，计数器
+     *    保持 0，下面全部失败。
+     */
+    ASSERT(gcm_seal(key, iv, NULL, 0, pt, 16, ct, tag) == GCM_OK, "seal 成功");
+
+    /* 3a) 验签通过 */
+    crypto_ct_steps = 0;
+    ASSERT(gcm_open(key, iv, NULL, 0, ct, 16, tag, rec) == GCM_OK, "open 成功");
+    ASSERT(crypto_ct_steps == GCM_TAG_LEN, "验签通过 -> 步数 == TAG_LEN");
+
+    /* 3b) tag 第 0 字节错 */
+    uint8_t t0[GCM_TAG_LEN];
+    memcpy(t0, tag, GCM_TAG_LEN);
+    t0[0] ^= 0x80;
+    crypto_ct_steps = 0;
+    ASSERT(gcm_open(key, iv, NULL, 0, ct, 16, t0, rec) == GCM_ERR_AUTH,
+           "tag 第0字节错 -> AUTH");
+    ASSERT(crypto_ct_steps == GCM_TAG_LEN, "tag 第0字节错 -> 步数 == TAG_LEN");
+
+    /* 3c) tag 最后一字节错 */
+    uint8_t t15[GCM_TAG_LEN];
+    memcpy(t15, tag, GCM_TAG_LEN);
+    t15[GCM_TAG_LEN - 1] ^= 0x80;
+    crypto_ct_steps = 0;
+    ASSERT(gcm_open(key, iv, NULL, 0, ct, 16, t15, rec) == GCM_ERR_AUTH,
+           "tag 末字节错 -> AUTH");
+    ASSERT(crypto_ct_steps == GCM_TAG_LEN, "tag 末字节错 -> 步数 == TAG_LEN");
+}
+
 int main(void)
 {
     printf("DAYANJING v3 — crypto_gcm 权威 KAT 测试\n");
@@ -323,6 +427,7 @@ int main(void)
     test_roundtrip();
     test_tamper();
     test_boundaries();
+    test_constant_time();
 
     printf("========================================\n");
     printf("结果: %d/%d 通过\n", total - failures, total);

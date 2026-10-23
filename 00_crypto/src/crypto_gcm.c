@@ -530,10 +530,31 @@ int gcm_open(const uint8_t key[GCM_KEY_LEN],
 /* =====================================================================
  * 固定时间比较
  * ===================================================================== */
+#ifdef CRYPTO_CT_INSTRUMENT
+/*
+ * 常量时间比较的观测计数器。
+ *
+ * 只在测试构建（-DCRYPTO_CT_INSTRUMENT）下存在，生产构建零开销、
+ * 不引入任何代码。它把"源码级常量时间"从不可测的时序问题，变成
+ * 可断言的确定性计数问题：无论失配发生在第几个字节，循环体执行
+ * 次数必须恒等于 len。
+ */
+size_t crypto_ct_steps = 0;
+#endif
+
 int crypto_constant_time_eq(const uint8_t *a, const uint8_t *b, size_t len)
 {
     uint8_t diff = 0;
-    for (size_t i = 0; i < len; i++)
+    for (size_t i = 0; i < len; i++) {
+#ifdef CRYPTO_CT_INSTRUMENT
+        /*
+         * 观测点在循环体【最前面】：任何早退写法（break / return /
+         * 条件 continue）都会让步数 < len，测试立即捕获。放在循环体
+         * 末尾则只能捕获写在它之后的早退，覆盖不全。
+         */
+        crypto_ct_steps++;
+#endif
         diff |= (uint8_t)(a[i] ^ b[i]);
+    }
     return diff == 0;
 }

@@ -21,8 +21,15 @@ mkdirs:
 $(BUILD)/%.o: src/%.c $(HDR) | mkdirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/test_gcm: $(BUILD)/crypto_gcm.o tests/test_gcm.c $(HDR) | mkdirs
-	$(CC) $(CFLAGS) tests/test_gcm.c $(BUILD)/crypto_gcm.o -o $@ $(LDFLAGS)
+# GCM 测试用【插桩版】编译单元：打开 CRYPTO_CT_INSTRUMENT 后，
+# crypto_constant_time_eq 才会记录循环体执行次数，测试才能断言
+# "tag 比对确实走了常量时间原语"。生产库 crypto_gcm.o 不带插桩，
+# 零开销。两者必须分开，否则生产路径就被测试专用代码污染了。
+$(BUILD)/crypto_gcm_ct.o: src/crypto_gcm.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) -DCRYPTO_CT_INSTRUMENT -c $< -o $@
+
+$(BUILD)/test_gcm: $(BUILD)/crypto_gcm_ct.o tests/test_gcm.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) -DCRYPTO_CT_INSTRUMENT tests/test_gcm.c $(BUILD)/crypto_gcm_ct.o -o $@ $(LDFLAGS)
 
 $(BUILD)/test_hash: $(BUILD)/crypto_hash.o tests/test_hash.c $(HDR) | mkdirs
 	$(CC) $(CFLAGS) tests/test_hash.c $(BUILD)/crypto_hash.o -o $@ $(LDFLAGS)
