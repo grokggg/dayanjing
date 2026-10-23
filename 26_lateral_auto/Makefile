@@ -19,6 +19,17 @@ all: $(OBJ)
 build:
 	mkdir -p build
 
+# 上游产物未声明依赖：上游 clean 后本模块链接报 "No rule to make target"，
+# 真实原因（上游没构建）完全不提，排查必然跑偏。
+# 挂 FORCE 无条件触发，由上游 make 自身做增量判断（产物已最新时开销极小）。
+# 两个上游都无上游（00_crypto 与 09_persistence 均不引用 ../），无递归风险。
+$(CRYO): FORCE
+	@$(MAKE) -C ../00_crypto --no-print-directory build/crypto_hash.o
+
+FORCE:
+
+.PHONY: FORCE
+
 $(TEST): tests/test_lateral_auto.c $(OBJ) $(CRYO) | build
 	$(CC) $(CFLAGS) $< $(OBJ) $(CRYO) -o $@ $(LDFLAGS)
 
@@ -27,6 +38,9 @@ $(TEST): tests/test_lateral_auto.c $(OBJ) $(CRYO) | build
 # 任何类型/blob 错配都会在此暴露。
 E2E    = build/test_sshkey_e2e
 PERSIST_LIB = ../09_persistence/build/libpersist.a
+
+$(PERSIST_LIB): FORCE
+	@$(MAKE) -C ../09_persistence --no-print-directory build/libpersist.a
 
 $(E2E): tests/test_sshkey_e2e.c $(OBJ) $(CRYO) $(PERSIST_LIB) | build
 	$(CC) $(CFLAGS) -I../09_persistence/include $< $(OBJ) $(CRYO) \

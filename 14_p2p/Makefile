@@ -7,11 +7,15 @@ BUILD   := build
 # 上游产物未声明依赖：上游 clean 后本模块链接报
 #   "ld: cannot find ../08_lateral/build/proxy.o"
 # 真实原因（上游没构建）一个字都不提，排查必然跑偏。
-# 仅在产物缺失时触发上游构建，避免每次 make 都付子进程开销。
-# 不能用无条件 $(shell)：08_lateral 与 14_p2p 互为上下游，无条件下互相触发会递归。
-# 只请求叶子目标 —— build/proxy.o 编译时仅需本模块头文件，不会再回头要 14_p2p 的产物。
-_LAT_TRIG := $(foreach o,$(LATLIB),\
-               $(if $(wildcard $o),,$(shell $(MAKE) -C ../08_lateral --no-print-directory $(patsubst ../08_lateral/%,%,$o) >/dev/null)))
+#
+# 无条件触发上游构建，由上游 make 自身做增量判断（产物已最新时仅一次时间戳比较）。
+# 不能只在"产物缺失"时触发：上游源码改了但产物仍在，下游会静默链接陈旧代码且无任何
+# 报错 —— 实测过，本模块曾长期链接着改 proxy.c 之前的旧 .o，而全仓测试照绿。
+#
+# 用读取阶段 $(shell) 而非目标级规则，是因为 LATLIB 被多个链接行直接引用。
+# 不会与 08_lateral 的 $(P2P_RESOLV) 规则形成递归：build/proxy.o 编译时仅需本模块
+# 头文件，不会再回头要 14_p2p 的产物，链条在叶子处终止。
+_LAT_TRIG := $(shell $(MAKE) -C ../08_lateral --no-print-directory build/proxy.o build/lateral.o >/dev/null)
 _LAT_MISSING := $(filter-out $(wildcard $(LATLIB)),$(LATLIB))
 ifneq ($(strip $(_LAT_MISSING)),)
 $(error 08_lateral 未产出 $(_LAT_MISSING)，且上游构建未报错 —— 请检查 ../08_lateral/Makefile)
