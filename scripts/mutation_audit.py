@@ -32,7 +32,7 @@
   python3 scripts/mutation_audit.py --sample 2 # 抽样（常态化用，控制耗时）
   python3 scripts/mutation_audit.py --only M1,M4
 """
-import os, sys, shutil, subprocess, hashlib, random, time
+import os, sys, shutil, subprocess, hashlib, random, time, signal, atexit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -57,6 +57,12 @@ MUTATIONS = [
         "new": "pid = 0;",
         "mod": "19_defense",
         "bin": "build/test_defense",
+        # 该缺陷的症状本身就是进程挂死在 ptrace_stop，因此"测试挂起"是
+        # 正确观测，不是审计失效。真正防止它被误记成通过的是回归脚本的
+        # 零输出守卫（run_all_tests.sh），审计这里只负责不把 HANG 当 PASS。
+        # 不给它声明 expect 的话，抽样抽到 M2 就恒 exit 1 —— 一个随机失败
+        # 的检查会被习惯性忽略，等于没有。
+        "expect": "HANG",
     },
     {
         "id": "M3",
@@ -130,6 +136,11 @@ MUTATIONS = [
         # test_implant_main 不同），所以这里不需要显式 target。
     },
 ]
+
+# 变异 -> 应当出现的症状。多数变异期望被测试以失败捕获（CAUGHT），
+# 只有少数缺陷的症状是"跑不完"（见 M2 注释）。命中的不计入失败，
+# 否则常态化审计会出现随机失败项，进而被整体忽略。
+EXPECT = {m["id"]: m["expect"] for m in MUTATIONS if "expect" in m}
 
 
 def sh(cmd, cwd, timeout=900):
@@ -245,7 +256,10 @@ def run_one(m):
                     "构建未更新 %s（跑的是陈旧产物，判定无意义）—— 需显式 target"
                     % m["bin"])
 
-        trc, tout = sh("./" + m["bin"], os.path.join(ROOT, m["mod"]), 600)
+        # 120s：正常测试几秒内结束。挂起型变异（如 M2 的 ptrace 自伤）值得
+        # 等，但 600s 会让整轮审计超过回归脚本的总时限，反而被上层杀掉，
+        # 留下变异代码无人恢复。
+        trc, tout = sh("./" + m["bin"], os.path.join(ROOT, m["mod"]), 120)
         if trc == -999:
             return (m["id"], "HANG", "测试超时无输出 —— 挂起，不是被捕获")
         if not tout.strip():
@@ -274,7 +288,73 @@ def run_one(m):
         os.utime(path, None)
 
 
+LOCK = "/tmp/mutation_audit.lock"
+_OWN_LOCK = False
+
+
+def acquire_lock():
+    """单实例锁。
+
+    两个审计并发时，A 还原文件的瞬间 B 正要移回 .mutbak —— 实测出现过
+    FileNotFoundError: .mutbak 不存在，且源码随后被永久留在变异状态。
+    并发不是理论风险：上层超时杀掉进程后，孤儿进程仍在跑。
+    """
+    global _OWN_LOCK
+    try:
+        fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            owner = open(LOCK).read().strip()
+        except Exception:
+            owner = "?"
+        print("[FATAL] 另一个审计实例正在运行（%s）。"
+              "若确认已死，手动删除 %s" % (owner, LOCK))
+        sys.exit(2)
+    os.write(fd, ("pid=%d" % os.getpid()).encode())
+    os.close(fd)
+    _OWN_LOCK = True
+    # 异常退出（含 install_signals 抛出的 SystemExit）也要放锁，
+    # 否则下一次审计会被自己的陈旧锁挡住。
+    atexit.register(release_lock)
+
+
+def release_lock():
+    """只删除自己创建的锁。
+
+    无条件 unlink 会删掉别人的锁：install_signals() 先于 acquire_lock()
+    生效，那段时间窗内收到信号会走到这里，而此时锁属于另一个实例 ——
+    把它删掉等于放行第二次并发，正是本锁要防的事故。
+    """
+    global _OWN_LOCK
+    if not _OWN_LOCK:
+        return
+    _OWN_LOCK = False
+    try:
+        os.unlink(LOCK)
+    except OSError:
+        pass
+
+
+def install_signals():
+    """被上层超时/中断时，先让 finally 还原源码再退出。
+
+    实测：进程被杀后 .mutbak 与变异代码同时留在工作区，下一次构建就带着
+    人为注入的缺陷跑。SIGKILL 拦不住（靠下次启动的 heal 兜底），
+    SIGTERM/SIGINT 必须拦住 —— 这正是上层超时用的信号。
+    """
+    def _h(signum, _frame):
+        print("[SIGNAL] 收到信号 %d，正在还原变异..." % signum, flush=True)
+        raise SystemExit(3)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(sig, _h)
+        except (ValueError, OSError):
+            pass
+
+
 def main():
+    install_signals()
+    acquire_lock()
     h = heal()
     if h:
         print("[HEAL] 恢复了上次被强杀残留的变异: %s" % ", ".join(h))
@@ -309,13 +389,25 @@ def main():
 
     print("\n=== 变异审计结果 ===")
 
-    survived = [r for r in results if r[1] == "SURVIVED"]
-    errors = [r for r in results if r[1] in ("ERROR", "HANG")]
+    release_lock()
+
+    survived, errors, expected = [], [], []
+    for r in results:
+        exp = EXPECT.get(r[0])
+        if exp and r[1] == exp:
+            expected.append(r)
+        elif r[1] == "SURVIVED":
+            survived.append(r)
+        elif r[1] in ("ERROR", "HANG"):
+            errors.append(r)
+
     print("\n存活(用例证明不了任何事) = %d" % len(survived))
     print("审计失效/挂起           = %d" % len(errors))
     print("捕获                    = %d" % len([r for r in results if r[1] == "CAUGHT"]))
+    print("符合预期症状            = %d" % len(expected))
 
     # SURVIVED 是真缺口；ERROR/HANG 是审计或测试基建的问题，同样不能放过。
+    # 声明了 expect 且症状吻合的不算失败 —— 见 M2 注释。
     sys.exit(1 if (survived or errors) else 0)
 
 
