@@ -135,12 +135,79 @@ MUTATIONS = [
         # 注意：test_reflect_run 在默认目标 all 的 TESTS 里（与 M5 的
         # test_implant_main 不同），所以这里不需要显式 target。
     },
+    {
+        "id": "M9",
+        "desc": "00_crypto: GCM tag 改用 memcmp（引入时序侧信道，功能仍完全正确）",
+        "file": "00_crypto/src/crypto_gcm.c",
+        "old": "if (!crypto_constant_time_eq(tag, expected_tag, GCM_TAG_LEN))",
+        "new": "if (memcmp(tag, expected_tag, GCM_TAG_LEN) != 0)",
+        "mod": "00_crypto",
+        "bin": "build/test_gcm",
+        # 这一类才是变异审计最该盯的：改完之后加解密、验签、所有功能
+        # 全部照常工作，测试几乎必然全绿。它不产生错误结果，只泄露
+        # "tag 在第几个字节开始不同"这一位信息。
+        #
+        # 若它 SURVIVED，那本身就是结论：我们没有时序侧信道的回归保护。
+        # 与 M1/M4 那种"功能错、必然被抓"的变异相比，SURVIVED 不代表
+        # 审计失败，而是暴露了一块此前从未被验证过的测试盲区。
+        #
+        # 【实测：本环境无法自动捕获，已穷举三条路】
+        #   1) 时钟测量：3e6 次调用/配置，memcmp 各失配位耗时比 1.0000~1.0050，
+        #      ct_eq 是 1.0000~1.0057 —— 两者差异同量级，都在噪声内。
+        #      现代 glibc 对 16 字节 memcmp 走无分支路径，测不出差异。
+        #   2) 符号引用：变异后 objdump 查 memcmp 调用数 = 0 —— 被内联展开。
+        #   3) 指令序列：可做但随编译器版本漂移，属脆弱判据。
+        #
+        # 【重要】"本环境测不出" 不等于 "该缺陷无害"。memcmp 不保证常量时间，
+        # 换平台（无 SIMD 的 CPU、老 libc）可能逐字节早退。正确做法是保持
+        # constant_time_eq —— 它的正确性来自语义契约，不来自本环境的实测。
+        #
+        # 因此声明 known_blind：审计不因此失败，但必须在报告中单列，
+        # 绝不混进"符合预期症状"里 —— 把"测不了"记成"没问题"是静默降级。
+        "expect": "SURVIVED",
+        "known_blind": True,
+    },
+    {
+        "id": "M10",
+        "desc": "23_lkm: 去掉链表互指校验（结构不一致也照写，写坏内核链表）",
+        "file": "23_lkm/src/lkm.c",
+        "old": "    if (back != node)\n        return LKM_ERR_CORRUPT;",
+        "new": "    if (0)\n        return LKM_ERR_CORRUPT;",
+        "mod": "23_lkm",
+        "bin": "build/test_lkm",
+        "all_occurrences": True,
+        # 两处（nxt->prev 与 prv->next）都要改，只改一处会被另一处挡住，
+        # 得出"测试抓到了"的假结论。
+    },
+    {
+        "id": "M11",
+        "desc": "26_lateral_auto: base64 非法字符静默跳过（放行命令注入）",
+        "file": "26_lateral_auto/src/cred.c",
+        "old": "            return -1;               /* 非法字符：宁可失败，不可静默跳过 */",
+        "new": "            continue;",
+        "mod": "26_lateral_auto",
+        "bin": "build/test_lateral_auto",
+        # all 只建 $(OBJ)，不含测试二进制 —— 不显式指定 target 就会跑
+        # 陈旧二进制，得到毫无意义的"CAUGHT"。
+        "target": "build/test_lateral_auto",
+    },
+    {
+        "id": "M12",
+        "desc": "21_exfil: 信元 AUTH 失败不再上报（篡改信元被当正常处理）",
+        "file": "21_exfil/src/exfil.c",
+        "old": "if (rc == P2P_CELL_ERR_AUTH) return EXF_ERR_AUTH;",
+        "new": "if (0) return EXF_ERR_AUTH;",
+        "mod": "21_exfil",
+        "bin": "build/test_exfil",
+        "all_occurrences": True,
+    },
 ]
 
 # 变异 -> 应当出现的症状。多数变异期望被测试以失败捕获（CAUGHT），
 # 只有少数缺陷的症状是"跑不完"（见 M2 注释）。命中的不计入失败，
 # 否则常态化审计会出现随机失败项，进而被整体忽略。
 EXPECT = {m["id"]: m["expect"] for m in MUTATIONS if "expect" in m}
+BLIND = {m["id"]: True for m in MUTATIONS if m.get("known_blind")}
 
 
 def sh(cmd, cwd, timeout=900):
@@ -352,25 +419,80 @@ def install_signals():
             pass
 
 
+class Usage(Exception):
+    pass
+
+
+def parse_args(args):
+    """解析参数。未知参数与空选择集都必须报错退出，不能静默跑全套/跑零个。
+
+    实测教训：曾敲 `--help` 想看用法，结果参数被静默忽略，脚本跑了 1 分半
+    的全套审计还占住锁。同样地，`--only M99`（不存在的变异）会让选择集变
+    空，脚本跑 0 个变异然后 exit 0 —— "什么都没验"被记成"全部通过"。
+    两者都属于静默失效，宁可报错也不可含糊。
+    """
+    sel = None
+    sample = None
+    known = {"--only", "--sample"}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--only":
+            if i + 1 >= len(args):
+                raise Usage("--only 需要一个参数")
+            sel = set(args[i + 1].split(","))
+            i += 2
+        elif a == "--sample":
+            if i + 1 >= len(args):
+                raise Usage("--sample 需要一个参数")
+            try:
+                sample = int(args[i + 1])
+            except ValueError:
+                raise Usage("--sample 需要一个整数，收到 %r" % args[i + 1])
+            i += 2
+        elif a in ("-h", "--help"):
+            print(__doc__ or "用法: mutation_audit.py [--only M1,M2] [--sample N]")
+            raise SystemExit(0)
+        elif a.startswith("-"):
+            raise Usage("未知参数 %r（已知: %s）" % (a, ", ".join(sorted(known))))
+        else:
+            raise Usage("多余的位置参数 %r" % a)
+        # 取过值的那个参数不再当选项解析（避免 --only --sample 被吃掉）
+    return sel, sample
+
+
+class Usage(Exception):
+    pass
+
+
 def main():
     install_signals()
+    try:
+        sel, sample = parse_args(sys.argv[1:])
+    except Usage as e:
+        print("[FATAL] 参数错误: %s" % e)
+        sys.exit(2)
     acquire_lock()
     h = heal()
     if h:
         print("[HEAL] 恢复了上次被强杀残留的变异: %s" % ", ".join(h))
 
-    args = [a for a in sys.argv[1:]]
-    sel = None
-    sample = None
-    for i, a in enumerate(args):
-        if a == "--only" and i + 1 < len(args):
-            sel = set(args[i + 1].split(","))
-        if a == "--sample" and i + 1 < len(args):
-            sample = int(args[i + 1])
-
     pool = MUTATIONS
-    if sel:
+    if sel is not None:
+        # 不能用 `if sel:` —— 空集合非空字符串都会走到 else，把"选了不存在
+        # 的变异"当成"没指定、跑全部"。
+        unknown = sorted(sel - {m["id"] for m in MUTATIONS})
+        if unknown:
+            print("[FATAL] 不存在的变异: %s（已有: %s）"
+                  % (", ".join(unknown),
+                     ", ".join(m["id"] for m in MUTATIONS)))
+            release_lock()
+            sys.exit(2)
         pool = [m for m in pool if m["id"] in sel]
+        if not pool:
+            print("[FATAL] 选择集为空 —— 跑 0 个变异毫无意义，拒绝含糊通过")
+            release_lock()
+            sys.exit(2)
     if sample and sample < len(pool):
         random.seed()  # 每次抽样不同，长期看覆盖全部
         pool = random.sample(pool, sample)
@@ -391,11 +513,18 @@ def main():
 
     release_lock()
 
-    survived, errors, expected = [], [], []
+    survived, errors, expected, blind = [], [], [], []
     for r in results:
         exp = EXPECT.get(r[0])
         if exp and r[1] == exp:
-            expected.append(r)
+            # 同样"不计入失败"，性质却完全不同：
+            #   M2 类 —— 症状本身就是挂起，跑不完是正确观测；
+            #   M9 类 —— 我们根本没有分辨力，是未被覆盖的风险面。
+            # 混在一栏里报告，等于把"测不了"记成"没问题"。
+            if BLIND.get(r[0]):
+                blind.append(r)
+            else:
+                expected.append(r)
         elif r[1] == "SURVIVED":
             survived.append(r)
         elif r[1] in ("ERROR", "HANG"):
@@ -404,7 +533,12 @@ def main():
     print("\n存活(用例证明不了任何事) = %d" % len(survived))
     print("审计失效/挂起           = %d" % len(errors))
     print("捕获                    = %d" % len([r for r in results if r[1] == "CAUGHT"]))
-    print("符合预期症状            = %d" % len(expected))
+    print("符合预期症状(如M2挂起)  = %d" % len(expected))
+    print("已知盲区(测不了,未覆盖) = %d" % len(blind))
+    if blind:
+        print("\n[!] 以下缺陷无法被自动化捕获，风险面未覆盖（非'已验证安全'）：")
+        for r in blind:
+            print("    %-4s %s" % (r[0], r[2]))
 
     # SURVIVED 是真缺口；ERROR/HANG 是审计或测试基建的问题，同样不能放过。
     # 声明了 expect 且症状吻合的不算失败 —— 见 M2 注释。

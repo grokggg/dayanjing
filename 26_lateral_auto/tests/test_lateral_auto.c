@@ -406,6 +406,29 @@ int main(void)
               "含 $() 的公钥被拒绝");
     }
 
+    /* ---- 15b. base64 非法字符必须被拒绝（M11 防回归） ----
+     * b64_dec 是 static，只能经 lat_cred_fingerprint 间接触达。
+     * 若把"非法字符 -> return -1"改成静默 continue，畸形输入会被跳过
+     * 非法字符后解出有效字节、算出指纹 —— 等价于接受了本该拒绝的
+     * 不可信公钥（公钥来自目标机，属不可信输入）。
+     *
+     * 正向对照是必需的：若函数对所有输入都返回 -1，下面这些 != 0 断言
+     * 照样成立，测试通过却证明不了任何东西。 */
+    {
+        char fp[128];
+        static const char ok43[] =
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";  /* 43 = 32 字节 */
+        CHECK(strlen(ok43) == 43, "对照：合法 base64 长度为 43");
+        CHECK(lat_cred_fingerprint(ok43, strlen(ok43), fp, sizeof(fp)) == 0,
+              "正向对照：合法 base64 能算出指纹（否则下面断言无意义）");
+        CHECK(fp[0] == 'S' && fp[1] == 'H',
+              "正向对照：指纹以 SHA256: 开头");
+        CHECK(lat_cred_fingerprint("AAAA!AAAA", 9, fp, sizeof(fp)) != 0,
+              "base64 含非法字符被拒绝（不可静默跳过）");
+        CHECK(lat_cred_fingerprint("AAAA$A", 6, fp, sizeof(fp)) != 0,
+              "base64 含 $ 被拒绝");
+    }
+
     /* ---- 16. 编排：全成功 ---- */
     {
         char fake[512];
