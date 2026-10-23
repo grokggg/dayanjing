@@ -74,7 +74,7 @@ PACKSRC := src/deploy_pack.c
 
 all: $(BUILD)/deploy_pack $(BUILD)/drop_serve $(BUILD)/drop_stager \
      $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic \
-     $(BUILD)/test_drop_pe
+     $(BUILD)/test_drop_pe $(BUILD)/test_deploy_pack
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -92,6 +92,11 @@ $(BUILD)/drop_stager: $(STAGSRC) $(STAGOBJ) $(PACKOBJ_MIN) | $(BUILD)
 	$(CC) $(CFLAGS) -static -s $< $(STAGOBJ) $(PACKOBJ_MIN) -o $@
 
 $(BUILD)/test_drop: tests/test_drop.c $(SRCS) $(PACKOBJ) | $(BUILD)
+	$(CC) $(CFLAGS) $< $(SRCS) $(PACKOBJ) -o $@
+
+# 把产出工具本身当被测对象：fork/exec deploy_pack 产出制品 -> 读回 -> 真执行。
+# 扁平化此前只在测试里被开启过，产出路径从未使用；这条测试钉死它必须生效。
+$(BUILD)/test_deploy_pack: tests/test_deploy_pack.c $(SRCS) $(PACKOBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(SRCS) $(PACKOBJ) -o $@
 
 $(BUILD)/test_deploy: tests/test_deploy.c $(PACKOBJ) | $(BUILD)
@@ -126,11 +131,13 @@ $(BUILD)/test_drop_pe: tests/test_drop_pe.c $(SRCS) $(PESRCS) $(PACKOBJ) $(PEDEP
 attrib: $(BUILD)/drop_stager $(BUILD)/drop_serve
 	@python3 scripts/attrib_check.py
 
-test: $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic
+test: $(BUILD)/test_drop $(BUILD)/test_deploy $(BUILD)/test_pic \
+     $(BUILD)/test_drop_pe $(BUILD)/test_deploy_pack
 	./$(BUILD)/test_drop
 	./$(BUILD)/test_deploy
 	./$(BUILD)/test_pic
 	./$(BUILD)/test_drop_pe
+	./$(BUILD)/test_deploy_pack
 
 clean:
 	rm -rf $(BUILD)
