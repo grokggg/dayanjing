@@ -18,8 +18,27 @@ CFLAGS  += -D_GNU_SOURCE -D_DEFAULT_SOURCE
 CFLAGS  += -Iinclude -I../20_packer/include -I../00_crypto/include
 
 BUILD   := build
+
+# 上游构建触发（必须在 PACKOBJ 求值之前）
+#
+# PACKOBJ 用 $(wildcard) 在读取阶段求值，但 20_packer 的目标文件本层无法
+# 自行生成 —— 上游 clean 后 wildcard 取空，链接报的却是完全无关的
+#   undefined reference to `sha256' / `crypto_constant_time_eq'
+# 真实原因（上游未构建）被彻底掩盖。这是实测复现的，不是推演：
+#   rm -rf ../20_packer/build && make build/test_drop   ->  上面那串报错
+#
+# $(shell) 在读取阶段真实执行上游 make：上游自身有增量判断，已构建时几乎
+# 零开销；未构建时完整构建一次，随后 wildcard 才取得到文件。
+# 上游 stdout 必须丢弃（否则混进变量值），stderr 保留（编译错误要可见）。
+_PACKER_PREBUILD := $(shell $(MAKE) -C ../20_packer --no-print-directory >/dev/null)
+
 # 复用 20_packer 已编译的目标文件（含 crypto_gcm/hash/x25519 与 shaped/pack/mexec）
 PACKOBJ := $(wildcard ../20_packer/build/*.o)
+
+# 上游构建静默失败时不要再去链接 —— 否则又是一串无关的 undefined reference。
+ifeq ($(PACKOBJ),)
+$(error 20_packer 未产出任何目标文件，且上游构建未报错 —— 请检查 ../20_packer/Makefile)
+endif
 
 # stager 的最小闭包。
 #

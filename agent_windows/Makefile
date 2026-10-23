@@ -24,6 +24,18 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
 BUILD     := build/linux
+
+# 上游构建触发。
+#
+# 下面的 winshim 链接规则用 ../20_packer/build/*.o —— 那是 shell glob，在
+# recipe 执行时展开。上游 clean 后 glob 不匹配任何文件，shell 把模式原样
+# 传给编译器，报的是 "No such file or directory" 或一串无关的 undefined
+# reference，真实原因（上游未构建）被掩盖。与 25_deploy 是同一类缺陷。
+#
+# $(shell) 在读取阶段真实执行上游 make：上游自身有增量判断，已构建时几乎
+# 零开销。stdout 必须丢弃（否则混进变量值），stderr 保留。
+_PACKER_PREBUILD := $(shell $(MAKE) -C ../20_packer --no-print-directory >/dev/null)
+
 PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c src/defend_win.c \
             src/reflect_run.c
 PORT_OBJS := $(PORT_SRCS:src/%.c=$(BUILD)/%.o)
