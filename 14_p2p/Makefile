@@ -4,6 +4,19 @@ CFLAGS  += -Iinclude -I../08_lateral/include -I../02_c2/include -I../00_crypto/i
 LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 BUILD   := build
 
+# 上游产物未声明依赖：上游 clean 后本模块链接报
+#   "ld: cannot find ../08_lateral/build/proxy.o"
+# 真实原因（上游没构建）一个字都不提，排查必然跑偏。
+# 仅在产物缺失时触发上游构建，避免每次 make 都付子进程开销。
+# 不能用无条件 $(shell)：08_lateral 与 14_p2p 互为上下游，无条件下互相触发会递归。
+# 只请求叶子目标 —— build/proxy.o 编译时仅需本模块头文件，不会再回头要 14_p2p 的产物。
+_LAT_TRIG := $(foreach o,$(LATLIB),\
+               $(if $(wildcard $o),,$(shell $(MAKE) -C ../08_lateral --no-print-directory $(patsubst ../08_lateral/%,%,$o) >/dev/null)))
+_LAT_MISSING := $(filter-out $(wildcard $(LATLIB)),$(LATLIB))
+ifneq ($(strip $(_LAT_MISSING)),)
+$(error 08_lateral 未产出 $(_LAT_MISSING)，且上游构建未报错 —— 请检查 ../08_lateral/Makefile)
+endif
+
 # 02_c2 的帧层 AEAD + 00_crypto 的 GCM/SHA（E2EE 隧道依赖，密码学只此一处实现）
 # crypto_hash.o 提供 HKDF，供 p2p_tunnel_init_from_session 从会话密钥派生隧道密钥
 C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
@@ -32,7 +45,7 @@ $(BUILD)/resolv.o: src/resolv.c include/p2p_resolv.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/test_resolv: tests/test_resolv.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 $(BUILD)/relay.o: src/relay.c include/p2p.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -46,14 +59,14 @@ $(BUILD)/cover.o: src/cover.c include/p2p_cover.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/test_cover: tests/test_cover.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 # 覆盖预算按真实带宽自适应：实测 kbps -> 字节预算（含多跳木桶与冲突诊断）
 $(BUILD)/cover_budget.o: src/cover_budget.c include/p2p_cover_budget.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/test_cover_budget: tests/test_cover_budget.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 $(BUILD)/crypto.o: src/crypto.c include/p2p_crypto.h ../02_c2/include/c2_frame.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -71,7 +84,7 @@ $(BUILD)/mix_cover.o: src/mix_cover.c include/p2p_mix.h include/p2p_cover.h | $(
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/test_mix_cover: tests/test_mix_cover.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 $(BUILD)/c2_frame.o: ../02_c2/src/c2_frame.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -91,61 +104,61 @@ $(BUILD)/c2.o: ../02_c2/src/c2.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/test_mesh: tests/test_mesh.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 $(BUILD)/test_chain: tests/test_chain.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 $(BUILD)/test_e2ee: tests/test_e2ee.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 $(BUILD)/test_qos: tests/test_qos.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 # QoS 与数据面联动：真进程 + 真 socket，路径由 QoS 算出并驱动逐跳转发
 $(BUILD)/test_route: tests/test_route.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 $(BUILD)/test_cell: tests/test_cell.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 # 单坏信元的恢复能力（AUTH 后流位置仍前进，链路不被单个坏字节打死）
 $(BUILD)/test_cell_resync: tests/test_cell_resync.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 # 真实带宽探测：快/慢 sink 真实进程 + 真实 socket
 $(BUILD)/test_bw: tests/test_bw.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 # 可独立部署的节点守护进程（配置驱动，无需重新编译即可换拓扑）
 $(BUILD)/p2p_node: src/node.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB) -lpthread
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS) -lpthread
 
 # 静态制品：可直接 scp 到目标机运行，不依赖目标机任何开发库
 STATIC := static
 $(STATIC)/p2p_node: src/node.c
 	mkdir -p $(STATIC)
 	$(CC) $(CFLAGS) -static -o $@ $< \
-	  $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB) -lpthread
+	  $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS) -lpthread
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
 # 洋葱测试同时依赖密码学目标（层密钥 HKDF + 层加密 GCM）
 $(BUILD)/test_onion: tests/test_onion.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 # 跳静态密钥轮换 / 前向保密
 $(BUILD)/test_hopkey: tests/test_hopkey.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 # 混时序
 $(BUILD)/test_mix: tests/test_mix.c $(BUILD)/libp2p.a $(C2OBJS)
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(C2OBJS) $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a $(C2OBJS)
 
 # 探测调度：低频 + 错峰（含真实回环 listener 探测）
 $(BUILD)/test_probesched: tests/test_probesched.c $(BUILD)/libp2p.a
-	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libp2p.a $(LATLIB)
+	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
 test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_mix_cover $(BUILD)/test_probesched $(BUILD)/test_resolv $(BUILD)/test_cover $(BUILD)/test_cell_resync $(BUILD)/test_cover_budget
 	./$(BUILD)/test_mesh

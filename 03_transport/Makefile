@@ -52,6 +52,15 @@ $(BUILD)/test_dnsdown: tests/test_dnsdown.c $(BUILD)/libtransport.a | $(BUILD)
 $(BUILD)/test_cover_cost: tests/test_cover_cost.c $(BUILD)/libtransport.a ../14_p2p/build/cover.o | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/libtransport.a ../14_p2p/build/cover.o
 
+# 上游产物未声明依赖时，make 报 "No rule to make target '../14_p2p/build/cover.o'"，
+# 真实原因（上游没构建）完全不提。只在需要该产物时触发上游，且只请求叶子目标。
+../14_p2p/build/cover.o: FORCE
+	@$(MAKE) -C ../14_p2p --no-print-directory $(patsubst ../14_p2p/%,%,$@)
+
+FORCE:
+
+.PHONY: FORCE
+
 testpub: $(BUILD)/test_icmppub $(BUILD)/test_dnsdown
 	./$(BUILD)/test_icmppub
 	./$(BUILD)/test_dnsdown

@@ -20,6 +20,18 @@ $(BUILD)/proxy.o: src/proxy.c | $(BUILD)
 # 21_exfil 曾因同样的顺序问题链接失败，这里同步修正。
 P2P_RESOLV := ../14_p2p/build/resolv.o
 
+# 上游产物没有声明依赖时，make 会直接报 "No rule to make target"，
+# 而真实原因是上游没构建 —— 排查时必然跑偏。
+# 这里不能用读取阶段的 $(shell make -C ..)：08_lateral 与 14_p2p 互为上下游，
+# 双方在解析期就互相触发会无限递归。改为目标级规则，只在真正需要该产物时触发，
+# 且只请求具体目标（build/resolv.o 是叶子，不会再回头触发本模块）。
+$(P2P_RESOLV): FORCE
+	@$(MAKE) -C ../14_p2p --no-print-directory $(patsubst ../14_p2p/%,%,$@)
+
+FORCE:
+
+.PHONY: FORCE
+
 $(BUILD)/test_lateral: tests/test_lateral.c $(BUILD)/liblateral.a $(P2P_RESOLV) | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@ $(BUILD)/liblateral.a $(P2P_RESOLV) $(LDLIBS)
 
