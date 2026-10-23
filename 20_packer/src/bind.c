@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "crypto_hash.h"
+#include "crypto_gcm.h"
 
 static const uint8_t PK_SEED_LABEL[] = "dayanjing:packer:seed:v1";
 static const uint8_t PK_BIND_LABEL[] = "dayanjing:packer:bind:v1";
@@ -122,7 +123,18 @@ int pk_unpack_session(const uint8_t *blob, size_t blob_len,
     rc = pk_bind_id(bind_ctx, bind_ctx_len, want);
     if (rc != PK_OK) return rc;
 
-    if (memcmp(got, want, PK_BIND_ID_LEN) != 0) return PK_ERR_BIND;
+    /*
+     * 常量时间比较，不能用 memcmp。
+     *
+     * got 来自制品（攻击者可选任意值），want = SHA256(PK_BIND_LABEL||bind_ctx)。
+     * 函数契约并未要求 bind_ctx 必须是公开值 —— 调用方完全可以拿一个秘密
+     * 当绑定上下文。只要 want 有一字节是攻击者算不出来的，逐字节早退的
+     * memcmp 就是一个可远程观测的预言机，能逐字节把 want 试出来。
+     *
+     * 判错的代价不对称：改错成常量时间，代价是几十纳秒；判错成 memcmp，
+     * 代价是一个真实的信息泄露口。所以按"可能是秘密"处理。
+     */
+    if (crypto_constant_time_eq(got, want, PK_BIND_ID_LEN) == 0) return PK_ERR_BIND;
 
     rc = pk_session_seed(k_c2s, k_s2c, bind_ctx, bind_ctx_len, seed);
     if (rc != PK_OK) return rc;

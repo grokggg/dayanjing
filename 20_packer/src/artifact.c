@@ -47,6 +47,7 @@
 
 #include "crypto_hash.h"
 #include "crypto_x25519.h"
+#include "crypto_gcm.h"
 
 static const uint8_t PK_ARTIFACT_INFO[] = "dayanjing:packer:artifact:v3";
 
@@ -271,7 +272,9 @@ int pk_unpack_artifact(const uint8_t *blob, size_t blob_len,
     if (rc != PK_OK) { art_zero(ctx, sizeof(ctx)); return rc; }
 
     art_zero(ctx, sizeof(ctx));
-    if (memcmp(got, want, PK_BIND_ID_LEN) != 0) return PK_ERR_BIND;
+    /* 同 bind.c：got 来自制品（攻击者可控），want 可能由秘密 bind_ctx 派生，
+       逐字节早退会变成可远程观测的预言机 —— 必须常量时间。 */
+    if (crypto_constant_time_eq(got, want, PK_BIND_ID_LEN) == 0) return PK_ERR_BIND;
 
     /* 3. 用该纪元私钥派生种子并解包（纪元不在窗口会在此返回 EXPIRED） */
     rc = pk_artifact_seed_open(k, &b2, k_c2s, k_s2c, eph, seed);

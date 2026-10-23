@@ -259,6 +259,28 @@ fi
 # 判定：存活(测试仍全绿) 与 审计失效(锚点腐烂/挂起) 都计入 failed。
 # 后者尤其不能放过——锚点失效若记 SKIP，变异集合会静默腐烂，
 # 报告上永远"0 存活"，实际审计面在缩小。
+#
+# 秘密比较守卫：枚举全仓每一处 memcmp，要求逐处分类。
+#
+# 为什么必须进回归（M9 的教训推广）：M9/M13/M14/M15 只钉住了
+# crypto_constant_time_eq 这一个【函数】。但风险面在【调用点】——
+# 任何人随时可以在别处写一行 memcmp(tag, expected, n)，功能正确、
+# 测试全绿，却引入逐字节早退的时序预言机；源码插桩看不见它（那个
+# 函数根本没被调用），机器码守卫也看不见它（它审的是函数体）。
+# 未分类即失败，新增任何一处 memcmp 都会被拦下要求人工判定。
+if [ -f "$ROOT/scripts/check_secret_cmp.py" ]; then
+    echo "=== check_secret_cmp（全仓 memcmp 分类守卫） ==="
+    if python3 "$ROOT/scripts/check_secret_cmp.py" > /tmp/seccmp.log 2>&1; then
+        echo "  [PASS] 全仓 memcmp 均已分类且无秘密比较"
+        grep -E "^\[INFO\]|^\[WARN\]" /tmp/seccmp.log | sed 's/^/         /'
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] 秘密比较守卫未通过（见 /tmp/seccmp.log）"
+        sed -n '/\[FAIL\]/,$p' /tmp/seccmp.log | head -40
+        failed=$((failed + 1))
+    fi
+fi
+
 MUT_MODE=${MUTATION:-sample:1}
 if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     echo "=== mutation_audit ==="

@@ -543,7 +543,17 @@ tls_err tls_handshake(tls_ctx *c) {
         sha256_final(&tmp, tr_hash);
         uint8_t want[12];
         prf_sha256(c->master, 48, "server finished", 15, tr_hash, 32, want, 12);
-        if (memcmp(want, body, 12) != 0) return TLS_ERR_FINISHED;
+        /*
+         * 常量时间比较，不能用 memcmp。
+         *
+         * want = PRF(master_secret, "server finished", tr_hash)，由主密钥派生，
+         * 攻击者算不出来；body 是收到的一端，攻击者完全可控。memcmp 的逐字节
+         * 早退会变成一个可观测预言机，能逐字节把 verify_data 试出来。
+         *
+         * 与上面 SKE 里的签名摘要比较不同：那里比的是公开数据的哈希，攻击者
+         * 自己就算得出来，没有可泄露的东西；这里比的是秘密派生值，必须常量时间。
+         */
+        if (crypto_constant_time_eq(want, body, 12) == 0) return TLS_ERR_FINISHED;
         c->peer_done = 1;
     }
 
