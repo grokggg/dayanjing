@@ -84,7 +84,16 @@ MUTATIONS = [
         "old": "if (h->defend(h->defend_ud) != 0) return IMW_ERR_UNSAFE;",
         "new": "if (0)",
         "mod": "agent_windows",
-        "bin": "build/linux/test_implant_main",
+        "bin": "build/winshim/test_implant_main",
+        # 必须显式指定：agent_windows 的默认目标 all 只建 $(TEST_BINS)，
+        # 不含 winshim。不指定的话审计跑的是陈旧二进制，结果毫无意义
+        # （曾据此得出 M5 SURVIVED 的假结论）。
+        #
+        # 用 winshim-build 而不是 winshim：后者在 recipe 里直接跑测试，
+        # 变异生效时 make 非零退出，会被记成"构建失败"而非 CAUGHT ——
+        # 把"测试抓到了"掩盖成"构建坏了"。这里要的是测试结果由 run_one
+        # 独立判定，所以只建不跑。
+        "target": "winshim-build",
     },
     {
         "id": "M6",
@@ -148,11 +157,12 @@ def blob_hash(path):
     return out.strip() if rc == 0 else None
 
 
-def build(mod):
+def build(mod, target=None):
     d = os.path.join(ROOT, mod)
     # 不 clean：变异只改一个 .c，增量重建即可。
     # 旧版每次 make clean 是全量重编，是上一轮审计超时的直接原因。
-    rc, out = sh("make -s 2>&1 | tail -8", d, 900)
+    cmd = "make -s %s 2>&1 | tail -8" % target if target else "make -s 2>&1 | tail -8"
+    rc, out = sh(cmd, d, 900)
     return rc, out
 
 
@@ -184,7 +194,7 @@ def run_one(m):
         if blob_hash(path) == before_hash:
             return (m["id"], "ERROR", "变异未改变文件内容（old/new 相同？）")
 
-        rc, out = build(m["mod"])
+        rc, out = build(m["mod"], m.get("target"))
         if rc != 0:
             return (m["id"], "ERROR", "构建失败: %s" % out.strip()[:160])
 
@@ -238,13 +248,13 @@ def main():
         sys.exit(2)
 
     results = []
+    print("=== 变异审计（逐条，超时也能保留已完成部分）===", flush=True)
     for m in pool:
-        print("--- %s: %s" % (m["id"], m["desc"]), flush=True)
-        results.append(run_one(m))
+        r = run_one(m)
+        results.append(r)
+        print("[%-8s] %s : %s" % (r[0], r[1], r[2]), flush=True)
 
     print("\n=== 变异审计结果 ===")
-    for rid, verdict, detail in results:
-        print("[%-8s] %s : %s" % (rid, verdict, detail))
 
     survived = [r for r in results if r[1] == "SURVIVED"]
     errors = [r for r in results if r[1] in ("ERROR", "HANG")]
