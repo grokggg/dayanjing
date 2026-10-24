@@ -15,7 +15,7 @@ SRCS    = src/bn.c src/asn1.c src/rsa.c src/x509.c src/tls.c src/tls_server.c
 OBJS    = $(SRCS:.c=.o) $(CRYPTO:.c=.o)
 
 TESTS   = $(BUILD)/test_bn $(BUILD)/test_asn1 $(BUILD)/test_x509 $(BUILD)/test_tls \
-          $(BUILD)/test_tls_srv
+          $(BUILD)/test_tls_srv $(BUILD)/test_tls_ch
 
 # 跨实现互操作工具：把服务端/客户端挂到真实 TCP 端口，与 OpenSSL 的
 # s_client / s_server 对连。它们不是单元测试，由 scripts/interop_openssl.sh 驱动。
@@ -44,6 +44,10 @@ $(BUILD)/test_tls: tests/test_tls.c $(OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD)/test_tls_srv: tests/test_tls_srv.c $(OBJS) | $(BUILD)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+# 真实 ClientHello 解析器健壮性：必须进默认目标，否则又是一个"写了没接"的测试
+$(BUILD)/test_tls_ch: tests/test_tls_ch.c tests/clienthello_default.h $(OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD)/tls_srv_tcp: tools/tls_srv_tcp.c $(OBJS) | $(BUILD)

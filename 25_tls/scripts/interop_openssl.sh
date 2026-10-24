@@ -64,10 +64,21 @@ spawn() {
     echo $!
 }
 
+# 同上，但把子进程退出码追加进日志。
+# 为什么必须有：真实客户端（默认 openssl）发的 ClientHello 带 TLS 1.3 的
+# supported_versions 和几十个扩展。解析器若在这种报文上段错误，现象是
+# "握手失败"——和"我们主动拒绝"在返回值上完全一样。只有退出码能区分
+# "正常返回"与"被信号杀死"。
+spawn_exit() {
+    setsid sh -c "$1; echo \"SRV-EXIT \$?\" >> \"$2\"" </dev/null >"$2" 2>&1 &
+    echo $!
+}
+
 PORT_A=$((21000 + $$ % 9000))
 PORT_AN=$((PORT_A + 1))
 PORT_B=$((PORT_A + 2))
 PORT_BN=$((PORT_A + 3))
+PORT_A2=$((PORT_A + 4))
 
 # =====================================================================
 # A. 我们的服务端 <- OpenSSL s_client
@@ -121,6 +132,39 @@ AN_RC=$?
 if [ "$AN_RC" -ne 0 ]; then ok "A-NEG: 错误 CA 下 OpenSSL 拒绝（rc=$AN_RC）"
 else bad "A-NEG: 错误 CA 竟然通过——verify 断言可能是恒真的"; fi
 kill -TERM -"$GPAN" 2>/dev/null
+
+# ---- A2: 默认 s_client（提供 TLS 1.3）----
+# A 用的是 -tls1_2，那个 ClientHello 里根本没有 supported_versions。
+# 真实世界的客户端默认就提供 TLS 1.3，扩展数量与顺序都不同。这一步
+# 要证明的是：面对真实现代 ClientHello，我们要么正确忽略 supported_versions
+# 降级到 1.2，要么干净拒绝——绝不能崩在解析器里。
+echo "=== A2: 默认 OpenSSL s_client（提供 TLS1.3，不强制版本）==="
+rm -f /tmp/io_a2_srv.log /tmp/io_a2_cli.log
+GPA2=$(spawn_exit "\"$PWD/$BUILD/tls_srv_tcp\" $PORT_A2 \"$PWD/$DATA/leaf.pem\" \
+              \"$PWD/$DATA/leaf.key\" h2" /tmp/io_a2_srv.log)
+wait_for_log /tmp/io_a2_srv.log "SRV-LISTEN"; chk "A2: 服务端就绪" $?
+( printf 'HELLO-A2\n'; sleep 2 ) | timeout 20 openssl s_client \
+    -connect 127.0.0.1:"$PORT_A2" \
+    -CAfile "$DATA/ca.pem" -servername front.test \
+    -verify_hostname front.test -verify_return_error -alpn h2 \
+    >/tmp/io_a2_cli.log 2>&1
+A2_RC=$?
+chk "A2: 默认客户端握手并验链成功（rc=0）" "$A2_RC"
+grep -q "Verify return code: 0 (ok)" /tmp/io_a2_cli.log
+chk "A2: OpenSSL 报告 Verify return code: 0" $?
+grep -q "New, TLSv1.2" /tmp/io_a2_cli.log
+chk "A2: 协商到 TLSv1.2（supported_versions 被正确忽略并降级）" $?
+grep -qi "ALPN protocol: h2" /tmp/io_a2_cli.log
+chk "A2: ALPN=h2" $?
+grep -q "HELLO-A2" /tmp/io_a2_cli.log
+chk "A2: 应用数据往返成立（客户端收到回显）" $?
+wait_for_log /tmp/io_a2_srv.log "SRV-DONE"; chk "A2: 服务端正常收尾" $?
+grep -q "SRV-HANDSHAKE OK" /tmp/io_a2_srv.log; chk "A2: 服务端侧握手成功" $?
+grep -q "SRV-SNI front.test" /tmp/io_a2_srv.log; chk "A2: 服务端观察到 SNI = front.test" $?
+wait_for_log /tmp/io_a2_srv.log "SRV-EXIT"; chk "A2: 服务端写出了退出码" $?
+grep -q "SRV-EXIT 0" /tmp/io_a2_srv.log
+chk "A2: 服务端退出码 0（未被信号杀死，解析器没崩）" $?
+kill -TERM -"$GPA2" 2>/dev/null
 
 fi
 
