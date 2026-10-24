@@ -488,6 +488,29 @@ def run_one(m):
         # 既有断言），而 git status 显示源码干净、无 .mutbak 残留。
         os.utime(path, None)
 
+        # 仅推 mtime 仍不够：变异期间编译出的 .o / 测试二进制本身是"缺陷产物"。
+        # 实测（全量回归）中 14_p2p 报 3 项失败、26_lateral_auto 报 2 项失败，
+        # 而 git status 干净、强制重建后均为 0 失败 —— 即回归跑的是残留的
+        # 变异二进制。同一机制也能反向造成"假通过"，那更危险。
+        # 故还原后清除该模块构建产物，使下次构建必然从当前源码重新编译。
+        _purge_build(path)
+
+
+def _purge_build(path):
+    """清除被变异文件所属模块的 build/ 目录，杜绝陈旧产物被复用。"""
+    import shutil as _sh
+    rel = os.path.relpath(os.path.abspath(path), ROOT)
+    parts = rel.split(os.sep)
+    if len(parts) < 2:
+        return
+    bdir = os.path.join(ROOT, parts[0], "build")
+    if os.path.isdir(bdir):
+        try:
+            _sh.rmtree(bdir)
+            print("[INFO] 已清除陈旧构建产物: %s" % os.path.relpath(bdir, ROOT))
+        except OSError as e:
+            print("[WARN] 清除 %s 失败: %s（需手工确认）" % (bdir, e))
+
 
 LOCK = "/tmp/mutation_audit.lock"
 _OWN_LOCK = False

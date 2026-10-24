@@ -33,7 +33,14 @@ run_c() {
     fi
     ok=1
     # 只取可执行文件，排除 .c/.o（.o 也会被 -perm -u+x 误匹配）
-    for t in $(find "$d/build" -type f -name 'test_*' ! -name '*.c' ! -name '*.o' -perm -u+x 2>/dev/null | sort); do
+    tests=$(find "$d/build" -type f -name 'test_*' ! -name '*.c' ! -name '*.o' -perm -u+x 2>/dev/null | sort)
+    if [ -z "$tests" ]; then
+        # 一个测试都没找到却判 PASS，是最危险的假通过：模块可能压根没构建
+        # 出测试二进制（实测：26_lateral_auto 的 all 目标只产出 .o）。
+        echo "FAIL -> 未找到任何测试可执行文件（build/ 为空 or 默认目标不构建测试）"
+        failed=$((failed+1)); return
+    fi
+    for t in $tests; do
         timeout "$(tmo_for "$name")" "$t" >/tmp/t_$name.log 2>&1
         rc=$?
         # 变异审计发现：被测进程在 ptrace_stop 等场景下，"timeout 已到期"
@@ -113,6 +120,12 @@ done
 # 该产物已由上方 00_crypto 的 run_c 构建。
 run_ct_asm() {
     printf "=== %-16s " "ct_asm_guard"
+    # 依赖 build/crypto_gcm.o（生产构建，不带 CRYPTO_CT_INSTRUMENT）。
+    # 00_crypto 的默认 make 只产出测试二进制，不产出该 .o —— 此前守卫能过
+    # 纯属产物恰好还留在 build/ 里。显式构建，失败即报，不靠"碰巧还在"。
+    if ! (cd "$ROOT/00_crypto" && make build/crypto_gcm.o >/tmp/mk_ctasm.log 2>&1); then
+        echo "BUILD FAIL"; tail -5 /tmp/mk_ctasm.log; failed=$((failed+1)); return
+    fi
     if (cd "$ROOT/00_crypto" && python3 scripts/check_ct_asm.py >/tmp/t_ct_asm.log 2>&1); then
         echo "PASS"; grep -E "^\[PASS\]" /tmp/t_ct_asm.log | sed 's/^/    /'
         passed=$((passed+1))

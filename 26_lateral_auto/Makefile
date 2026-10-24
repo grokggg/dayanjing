@@ -11,7 +11,11 @@ TEST  = build/test_lateral_auto
 
 .PHONY: all clean test
 
-all: $(OBJ)
+# 必须把测试二进制纳入默认目标：回归脚本 run_c 只跑 `make` 后扫描
+# build/test_*。若默认目标只产出 .o，build/ 里没有测试可执行文件时回归
+# 会**跑零个测试并判 PASS** —— 实测触发：清除 build/ 后 make 只编译 .o，
+# 而此前"通过"完全依赖 build/ 里的残留二进制。
+all: $(OBJ) $(TEST) $(E2E)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
