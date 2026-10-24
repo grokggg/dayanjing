@@ -415,6 +415,107 @@ static void test_constant_time(void)
     ASSERT(crypto_ct_steps == GCM_TAG_LEN, "tag 末字节错 -> 步数 == TAG_LEN");
 }
 
+/*
+ * 常量时间三路比较 crypto_ct_cmp 的测试。
+ *
+ * 两条判据，缺一不可：
+ *   1) 步数恒为 len —— 证明没有早退（源码层）；
+ *   2) 结果与 memcmp 的符号逐一对齐 —— 证明没把"常量时间"做成
+ *      "永远返回同一个值"（那是另一种假通过）。memcmp 在这里充当
+ *      权威参照：它的字典序语义是正确的，只是耗时不安全。
+ */
+static void test_ct_cmp(void)
+{
+    uint8_t a[32], b[32];
+    size_t i;
+    int k;
+
+    /*
+     * 1) 步数与失配位置无关。
+     */
+    memset(a, 0xAA, sizeof a);
+    memset(b, 0xAA, sizeof b);
+
+    crypto_ct_steps = 0;
+    ASSERT(crypto_ct_cmp(a, b, 16) == 0, "全等 -> 0");
+    ASSERT(crypto_ct_steps == 16, "全等 -> 步数 16");
+
+    for (k = 0; k < 16; k++) {
+        b[k] ^= 0x01;
+        crypto_ct_steps = 0;
+        int r = crypto_ct_cmp(a, b, 16);
+        ASSERT(crypto_ct_steps == 16, "单字节失配 -> 步数恒为 16");
+        /* a[k]=0xAA, b[k]=0xAB -> a < b */
+        ASSERT(r == -1, "单字节失配 -> -1");
+        b[k] ^= 0x01;
+    }
+
+    /* 防平凡性：步数必须随 len 变，否则是写死的常量 */
+    crypto_ct_steps = 0; crypto_ct_cmp(a, b, 4);
+    ASSERT(crypto_ct_steps == 4, "len=4 -> 步数 4");
+    crypto_ct_steps = 0; crypto_ct_cmp(a, b, 32);
+    ASSERT(crypto_ct_steps == 32, "len=32 -> 步数 32");
+
+    /*
+     * 2) 字典序语义：高位一旦分出胜负，低位不得翻转。
+     *    这是"常量时间排序"最容易写错的地方 —— 若漏了 undecided
+     *    掩码，末字节的比较会覆盖掉首字节的结论。
+     */
+    memset(a, 0, sizeof a);
+    memset(b, 0, sizeof b);
+    a[0] = 2; b[0] = 1;            /* 首字节 a > b */
+    a[5] = 0; b[5] = 9;            /* 第 5 字节 a < b（应当被忽略） */
+    ASSERT(crypto_ct_cmp(a, b, 16) == 1, "高位定序：低位不得翻转（a>b）");
+
+    memset(a, 0, sizeof a);
+    memset(b, 0, sizeof b);
+    a[0] = 1; b[0] = 2;            /* 首字节 a < b */
+    a[9] = 9; b[9] = 0;            /* 第 9 字节 a > b（应当被忽略） */
+    ASSERT(crypto_ct_cmp(a, b, 16) == -1, "高位定序：低位不得翻转（a<b）");
+
+    /*
+     * 3) 全空间对齐：与 memcmp 的符号逐一对比。
+     *    覆盖每个可能的分界位置，双向各一次。
+     */
+    for (k = 0; k < 32; k++) {
+        memset(a, 0x50, sizeof a);
+        memset(b, 0x50, sizeof b);
+        b[k] = 0x40;                       /* a[k] > b[k] */
+        for (i = k + 1; i < 32; i++) b[i] = 0x90;   /* 低位反向 */
+        int mine = crypto_ct_cmp(a, b, 32);
+        int ref  = memcmp(a, b, 32);
+        ASSERT((mine > 0) == (ref > 0) && (mine < 0) == (ref < 0),
+               "与 memcmp 符号对齐 (a>b)");
+
+        memset(a, 0x50, sizeof a);
+        memset(b, 0x50, sizeof b);
+        b[k] = 0x60;                       /* a[k] < b[k] */
+        for (i = k + 1; i < 32; i++) b[i] = 0x10;   /* 低位反向 */
+        mine = crypto_ct_cmp(a, b, 32);
+        ref  = memcmp(a, b, 32);
+        ASSERT((mine > 0) == (ref > 0) && (mine < 0) == (ref < 0),
+               "与 memcmp 符号对齐 (a<b)");
+    }
+
+    /*
+     * 4) 随机对：1000 组，与 memcmp 完全对齐。
+     */
+    uint64_t s = 0x1234567890abcdefULL;
+    int mismatch = 0;
+    for (int t = 0; t < 1000; t++) {
+        for (i = 0; i < 32; i++) {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            a[i] = (uint8_t)(s >> 24);
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            b[i] = (uint8_t)(s >> 24);
+        }
+        int mine = crypto_ct_cmp(a, b, 32);
+        int ref  = memcmp(a, b, 32);
+        if (!((mine > 0) == (ref > 0) && (mine < 0) == (ref < 0))) mismatch++;
+    }
+    ASSERT(mismatch == 0, "1000 组随机对与 memcmp 符号完全一致");
+}
+
 int main(void)
 {
     printf("DAYANJING v3 — crypto_gcm 权威 KAT 测试\n");
@@ -428,6 +529,7 @@ int main(void)
     test_tamper();
     test_boundaries();
     test_constant_time();
+    test_ct_cmp();
 
     printf("========================================\n");
     printf("结果: %d/%d 通过\n", total - failures, total);

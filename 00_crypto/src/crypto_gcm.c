@@ -558,3 +558,39 @@ int crypto_constant_time_eq(const uint8_t *a, const uint8_t *b, size_t len)
     }
     return diff == 0;
 }
+
+int crypto_ct_cmp(const uint8_t *a, const uint8_t *b, size_t len)
+{
+    if (!a || !b) return 0;
+
+    /*
+     * 位宽：用 unsigned 的符号位承接借位。x - y 在 x < y 时下溢，
+     * 最高位为 1；反之最高位为 0。两个方向各做一次减法即可同时
+     * 得到 x<y 与 x>y，全程无比较运算符。
+     */
+#define CT_SIGN_BIT ((sizeof(unsigned) * 8) - 1)
+
+    unsigned gt = 0, lt = 0;
+    for (size_t i = 0; i < len; i++) {
+#ifdef CRYPTO_CT_INSTRUMENT
+        crypto_ct_steps++;
+#endif
+        unsigned x = a[i], y = b[i];
+
+        unsigned lt_b = ((x - y) >> CT_SIGN_BIT) & 1u;   /* x < y */
+        unsigned gt_b = ((y - x) >> CT_SIGN_BIT) & 1u;   /* x > y */
+
+        /*
+         * 只有此前所有字节都相等时，当前字节的大小才决定最终结果。
+         * 一旦某一侧已置位，后续字节必须不能翻转它 —— 这正是字典序
+         * 语义，也是常量时间的关键：不做"已定则跳过"的早退。
+         */
+        unsigned undecided = (gt | lt) ^ 1u;
+        gt |= undecided & gt_b;
+        lt |= undecided & lt_b;
+    }
+#undef CT_SIGN_BIT
+
+    /* gt 与 lt 互斥：恒为 0 / +1 / -1 之一 */
+    return (int)gt - (int)lt;
+}

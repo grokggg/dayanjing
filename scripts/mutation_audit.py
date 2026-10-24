@@ -217,6 +217,52 @@ MUTATIONS = [
         # 这一条会漏。
     },
     {
+        "id": "M16",
+        "desc": "00_crypto: crypto_ct_cmp 用带分支的写法（步数不变，源码层漏过）",
+        "file": "00_crypto/src/crypto_gcm.c",
+        "old": "        unsigned undecided = (gt | lt) ^ 1u;\n        gt |= undecided & gt_b;\n        lt |= undecided & lt_b;",
+        "new": "        if (gt | lt) continue;\n        if (x > y) gt = 1;\n        else if (x < y) lt = 1;",
+        "mod": "00_crypto",
+        "bin": "build/test_gcm",
+        "mc_symbol": "crypto_ct_cmp",
+        "mc_max": 4,
+        #
+        # 这一条是"源码层守卫够不够"的分水岭。
+        #
+        # 变异用 continue 而非 break：循环仍走满 len 次，插桩步数不变，
+        # 所以 test_gcm 的步数断言【全绿】—— 实测 344/344 通过。
+        # 但循环体内多了 3 条数据相关的条件跳转（4 -> 7），常量时间性质
+        # 已被破坏，只是源码层看不见。
+        #
+        # 这正是 M9 破盲时声明的"剩余边界"：源码级步数不等于机器码级
+        # 常量时间。M16 把那层边界变成可断言的事实。
+        #
+        # mc_max=4 的构成：3 条 NULL 检查 + 1 条循环条件（数据无关）。
+        # 循环体内应为 0。该数字随编译器/优化级别变化 —— 若升级工具链后
+        # 误报，应重新标定而不是放宽判据。
+    },
+    {
+        "id": "M17",
+        "desc": "00_crypto: crypto_ct_cmp 改回比较运算符 x>y / x<y",
+        "file": "00_crypto/src/crypto_gcm.c",
+        "old": "        unsigned lt_b = ((x - y) >> CT_SIGN_BIT) & 1u;   /* x < y */\n        unsigned gt_b = ((y - x) >> CT_SIGN_BIT) & 1u;   /* x > y */",
+        "new": "        unsigned lt_b = (x < y);\n        unsigned gt_b = (x > y);",
+        "mod": "00_crypto",
+        "bin": "build/test_gcm",
+        "known_blind": True,
+        #
+        # 【实测：本环境测不出，如实记为盲区】
+        # 两种写法的条件跳转数**都是 4**（编译器把 x<y 优化成 sub+shr，
+        # 与手写算术版生成的机器码等价）。反汇编确认循环体内零条件跳转。
+        #
+        # 所以"改回比较运算符"在本工具链下是无害的 —— 但这是【编译器
+        # 的善意】，不是【语言的保证】。换编译器或降优化级别即可能生成
+        # 分支。保留无运算符写法的理由是消除对编译器行为的依赖，
+        # 而不是因为测出来它更快或更安全。
+        #
+        # 不把它伪装成 CAUGHT：机器码数一样，写 expect 就是自欺。
+    },
+    {
         "id": "M10",
         "desc": "23_lkm: 去掉链表互指校验（结构不一致也照写，写坏内核链表）",
         "file": "23_lkm/src/lkm.c",
@@ -321,6 +367,34 @@ def build(mod, target=None):
     return rc, out
 
 
+def count_cond_jumps(binpath, symbol):
+    """统计指定函数内的条件跳转条数（不含 call/jmp/ret）。
+
+    源码层步数守卫抓不到的一类变异：不减步数、不早退，但在循环体内
+    引入数据相关分支（例：if (gt|lt) continue; if (x>y) gt=1; ...）。
+    步数仍是 len，测试全绿，只有看机器码才现形。
+    """
+    rc, out = sh("objdump -d %s --no-show-raw-insn" % binpath, ROOT, 120)
+    if rc != 0:
+        return None
+    lines = out.splitlines()
+    start = None
+    for i, l in enumerate(lines):
+        if "<%s>:" % symbol in l:
+            start = i
+            break
+    if start is None:
+        return None
+    pat = re.compile(r"\b(je|jne|jg|jge|jl|jle|ja|jae|jb|jbe|js|jns|jo|jno|jc|jnc)\s")
+    n = 0
+    for l in lines[start + 1:]:
+        if not l.strip():
+            break                      # 下一个函数
+        if pat.search(l):
+            n += 1
+    return n
+
+
 def run_one(m):
     path = os.path.join(ROOT, m["file"])
     if not os.path.exists(path):
@@ -381,6 +455,16 @@ def run_one(m):
         if not tout.strip():
             return (m["id"], "HANG", "测试零输出 —— 疑似挂起/被杀，退出码 %d 不可信" % trc)
         if trc == 0:
+            # 源码层漏过 -> 机器码层补刀。
+            # 只对声明了 mc_symbol/mc_max 的变异生效（目前 M16）。
+            if m.get("mc_symbol") and m.get("mc_max") is not None:
+                n = count_cond_jumps(binpath, m["mc_symbol"])
+                if n is None:
+                    return (m["id"], "ERROR", "机器码守卫失效：未能解析 %s" % m["mc_symbol"])
+                if n > m["mc_max"]:
+                    return (m["id"], "CAUGHT",
+                            "机器码层：%s 条件跳转 %d > %d（源码层全绿，仅机器码可见）"
+                            % (m["mc_symbol"], n, m["mc_max"]))
             return (m["id"], "SURVIVED", "测试仍全绿 —— 该缺陷无法被捕获")
         fails = [l for l in tout.splitlines() if "FAIL" in l]
         return (m["id"], "CAUGHT", "失败 %d 项, 例: %s" %

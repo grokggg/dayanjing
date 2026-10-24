@@ -117,6 +117,23 @@ void ghash(const uint8_t h[GCM_BLOCK],
 int crypto_constant_time_eq(const uint8_t *a, const uint8_t *b, size_t len);
 
 /*
+ * 常量时间三路比较：返回 -1 / 0 / +1（a<b / a==b / a>b）。
+ *
+ * 为什么需要它 —— 密钥排序不能用 memcmp：
+ *   双向派生为保证两端得到同一 ikm，必须把两个方向的密钥按固定次序拼
+ *   接（klo||khi）。用 memcmp(ks,kr,n) 定序，其耗时在【第一个不同字节】
+ *   处终止，泄露"两密钥首个失配位置"。虽然本进程内的纳秒级差异难以被
+ *   网络观测，但这是"测不出来"而非"不存在"，换平台即可测出。
+ *
+ * 实现要点（两层）：
+ *   1) 源码层：循环步数恒为 len，无 break / return / 条件 continue；
+ *   2) 机器码层：大小关系用【无符号下溢的最高位】求得，不写任何比较
+ *      运算符，因此不依赖编译器把 'x > y' 降级成 seta/setb。
+ *      若将来有人改回比较运算符，条件跳转数会从 2 变成 3，守卫变红。
+ */
+int crypto_ct_cmp(const uint8_t *a, const uint8_t *b, size_t len);
+
+/*
  * 常量时间比较的观测计数器 —— 仅当以 -DCRYPTO_CT_INSTRUMENT 编译时存在。
  *
  * 用途：把"验签是否走了常量时间原语"变成可断言的事实。
