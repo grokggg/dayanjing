@@ -11,10 +11,11 @@ CRYPTO  = ../00_crypto/src/crypto_gcm.c \
           ../00_crypto/src/crypto_hash.c \
           ../00_crypto/src/crypto_x25519.c
 
-SRCS    = src/bn.c src/asn1.c src/rsa.c src/x509.c src/tls.c
+SRCS    = src/bn.c src/asn1.c src/rsa.c src/x509.c src/tls.c src/tls_server.c
 OBJS    = $(SRCS:.c=.o) $(CRYPTO:.c=.o)
 
-TESTS   = $(BUILD)/test_bn $(BUILD)/test_asn1 $(BUILD)/test_x509 $(BUILD)/test_tls
+TESTS   = $(BUILD)/test_bn $(BUILD)/test_asn1 $(BUILD)/test_x509 $(BUILD)/test_tls \
+          $(BUILD)/test_tls_srv
 
 .PHONY: all clean test inspect
 
@@ -36,6 +37,9 @@ $(BUILD)/test_x509: tests/test_x509.c $(OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD)/test_tls: tests/test_tls.c $(OBJS) | $(BUILD)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD)/test_tls_srv: tests/test_tls_srv.c $(OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # 素材由 OpenSSL 生成，用于跨实现交叉验证；缺失时先跑 scripts/gen_testdata.sh

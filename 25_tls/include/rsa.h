@@ -1,4 +1,10 @@
-/* rsa.h — RSA PKCS#1 v1.5 验签（仅验签，不签名、不加密） */
+/* rsa.h — RSA PKCS#1 v1.5 验签 + 签名
+ *
+ * 验签：客户端校验证书链与 ServerKeyExchange，只需要公钥 (n, e)。
+ * 签名：服务端签发 ServerKeyExchange 必须有私钥。少了它，服务端就无法向
+ *       客户端证明自己持有证书对应的私钥 —— 握手退化成"谁都能顶替"，
+ *       且客户端若不检查就会全盘接受。故服务端是本模块的必需能力，不是可选。
+ */
 #ifndef RSA_H
 #define RSA_H
 
@@ -22,5 +28,28 @@ const char *rsa_errstr(rsa_err e);
 rsa_err rsa_verify_sha256(const bn_t *n, uint32_t e,
                           const uint8_t *tbs, size_t tbs_len,
                           const uint8_t *sig, size_t sig_len);
+
+/* ---- 私钥：签名用 ---- */
+typedef struct {
+    bn_t    n;      /* 模数（签名长度由它决定） */
+    uint32_t e;     /* 公钥指数（仅自检用） */
+    bn_t    d;      /* 私钥指数 */
+} rsa_privkey;
+
+/* 从 PEM 加载私钥。同时支持
+ *   "-----BEGIN PRIVATE KEY-----"      (PKCS#8, OpenSSL genrsa 默认输出)
+ *   "-----BEGIN RSA PRIVATE KEY-----"  (PKCS#1)
+ * 两者混用是现实中的常见坑：只认一种会在对方换工具时静默失败，
+ * 而失败点会落在"签名长度不对"这种完全看不出是解析问题的地方。 */
+rsa_err rsa_privkey_load_pem(const char *path, rsa_privkey *k);
+rsa_err rsa_privkey_load_mem(const uint8_t *pem, size_t len, rsa_privkey *k);
+
+/* 私钥用完即清：私钥留在不再使用的结构体里，等同于多留一份明文副本。 */
+void    rsa_privkey_clear(rsa_privkey *k);
+
+/* PKCS#1 v1.5 SHA-256 签名。sig 恰为 k 字节（k = 模数字节数）。 */
+rsa_err rsa_sign_sha256(const rsa_privkey *k,
+                        const uint8_t *tbs, size_t tbs_len,
+                        uint8_t *sig, size_t cap, size_t *sig_len);
 
 #endif /* RSA_H */

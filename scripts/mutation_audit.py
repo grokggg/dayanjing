@@ -65,6 +65,35 @@ MUTATIONS = [
         "expect": "HANG",
     },
     {
+        "id": "M16",
+        "desc": "24_front: front_send 忽略 tls_write 失败（写失败被当成成功）",
+        "file": "24_front/src/front.c",
+        "old": "    if (tls_write(c->tls, req, rlen) != TLS_OK) return FRONT_ERR_TLS;",
+        "new": "    (void)tls_write(c->tls, req, rlen);",
+        "mod": "24_front",
+        "bin": "build/test_front_real",
+    },
+    {
+        "id": "M17",
+        "desc": "24_front: front_recv 忽略 tls_read 失败（读失败被当成 IO）",
+        "file": "24_front/src/front.c",
+        # 锚点必须带上后继行：front_recv(h1) 与 recv_h2 里有一模一样的这一行，
+        # 只写单行会同时命中两处，替换目标不明确 —— 脚本拒绝模糊替换是对的。
+        "old": "        if (tls_read(c->tls, tmp, sizeof(tmp), &got) != TLS_OK) return FRONT_ERR_TLS;\n        if (got == 0) return FRONT_ERR_IO;\n        if (c->resp_len + got > sizeof(c->resp)) return FRONT_ERR_RANGE;",
+        "new": "        (void)tls_read(c->tls, tmp, sizeof(tmp), &got);\n        if (got == 0) return FRONT_ERR_IO;\n        if (c->resp_len + got > sizeof(c->resp)) return FRONT_ERR_RANGE;",
+        "mod": "24_front",
+        "bin": "build/test_front_real",
+    },
+    {
+        "id": "M18",
+        "desc": "24_front: SNI 写成真实主机（域前置失效，真实目标暴露在 SNI 上）",
+        "file": "24_front/src/front.c",
+        "old": "    tc.sni         = c->cfg.front_domain;     /* 观察者可见的是前置域 */",
+        "new": "    tc.sni         = c->cfg.real_host;",
+        "mod": "24_front",
+        "bin": "build/test_front_real",
+    },
+    {
         "id": "M3",
         "desc": "20_packer: 入口 nop 垫恒为 0（首字节变回跨构建恒定签名）",
         "file": "20_packer/src/poly.c",
@@ -666,6 +695,26 @@ class Usage(Exception):
 
 def main():
     install_signals()
+    # heal 必须能独立调用。
+    #
+    # 实测事故：一次审计被强杀后，.mutbak 与变异代码同时留在工作区，而
+    # heal() 只在脚本启动时被动执行 —— 从被杀到下一次运行之间，这棵树上
+    # 一直带着人为注入的缺陷，任何人 make 都会用到它，且无人知晓。本次
+    # 会话正是在这种状态下开始的（front.c 的 tls_write 错误返回被抹掉）。
+    #
+    # 所以 heal 做成子命令：回归脚本开头无条件跑一次，不必等到审计启动。
+    if len(sys.argv) > 1 and sys.argv[1] == "heal":
+        if len(sys.argv) > 2:
+            print("[FATAL] heal 不接受额外参数")
+            sys.exit(2)
+        h = heal()
+        if h:
+            print("[HEAL] 恢复了上一次被强杀留下的变异:")
+            for f in h:
+                print("       %s" % f)
+        else:
+            print("[HEAL] 无残留变异备份")
+        sys.exit(0)
     try:
         sel, sample = parse_args(sys.argv[1:])
     except Usage as e:

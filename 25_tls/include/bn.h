@@ -2,9 +2,13 @@
  *
  * 设计取舍：
  *   - 定长 4096 位上限，栈上结构体，无 malloc —— implant 侧不做动态分配。
- *   - 只实现"验证"需要的操作：比较、加法、减法、乘法、模加、模倍、模幂。
- *     不做除法/模逆/通用指数 —— 用不到的代码不写，写了就是未验证代码。
- *   - 指数限定 uint32（RSA 公钥 e 恒为 65537 或 3），更大指数直接报错而非静默截断。
+ *   - 只实现需要的操作：比较、加法、减法、乘法、模加、模倍、模幂。
+ *     不做除法/模逆 —— 用不到的代码不写，写了就是未验证代码。
+ *   - 两种模幂并存，用途不同，不可互相替代：
+ *       bn_modpow_u32：指数为 u32，用于【验签】（公钥 e = 65537/3）。
+ *       bn_modpow    ：指数为大数，用于【签名】（私钥 d 与模数等长）。
+ *     在只有客户端时确实只需要前者；25_tls 新增服务端（SKE 签名）后
+ *     后者成为必需。把 d 截断进 u32 会静默产出错误签名，而不是报错。
  *   - 常数时间不是本层目标：RSA 验签只处理公开信息（证书签名、公钥），
  *     没有秘密输入，侧信道无意义。真正需要常数时间的是 X25519/GCM，在 00_crypto。
  */
@@ -50,6 +54,10 @@ bn_err bn_mul(bn_t *r, const bn_t *a, const bn_t *b);              /* 要求结�
 bn_err bn_mod(bn_t *r, const bn_t *a, const bn_t *m);              /* 移位-减法取模 */
 bn_err bn_mulmod(bn_t *r, const bn_t *a, const bn_t *b, const bn_t *m);
 bn_err bn_modpow_u32(bn_t *r, const bn_t *a, uint32_t e, const bn_t *m);
+
+/* 模幂（指数为大数）：平方-乘，从最高位向下扫描。
+   签名用（私钥 d）。指数为 0 时返回 1，与数学定义一致。 */
+bn_err bn_modpow(bn_t *r, const bn_t *a, const bn_t *e, const bn_t *m);
 
 /* 调试：十六进制打印（测试用） */
 void bn_dump(const char *tag, const bn_t *a);

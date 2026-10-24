@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include "tls_int.h"
 
 #define TLS_VER          0x0303
 #define CT_CCS           20
@@ -98,7 +99,7 @@ struct tls_ctx {
 };
 
 /* ---- PRF (TLS 1.2 P_SHA256) ---- */
-static void prf_sha256(const uint8_t *secret, size_t slen,
+void tls_prf_sha256(const uint8_t *secret, size_t slen,
                        const char *label, size_t label_len,
                        const uint8_t *seed, size_t seed_len,
                        uint8_t *out, size_t out_len) {
@@ -265,7 +266,6 @@ static tls_err hs_read(tls_ctx *c, uint8_t *type, uint8_t **body, size_t *blen) 
     }
 }
 
-static size_t put_u16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; return 2; }
 
 static tls_err send_client_hello(tls_ctx *c) {
     uint8_t body[512];
@@ -497,12 +497,12 @@ tls_err tls_handshake(tls_ctx *c) {
     uint8_t seed[64];
     memcpy(seed, c->crand, 32);
     memcpy(seed + 32, c->srand, 32);
-    prf_sha256(c->pms, 32, "master secret", 13, seed, 64, c->master, 48);
+    tls_prf_sha256(c->pms, 32, "master secret", 13, seed, 64, c->master, 48);
     uint8_t seed2[64];
     memcpy(seed2, c->srand, 32);
     memcpy(seed2 + 32, c->crand, 32);
     uint8_t kb[40];
-    prf_sha256(c->master, 48, "key expansion", 13, seed2, 64, kb, 40);
+    tls_prf_sha256(c->master, 48, "key expansion", 13, seed2, 64, kb, 40);
     memcpy(c->ckey, kb, 16);
     memcpy(c->skey, kb + 16, 16);
     memcpy(c->civ, kb + 32, 4);
@@ -521,7 +521,7 @@ tls_err tls_handshake(tls_ctx *c) {
         sha256_ctx tmp = c->tr;              /* 此刻不含 client Finished */
         sha256_final(&tmp, tr_hash);
         uint8_t vd[12];
-        prf_sha256(c->master, 48, "client finished", 15, tr_hash, 32, vd, 12);
+        tls_prf_sha256(c->master, 48, "client finished", 15, tr_hash, 32, vd, 12);
         e = hs_write(c, HS_FINISHED, vd, 12);
         if (e != TLS_OK) return e;
     }
@@ -544,7 +544,7 @@ tls_err tls_handshake(tls_ctx *c) {
         sha256_ctx tmp = c->tr_prev;         /* 不含对端 Finished */
         sha256_final(&tmp, tr_hash);
         uint8_t want[12];
-        prf_sha256(c->master, 48, "server finished", 15, tr_hash, 32, want, 12);
+        tls_prf_sha256(c->master, 48, "server finished", 15, tr_hash, 32, want, 12);
         /*
          * 常量时间比较，不能用 memcmp。
          *

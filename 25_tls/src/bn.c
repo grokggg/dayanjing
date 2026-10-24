@@ -218,6 +218,31 @@ bn_err bn_modpow_u32(bn_t *r, const bn_t *a, uint32_t e, const bn_t *m) {
     return BN_OK;
 }
 
+/* 模幂（指数为大数）：平方-乘，从指数最高位向下扫描。
+   签名用（d 与模数等长，2048 位即 2048 轮）。
+   注意不能用 bn_modpow_u32 顶替：d 被截成 u32 不会报错，
+   只会产出一份结构完全合法、验签必然失败的签名。 */
+bn_err bn_modpow(bn_t *r, const bn_t *a, const bn_t *e, const bn_t *m) {
+    if (bn_is_zero(m)) return BN_ERR_ZERO_MOD;
+    bn_t base, res, tmp;
+    base = *a;
+    if (bn_cmp(&base, m) >= 0) { if (bn_mod(&tmp, &base, m) != BN_OK) return BN_ERR_RANGE; base = tmp; }
+    bn_zero(&res);
+    res.d[0] = 1;
+    res.n = 1;
+    int bits = bn_bitlen(e);
+    for (int i = bits - 1; i >= 0; i--) {
+        if (bn_mulmod(&tmp, &res, &res, m) != BN_OK) return BN_ERR_RANGE;
+        res = tmp;
+        if ((e->d[i / 32] >> (i % 32)) & 1u) {
+            if (bn_mulmod(&tmp, &res, &base, m) != BN_OK) return BN_ERR_RANGE;
+            res = tmp;
+        }
+    }
+    *r = res;
+    return BN_OK;
+}
+
 void bn_dump(const char *tag, const bn_t *a) {
     printf("%s (%d bits): ", tag, bn_bitlen(a));
     if (a->n == 0) { printf("0\n"); return; }

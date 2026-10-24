@@ -8,6 +8,14 @@ failed=0
 passed=0
 skipped=0
 
+# 回归一律从"未被变异污染"的树开始。
+# 变异审计被强杀时会留下 .mutbak 与注入后的源码；若不先自愈，本次回归
+# 的每一个"通过"都是在带缺陷的二进制上得到的，报告全绿却毫无意义。
+# 实测发生过：front.c 的 tls_write 错误返回被抹掉后仍被提交进树。
+if [ -f "$ROOT/scripts/mutation_audit.py" ]; then
+    timeout 60 python3 "$ROOT/scripts/mutation_audit.py" heal || true
+fi
+
 # 单个测试用例的超时（秒）。默认 120 足够绝大多数单测。
 # 例外必须写明理由：12_exploit 的 canary/PIE 爆破是**逐字节试探**，
 # 每个字节平均 128 次、每次一次 fork+连接，单轮约 1900 次试探，
