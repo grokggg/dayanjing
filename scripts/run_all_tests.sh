@@ -294,6 +294,32 @@ if [ -f "$ROOT/scripts/check_secret_cmp.py" ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# 构建契约审计：每个模块声明的测试二进制，是否都会被回归实际调用的目标构建。
+#
+# 这一层守护的是上面所有数字的【可信度】。回归先 `make` 再执行 build/ 下的
+# test_*，于是有个隐含契约：make 必须产出回归会跑的每一个二进制。契约一破，
+# build/ 里上一次 `make test` 留下的旧二进制会被继续跑——源码改了、产物没重建、
+# 报告照样全绿。实测三处：
+#   08_lateral  all 只产出库          -> 清空 build 后 make 产出 0 个测试
+#   14_p2p      all 只产出 2/16       -> 14 个套件一直在跑陈旧产物
+#   21_exfil    all 漏 test_tol
+#   26_lateral_auto  E2E 变量定义在 all 之后，先决条件展开为空
+# 归为 failed 而非 warn：这里一旦失守，前面所有 pass 数都不可信。
+if [ -f "$ROOT/scripts/audit_makefile_tests.py" ]; then
+    echo "=== audit_makefile_tests（构建契约） ==="
+    if python3 "$ROOT/scripts/audit_makefile_tests.py" > /tmp/mkaudit.log 2>&1; then
+        echo "  [PASS] 各模块测试二进制均由回归调用的目标构建"
+        grep -E "^\[WARN\]" /tmp/mkaudit.log | sed 's/^/         /'
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] 构建契约被破坏：有测试二进制不由 make 产出，"
+        echo "         build/ 中可能正被执行陈旧产物（见 /tmp/mkaudit.log）"
+        grep -E "^\[MISS\]|^\[ERR \]" /tmp/mkaudit.log | sed 's/^/         /'
+        failed=$((failed + 1))
+    fi
+fi
+
 MUT_MODE=${MUTATION:-sample:1}
 if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     echo "=== mutation_audit ==="

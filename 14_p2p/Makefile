@@ -25,7 +25,17 @@ endif
 # crypto_hash.o 提供 HKDF，供 p2p_tunnel_init_from_session 从会话密钥派生隧道密钥
 C2OBJS  := $(BUILD)/c2.o $(BUILD)/c2_frame.o $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
 
-all: $(BUILD)/libp2p.a $(BUILD)/p2p_node $(BUILD)/test_cover $(BUILD)/test_mix_cover
+# 默认目标必须产出全部测试二进制。回归脚本先 `make` 再执行 build/ 下的
+# test_*，若 all 只产出其中 2 个，其余被执行的是上一次 `make test` 留下的
+# 陈旧产物 —— 源码改动后永不重建。实测：清空 build 后 make 只产出
+# test_cover / test_mix_cover 两个，而 build/ 里曾有 16 个（14 个是旧的）。
+TESTBINS := $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee \
+            $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_cell_resync \
+            $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_mix_cover \
+            $(BUILD)/test_probesched $(BUILD)/test_resolv $(BUILD)/test_cover \
+            $(BUILD)/test_cover_budget
+
+all: $(BUILD)/libp2p.a $(BUILD)/p2p_node $(TESTBINS)
 
 $(BUILD)/libp2p.a: $(BUILD)/mesh.o $(BUILD)/relay.o $(BUILD)/crypto.o $(BUILD)/route.o $(BUILD)/onion.o $(BUILD)/onion_route.o $(BUILD)/cell.o $(BUILD)/hopkey.o $(BUILD)/mix.o $(BUILD)/mix_cover.o $(BUILD)/resolv.o $(BUILD)/cover.o $(BUILD)/cover_budget.o
 	ar rcs $@ $^
@@ -164,7 +174,7 @@ $(BUILD)/test_mix: tests/test_mix.c $(BUILD)/libp2p.a $(C2OBJS)
 $(BUILD)/test_probesched: tests/test_probesched.c $(BUILD)/libp2p.a
 	$(CC) $(CFLAGS) $< -o $@ $(LATLIB) $(BUILD)/libp2p.a
 
-test: $(BUILD)/test_mesh $(BUILD)/test_qos $(BUILD)/test_chain $(BUILD)/test_e2ee $(BUILD)/test_route $(BUILD)/test_onion $(BUILD)/test_cell $(BUILD)/test_bw $(BUILD)/test_hopkey $(BUILD)/test_mix $(BUILD)/test_mix_cover $(BUILD)/test_probesched $(BUILD)/test_resolv $(BUILD)/test_cover $(BUILD)/test_cell_resync $(BUILD)/test_cover_budget
+test: $(TESTBINS)
 	./$(BUILD)/test_mesh
 	./$(BUILD)/test_qos
 	./$(BUILD)/test_chain

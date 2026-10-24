@@ -3,7 +3,13 @@ CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -I../14_p2p/i
 BUILD := build
 LDLIBS ?=
 
-all: $(BUILD)/liblateral.a
+# 默认目标必须产出全部测试二进制。回归脚本先 `make` 再执行 build/ 下的
+# test_*，若 all 只产出库，则被执行的是上一次 `make test` 留下的陈旧产物
+# —— 源码改动后它们永不重建，报绿却测的是旧代码（实测：清空 build 后
+# make 产出 0 个测试二进制，而 build/ 里仍躺着 2 个旧文件）。
+TESTBINS := $(BUILD)/test_lateral $(BUILD)/test_proxy
+
+all: $(BUILD)/liblateral.a $(TESTBINS)
 
 $(BUILD)/liblateral.a: $(BUILD)/lateral.o $(BUILD)/proxy.o
 	ar rcs $@ $^
@@ -41,7 +47,7 @@ $(BUILD)/test_proxy: tests/test_proxy.c $(BUILD)/liblateral.a $(P2P_RESOLV) | $(
 $(BUILD):
 	mkdir -p $(BUILD)
 
-test: $(BUILD)/test_lateral $(BUILD)/test_proxy
+test: $(TESTBINS)
 	./$(BUILD)/test_lateral
 	./$(BUILD)/test_proxy
 

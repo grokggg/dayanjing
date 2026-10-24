@@ -47,6 +47,11 @@ TESTS     := test_pipeline test_linux_extra test_implant test_defend_win \
              test_reflect_run
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
+# winshim 下的测试（test_mf_logic / test_persist_win / test_implant_main /
+# test_stager_win）不在 all 里，它们需要 Windows shim 编译链；回归脚本
+# 显式调用 winshim-build 来构建。声明给审计脚本，避免被判为"默认目标漏构建"。
+AUDIT_GOALS := winshim-build
+
 .PHONY: all test clean win dirs
 
 all: $(TEST_BINS)

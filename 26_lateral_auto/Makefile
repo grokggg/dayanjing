@@ -8,6 +8,10 @@ SRC   = src/cred.c src/target.c src/exec.c src/spread.c src/orch.c
 OBJ   = $(SRC:.c=.o)
 CRYO  = ../00_crypto/build/crypto_hash.o
 TEST  = build/test_lateral_auto
+# E2E 必须定义在 all 之前：规则的先决条件是立即展开，写在后面会展开成空，
+# all 就只剩 $(TEST)。实测：清空 build 后 make 只产出 test_lateral_auto，
+# test_sshkey_e2e 靠残留文件被回归执行。
+E2E   = build/test_sshkey_e2e
 
 .PHONY: all clean test
 
@@ -40,7 +44,6 @@ $(TEST): tests/test_lateral_auto.c $(OBJ) $(CRYO) | build
 # 凭据层 -> 持久化层 端到端：依赖 09_persistence（新模块依赖旧模块，方向合理）。
 # 核心断言是"真实 ssh-keygen -l 能解析落盘的 authorized_keys"，
 # 任何类型/blob 错配都会在此暴露。
-E2E    = build/test_sshkey_e2e
 PERSIST_LIB = ../09_persistence/build/libpersist.a
 
 $(PERSIST_LIB): FORCE
