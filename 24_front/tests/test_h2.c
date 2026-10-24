@@ -112,6 +112,28 @@ int main(void) {
               "连接前言 24 字节");
         CHECK(pn == 24 && !memcmp(pf, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24),
               "前言内容正确");
+
+        /* 容量不足必须拒绝而不是越界写。
+           配套 canary：若实现删掉 cap<n 守卫直接 memcpy，
+           这里会写到缓冲之外，被 canary 抓到。 */
+        uint8_t small[8];
+        size_t sn0 = 0;
+        memset(small, 0xAA, sizeof(small));
+        CHECK(h2_preface(small, sizeof(small), &sn0) == H2_ERR_RANGE,
+              "前言缓冲不足 -> RANGE（不越界写）");
+        CHECK(h2_preface(small, 0, &sn0) == H2_ERR_RANGE, "前言缓冲为 0 -> RANGE");
+        uint8_t big[32];
+        memset(big, 0xAA, sizeof(big));
+        CHECK(h2_preface(big, 23, &sn0) == H2_ERR_RANGE, "前言差 1 字节 -> RANGE");
+        CHECK(big[24] == 0xAA && big[31] == 0xAA, "越界字节未被写入（canary 完好）");
+        CHECK(h2_preface(NULL, 64, &sn0) == H2_ERR_ARG, "前言 out 为空 -> ARG");
+        CHECK(h2_preface(small, sizeof(small), NULL) == H2_ERR_ARG, "前言 out_len 为空 -> ARG");
+
+        /* 正向对照：边界处必须成功，否则"恒返回 RANGE"也能骗过上面几条 */
+        uint8_t exact[24];
+        size_t en = 0;
+        CHECK(h2_preface(exact, 24, &en) == H2_OK && en == 24,
+              "前言缓冲刚好 24 字节 -> OK（正向对照）");
     }
 
     /* --- SETTINGS 帧 --- */

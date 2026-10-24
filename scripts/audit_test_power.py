@@ -44,6 +44,7 @@ import sys
 import json
 import shutil
 import random
+import hashlib
 import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -156,6 +157,41 @@ def restore(path):
         os.utime(path, None)
 
 
+def file_sha(path):
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def heal_leftovers(mods):
+    """启动自愈：清理上一次被强杀留下的变异残留。
+
+    为什么要它：本脚本用备份文件 + finally 保证还原，但 finally 挡不住
+    SIGKILL / 沙盒 502 直接杀进程。实测发生过：进程被杀后 front.c 停在
+    变异态、.tpbak 留在树上，而下一次 make 会拿变异源码去编——审计工具
+    自己把被测物改坏了，且没有任何报错。
+
+    所以还原不能只依赖"本次运行善终"，必须在每次启动时先扫一遍：
+    发现 .tpbak 就立刻还原并刷新 mtime（刷新理由见 restore 的注释）。
+    """
+    healed = []
+    for mod in mods:
+        mdir = os.path.join(ROOT, mod)
+        for dirpath, _dirs, files in os.walk(mdir):
+            for fn in files:
+                if fn.endswith(BAK_SUFFIX):
+                    path = os.path.join(dirpath, fn[: -len(BAK_SUFFIX)])
+                    bak = path + BAK_SUFFIX
+                    shutil.move(bak, path)
+                    os.utime(path, None)
+                    healed.append(os.path.relpath(path, ROOT))
+    if healed:
+        print("[HEAL] 发现并还原残留变异（上次运行被强杀）：")
+        for h in healed:
+            print("       %s" % h)
+        print("[HEAL] 已刷新 mtime；相关产物需在下次构建时重编")
+    return healed
+
+
 def run_module_tests(mod, timeout=600):
     """重建该模块并跑 build/ 下所有测试二进制。返回 (是否全部通过, 跑了几个, 详情)。
 
@@ -244,6 +280,9 @@ def main():
     random.seed(seed)
     report = {}
 
+    # 先自愈，再动手：避免把上一次强杀留下的变异当成当前基线
+    heal_leftovers(mods)
+
     for mod in mods:
         srcs = product_sources(mod)
         if not srcs:
@@ -285,8 +324,10 @@ def main():
 
         pick = random.sample(cands, min(k, len(cands)))
         captured = survived = compiled_fail = 0
+        orig = {}          # 被变异文件 -> 变异前的 sha256
         for s, it in pick:
             rel = os.path.relpath(s, ROOT)
+            orig.setdefault(s, file_sha(s))
             try:
                 if not inject(s, it):
                     continue
@@ -306,10 +347,20 @@ def main():
             finally:
                 restore(s)
 
-        dirty = git_dirty()
-        if dirty:
+        # 还原判据：只看**被变异过的文件**是否回到变异前的字节。
+        # 不能用"整个 git 树干净"——工作区里常有本轮合法的未提交改动，
+        # 那样会把合法改动误报成 FATAL；而 FATAL 会让本次报告直接不落盘，
+        # 误报多了又会像其他守卫一样被习惯性忽略。
+        bad = []
+        for s, h in orig.items():
+            rel = os.path.relpath(s, ROOT)
+            if os.path.exists(s + BAK_SUFFIX):
+                bad.append("%s（残留备份 .tpbak）" % rel)
+            elif file_sha(s) != h:
+                bad.append("%s（内容未回到变异前）" % rel)
+        if bad:
             print("[FATAL] %s 变异未完全还原！" % mod)
-            for l in dirty[:5]:
+            for l in bad[:5]:
                 print("   " + l)
             return 1
 
