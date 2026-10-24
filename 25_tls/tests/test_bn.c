@@ -7,11 +7,17 @@
  *   "篡改后被拒"在"原始就没验过"时同样成立 —— 那是恒真断言，
  *   会掩盖真实的验签失败。所以这里先记 base_ok，再据此判负向结果。
  */
+/* clock_gettime 在 -std=c11 下需要特性宏；只在计时用例里用，故局部定义，
+   不动全局编译选项。 */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "bn.h"
 #include "rsa.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* 素材目录由 Makefile 以绝对路径注入：全仓回归脚本是从仓库根目录调用
    可执行文件的，用相对路径会找不到素材，表现为"莫名其妙少了几条用例"。
@@ -155,10 +161,73 @@ static void t_rsa_openssl_sig(void) {
     free(nb); free(eb); free(sb); free(mb);
 }
 
+/* CRT 路径与裸模幂路径必须产出逐字节相同的签名。
+ *
+ * 为什么必须单列这一条：rsa.h 的注释写着"两条路径必须产出逐字节相同的
+ * 签名（由测试钉死）"，而在补这条之前，全仓对 CRT 的断言数为零 ——
+ * 注释在撒谎。这类错误的形态最坏：加速加错不会报错，只产出错误签名。
+ *
+ * 只比较两条路径相同是不够的：两条路径一样错时，比较照样通过。所以还
+ * 必须有独立真值 —— 用公钥验过 CRT 签出来的结果。这两件事互不蕴含。
+ *
+ * 反向对照同样必需：篡改 dP 后两条必须不同。没有它，本用例可能恒绿。 */
+static void t_crt_equiv(void) {
+    rsa_privkey k;
+    uint8_t  sig_c[512], sig_p[512], sig_bad[512];
+    size_t   n_c = 0, n_p = 0, n_bad = 0;
+    static const char *msg = "crt-equivalence-probe";
+    size_t mlen = strlen(msg);
+
+    if (rsa_privkey_load_pem(TD("leaf.key"), &k) != RSA_OK) {
+        CHECK(0, "CRT: leaf.key 可加载");
+        return;
+    }
+    CHECK(k.has_crt == 1, "CRT: leaf.key 含齐全的 p/q/dP/dQ/qInv（否则本用例无意义）");
+
+    size_t klen = (size_t)((bn_bitlen(&k.n) + 7) / 8);
+    CHECK(klen == 256, "CRT: 2048 位模数（太小的密钥测不出 CRT 差异）");
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    rsa_err ec = rsa_sign_sha256(&k, (const uint8_t *)msg, mlen, sig_c, sizeof(sig_c), &n_c);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms_c = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    /* 同一把钥匙，只关掉 CRT：分量仍在结构体里，只是不参与运算 */
+    rsa_privkey k2 = k;
+    k2.has_crt = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    rsa_err ep = rsa_sign_sha256(&k2, (const uint8_t *)msg, mlen, sig_p, sizeof(sig_p), &n_p);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms_p = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    CHECK(ec == RSA_OK && ep == RSA_OK, "CRT: 两条路径均签名成功");
+    CHECK(n_c == klen && n_p == klen, "CRT: 两条路径签名长度均为模数字节数");
+    CHECK(n_c == klen && n_p == klen && memcmp(sig_c, sig_p, klen) == 0,
+          "CRT: 与裸模幂逐字节相同（加速没加错）");
+
+    /* 独立真值：公钥验过。排除"两条路径一样错" */
+    rsa_err v = rsa_verify_sha256(&k.n, k.e, (const uint8_t *)msg, mlen, sig_c, n_c);
+    CHECK(v == RSA_OK, "CRT: 签名经公钥验签通过（独立真值）");
+
+    /* 反向对照：篡改 dP 后必须不同，否则本用例恒绿 */
+    rsa_privkey k3 = k;
+    k3.dp.d[0] ^= 1u;
+    rsa_err eb = rsa_sign_sha256(&k3, (const uint8_t *)msg, mlen, sig_bad, sizeof(sig_bad), &n_bad);
+    CHECK(eb == RSA_OK && n_bad == klen && memcmp(sig_bad, sig_p, klen) != 0,
+          "CRT: 篡改 dP 后与裸模幂不同（反向对照）");
+
+    printf("[INFO] 2048 位签名：CRT %.0f ms，裸模幂 %.0f ms（加速比 %.1fx）\n",
+           ms_c, ms_p, ms_c > 0.0 ? ms_p / ms_c : 0.0);
+
+    rsa_privkey_clear(&k);
+}
+
 int main(void) {
     t_basic();
     t_mulmod();
     t_rsa_openssl_sig();
+    t_crt_equiv();
     printf("\n=== %d/%d passed ===\n", total - fails, total);
     return fails == 0 ? 0 : 1;
 }
