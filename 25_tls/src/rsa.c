@@ -137,7 +137,12 @@ static int pem_to_der(const uint8_t *pem, size_t len, const char *want,
     return -1;
 }
 
-/* PKCS#1 RSAPrivateKey ::= SEQUENCE { version, n, e, d, ... }（只取前四项） */
+/* PKCS#1 RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, dP, dQ, qInv }
+ *
+ * 以前只取前四项，把 CRT 分量丢掉，代价是每次签名都走 2048 位裸模幂。
+ * 现在全取，但要校验 p*q == n：分量与模数不自洽时如果用 CRT，产出的是
+ * 一个"看起来对、验签必失败"的签名，握手错误会指向证书/摘要而不是
+ * 私钥解析 —— 排查方向完全错。不自洽就回落裸模幂，不报错。 */
 static rsa_err parse_pkcs1(const uint8_t *der, size_t len, rsa_privkey *k) {
     size_t off = 0;
     der_buf seq, f;
@@ -164,6 +169,37 @@ static rsa_err parse_pkcs1(const uint8_t *der, size_t len, rsa_privkey *k) {
     memset(db, 0, sizeof(db));
     if (bn_is_zero(&k->n) || bn_is_zero(&k->d)) return RSA_ERR_KEY;
     if (bn_cmp(&k->d, &k->n) >= 0) return RSA_ERR_KEY;
+
+    /* CRT 分量（可选）：取不到就置 0 并回落，不因此判私钥非法 ——
+       PKCS#1 允许只给 (n,d) 的形式，那样签名慢但正确。 */
+    bn_zero(&k->p); bn_zero(&k->q);
+    bn_zero(&k->dp); bn_zero(&k->dq); bn_zero(&k->qinv);
+    k->has_crt = 0;
+    {
+        bn_t *tgt[5]; tgt[0]=&k->p; tgt[1]=&k->q; tgt[2]=&k->dp; tgt[3]=&k->dq; tgt[4]=&k->qinv;
+        int okall = 1;
+        for (int i = 0; i < 5; i++) {
+            uint8_t  cb[BN_MAX_BYTES];
+            size_t   cl = 0;
+            if (der_expect(seq.p, seq.len, &q, ASN1_INTEGER, &f) != ASN1_OK) { okall = 0; break; }
+            if (der_read_uint(&f, cb, sizeof(cb), &cl) != ASN1_OK)          { okall = 0; break; }
+            bn_from_be(tgt[i], cb, cl);
+            memset(cb, 0, sizeof(cb));
+            if (bn_is_zero(tgt[i])) { okall = 0; break; }
+        }
+        if (okall) {
+            bn_t pq;
+            /* p*q 必须恰好等于 n，否则 CRT 结果不是真正的签名 */
+            if (bn_mul(&pq, &k->p, &k->q) == BN_OK && bn_cmp(&pq, &k->n) == 0) {
+                k->has_crt = 1;
+            } else {
+                bn_zero(&k->p); bn_zero(&k->q);
+                bn_zero(&k->dp); bn_zero(&k->dq); bn_zero(&k->qinv);
+            }
+        } else {
+            for (int i = 0; i < 5; i++) bn_zero(tgt[i]);
+        }
+    }
     return RSA_OK;
 }
 
@@ -218,7 +254,13 @@ void rsa_privkey_clear(rsa_privkey *k) {
     if (!k) return;
     memset(&k->d, 0, sizeof(k->d));
     memset(&k->n, 0, sizeof(k->n));
+    memset(&k->p, 0, sizeof(k->p));
+    memset(&k->q, 0, sizeof(k->q));
+    memset(&k->dp, 0, sizeof(k->dp));
+    memset(&k->dq, 0, sizeof(k->dq));
+    memset(&k->qinv, 0, sizeof(k->qinv));
     k->e = 0;
+    k->has_crt = 0;
 }
 
 rsa_err rsa_sign_sha256(const rsa_privkey *k,
@@ -252,7 +294,36 @@ rsa_err rsa_sign_sha256(const rsa_privkey *k,
     bn_t m, s;
     bn_from_be(&m, p, klen);
     if (bn_cmp(&m, &k->n) >= 0) { free(em); return RSA_ERR_KEY; }
-    if (bn_modpow(&s, &m, &k->d, &k->n) != BN_OK) { free(em); return RSA_ERR_RANGE; }
+
+    if (k->has_crt) {
+        /* CRT：s = m2 + q * (((m1 - m2) * qInv) mod p)，m1 = m^dP mod p，m2 = m^dQ mod q
+         *
+         * 减法用 (m1 + 2p) - m2 再取模，而不是先判大小：p 与 q 谁大没有保证，
+         * 直接 bn_sub 在 m2 > m1 + p 时会下溢，而 bn_sub 的约定是 a >= b ——
+         * 那种错误的表现是偶发的错误签名，只在特定明文上出现。 */
+        /* 每一步都用独立的输出变量：bn_add / bn_sub 的第一步是 bn_zero(r)，
+         * 输出与输入同一个变量会先把输入清零再读它 —— 结果是 0 而不是和。
+         * 这类错误不报错，只产出错误签名，且只在 CRT 路径上出现。 */
+        bn_t m1, m2, a1, a2, d1, t, hh, tmp, s0, s1;
+        if (bn_modpow(&m1, &m, &k->dp, &k->p) != BN_OK)   { free(em); return RSA_ERR_RANGE; }
+        if (bn_modpow(&m2, &m, &k->dq, &k->q) != BN_OK)   { free(em); return RSA_ERR_RANGE; }
+        if (bn_add(&a1, &m1, &k->p) != BN_OK)             { free(em); return RSA_ERR_RANGE; }
+        if (bn_add(&a2, &a1, &k->p) != BN_OK)             { free(em); return RSA_ERR_RANGE; }
+        if (bn_sub(&d1, &a2, &m2) != BN_OK)               { free(em); return RSA_ERR_RANGE; }
+        if (bn_mod(&t,  &d1, &k->p) != BN_OK)             { free(em); return RSA_ERR_RANGE; }
+        if (bn_mulmod(&hh, &t, &k->qinv, &k->p) != BN_OK) { free(em); return RSA_ERR_RANGE; }
+        if (bn_mul(&tmp, &hh, &k->q) != BN_OK)            { free(em); return RSA_ERR_RANGE; }
+        if (bn_add(&s0, &tmp, &m2) != BN_OK)              { free(em); return RSA_ERR_RANGE; }
+        /* hh < p 且 tmp = hh*q < p*q = n，m2 < q < n，故 s0 < 2n：一次减法足够 */
+        if (bn_cmp(&s0, &k->n) >= 0) {
+            if (bn_sub(&s1, &s0, &k->n) != BN_OK)         { free(em); return RSA_ERR_RANGE; }
+            s = s1;
+        } else {
+            s = s0;
+        }
+    } else if (bn_modpow(&s, &m, &k->d, &k->n) != BN_OK) {
+        free(em); return RSA_ERR_RANGE;
+    }
     /* 只判失败，不判"need == klen"：s 可能比 n 少几个字节（约 1/256 概率），
        bn_to_be 会左补零到 klen。若在这里要求 need == klen 再放行，
        就会偶发地把一个完全合法的签名判成失败，且不可复现。 */

@@ -34,6 +34,8 @@
 #define HS_FINISHED      20
 
 #define REC_HDR   5
+#define REC_MAX_PLAIN 16384          /* RFC 5246 6.2.1：明文分片上限 2^14 */
+#define REC_MAX_CT   (16384 + 8 + 16) /* GCM：显式 nonce 8 + tag 16 */
 #define MAX_REC   18432
 #define MAX_HS    65536
 
@@ -191,7 +193,11 @@ static tls_err rec_read(tls_ctx *c, uint8_t *type, uint8_t **body, size_t *body_
     if (e != TLS_OK) return e;
     if (hdr[1] != 0x03) return TLS_ERR_VERSION;
     size_t len = ((size_t)hdr[3] << 8) | hdr[4];
-    if (len == 0 || len > MAX_REC) return TLS_ERR_RECORD;
+    /* 上限必须随加密状态收紧：明文阶段 2^14，加密后 2^14+8+16。
+       一律按 18432 收的话，一个声明六万多字节的记录会被接受并去等
+       那些永远不会到的字节 —— 阻塞式 IO 下就是一直等下去。 */
+    if (len == 0 || len > (c->rdec_on ? (size_t)REC_MAX_CT : (size_t)REC_MAX_PLAIN))
+        return TLS_ERR_RECORD;
     e = io_recv_exact(c, c->rec, len);
     if (e != TLS_OK) return e;
     *type = hdr[0];
