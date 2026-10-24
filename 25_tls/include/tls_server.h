@@ -45,6 +45,13 @@ tls_err tls_server_accept(tls_server_ctx *c);
 tls_err tls_server_read(tls_server_ctx *c, uint8_t *buf, size_t cap, size_t *out_len);
 tls_err tls_server_write(tls_server_ctx *c, const uint8_t *data, size_t len);
 
+/* 发送 close_notify 并关闭本端写方向（与客户端 tls_close 对称）。
+ *
+ * 不发的后果在真机上很具体：OpenSSL 3.0.2 的 s_client 会报
+ * "unexpected eof while reading" 并以非零码退出——握手、验链、应用数据
+ * 全对，但对端仍把这次会话判为异常结束。幂等。 */
+tls_err tls_server_close(tls_server_ctx *c);
+
 /* ---- 取证接口 ----
  * SNI 是握手中唯一以明文出现的主机名。域前置的全部意义就在于：
  * 链路上看得到的是前置域，真实目标只在加密内层。要断言这一点，

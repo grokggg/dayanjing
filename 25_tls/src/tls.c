@@ -53,6 +53,7 @@ const char *tls_errstr(tls_err e) {
     case TLS_ERR_FINISHED: return "peer Finished verification failed";
     case TLS_ERR_RANGE:  return "buffer too small";
     case TLS_ERR_TRUNC:  return "truncated data";
+    case TLS_ERR_CLOSED: return "connection closed locally";
     }
     return "unknown";
 }
@@ -75,6 +76,7 @@ struct tls_ctx {
     int         enc_on;     /* 发送方向已加密 */
     int         rdec_on;    /* 接收方向已加密 —— 必须分开跟踪 */
     int         peer_done;  /* 已校验对端 Finished */
+    int         closed;     /* 已发出 close_notify */
 
     uint8_t  rec[MAX_REC];
     uint8_t  hs[MAX_HS];
@@ -565,7 +567,17 @@ tls_err tls_handshake(tls_ctx *c) {
 
 tls_err tls_write(tls_ctx *c, const uint8_t *data, size_t len) {
     if (!c || !c->handshaked) return TLS_ERR_ARG;
+    if (c->closed) return TLS_ERR_CLOSED;
     return rec_write(c, CT_APPDATA, data, len);
+}
+
+tls_err tls_close(tls_ctx *c) {
+    if (!c) return TLS_ERR_ARG;
+    if (c->closed) return TLS_OK;          /* 幂等 */
+    static const uint8_t cn[2] = { 1, 0 }; /* warning, close_notify */
+    tls_err e = rec_write(c, CT_ALERT, cn, 2);
+    c->closed = 1;                          /* 无论发送成败都标记：不重试 */
+    return e;
 }
 
 tls_err tls_read(tls_ctx *c, uint8_t *buf, size_t cap, size_t *out_len) {

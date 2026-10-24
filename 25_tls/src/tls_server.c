@@ -62,6 +62,7 @@ struct tls_server_ctx {
     uint64_t   wseq, rseq;
     int        enc_on, rdec_on;
     int        handshaked;
+    int        closed;      /* 已发出 close_notify */
 
     uint8_t rec[MAX_REC];
     uint8_t hs[MAX_HS];
@@ -500,7 +501,17 @@ tls_err tls_server_read(tls_server_ctx *c, uint8_t *buf, size_t cap, size_t *out
 tls_err tls_server_write(tls_server_ctx *c, const uint8_t *data, size_t len) {
     if (!c || !data) return TLS_ERR_ARG;
     if (!c->handshaked) return TLS_ERR_HANDSHAKE;
+    if (c->closed) return TLS_ERR_CLOSED;
     return rec_write(c, CT_APPDATA, data, len);
+}
+
+tls_err tls_server_close(tls_server_ctx *c) {
+    if (!c) return TLS_ERR_ARG;
+    if (c->closed) return TLS_OK;          /* 幂等 */
+    static const uint8_t cn[2] = { 1, 0 }; /* warning, close_notify */
+    tls_err e = rec_write(c, CT_ALERT, cn, 2);
+    c->closed = 1;
+    return e;
 }
 
 tls_err tls_server_init(tls_server_ctx **out, const tls_server_config *cfg,

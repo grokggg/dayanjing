@@ -32,7 +32,8 @@ typedef enum {
     TLS_ERR_CERT,        /* 证书链或主机名校验失败 */
     TLS_ERR_FINISHED,    /* 对端 Finished 校验失败 */
     TLS_ERR_RANGE,       /* 缓冲不够 */
-    TLS_ERR_TRUNC
+    TLS_ERR_TRUNC,
+    TLS_ERR_CLOSED       /* 本端已发过 close_notify，不能再写 */
 } tls_err;
 
 const char *tls_errstr(tls_err e);
@@ -58,6 +59,15 @@ void    tls_free(tls_ctx *c);
 tls_err tls_handshake(tls_ctx *c);
 tls_err tls_write(tls_ctx *c, const uint8_t *data, size_t len);
 tls_err tls_read(tls_ctx *c, uint8_t *buf, size_t cap, size_t *out_len);
+
+/* 发送 close_notify 并关闭本端写方向。
+ *
+ * 为什么必须显式发：不发的话对端只能看到 TCP 被关掉。真实 TLS 实现（实测
+ * OpenSSL 3.0.2）会报 "unexpected eof while reading" 并把连接判为错误退出。
+ * 更要紧的是语义：没有 close_notify，对端无法区分"正常结束"与"有人在
+ * 中途掐断了连接"——截断攻击正是利用这个歧义。
+ * 幂等：重复调用返回 TLS_OK。 */
+tls_err tls_close(tls_ctx *c);
 
 /* 诊断：实际发出的 ClientHello 中 SNI 扩展携带的主机名（取证用） */
 int tls_sni_echo(const tls_ctx *c, char *out, size_t cap);
