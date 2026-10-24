@@ -13,9 +13,15 @@ HDR     := include/c2.h include/c2_frame.h include/c2_hsmsg.h \
            ../00_crypto/include/crypto_hash.h \
            ../00_crypto/include/crypto_gcm.h
 
-.PHONY: all clean test mkdirs inspect e2e
+.PHONY: all clean test align mkdirs inspect e2e
 
 all: mkdirs $(BUILD)/test_c2 $(BUILD)/test_c2_frame $(BUILD)/test_hs_net
+
+# test_align 刻意不放进 all：它需要 Python 侧先生成夹具（/tmp/py_seal.bin 等），
+# 单独被执行时返回 77 = SKIP。真正的入口是 scripts/run_c2_align.sh，
+# 它按 seal -> 编译 -> 运行 -> verify 的顺序驱动完整的双向比对。
+# RUN_BY 告知审计脚本"此测试由专用驱动执行"，不必由默认目标构建。
+RUN_BY := test_align=scripts/run_c2_align.sh
 
 mkdirs:
 	@mkdir -p $(BUILD)
@@ -50,6 +56,15 @@ $(BUILD)/test_hs_net: tests/test_hs_net.c $(BUILD)/c2.o $(BUILD)/c2_hsmsg.o \
 	$(CC) $(CFLAGS) tests/test_hs_net.c $(BUILD)/c2.o $(BUILD)/c2_hsmsg.o \
 	      $(BUILD)/c2_frame.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_gcm.o \
 	      -o $@ $(LDFLAGS)
+
+# 与 13_c2_server（Python）的双向协议对齐：密钥派生 + 帧格式 + AAD。
+# 夹具由 align_proto.py seal 生成，见 scripts/run_c2_align.sh。
+$(BUILD)/test_align: tests/test_align.c $(BUILD)/c2.o $(BUILD)/c2_frame.o \
+                     $(BUILD)/crypto_hash.o $(BUILD)/crypto_gcm.o $(HDR) | mkdirs
+	$(CC) $(CFLAGS) tests/test_align.c $(BUILD)/c2.o $(BUILD)/c2_frame.o \
+	      $(BUILD)/crypto_hash.o $(BUILD)/crypto_gcm.o -o $@ $(LDFLAGS)
+
+align: $(BUILD)/test_align
 
 test: all
 	./$(BUILD)/test_c2

@@ -194,6 +194,20 @@ run_int proto_c2_layer \
     01_proto/build/frame.o 02_c2/build/c2_frame.o 02_c2/build/c2.o \
     02_c2/build/crypto_gcm.o 02_c2/build/crypto_hash.o
 
+# C <-> Python 双向协议对齐（密钥派生 + 帧格式 + AAD）。
+# 单独一个脚本驱动：它需要 Python 侧先生成夹具，缺夹具时 C 侧返回 77(SKIP)，
+# 由脚本统一判定，避免"没比对过"被当成"比对一致"。
+if [ -f "$ROOT/scripts/run_c2_align.sh" ]; then
+    if sh "$ROOT/scripts/run_c2_align.sh" > /tmp/c2_align.log 2>&1; then
+        echo "  [PASS] c2_align"
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] c2_align"
+        grep -E "FAIL" /tmp/c2_align.log | sed 's/^/         /'
+        failed=$((failed + 1))
+    fi
+fi
+
 run_py 13_c2_server_py 13_c2_server/tests/test_server.py
 
 # 采集产物接收端：C 侧 21_exfil 真编码 -> Python ExfilSink 真解码的跨语言对齐。

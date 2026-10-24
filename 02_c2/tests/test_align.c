@@ -43,6 +43,21 @@ static uint8_t *slurp(const char *path, size_t *len) {
 int main(void) {
     printf("=== 02_c2 <-> 13_c2_server 协议对齐测试 ===\n");
 
+    /* 夹具由 13_c2_server/tools/align_proto.py seal 生成。缺夹具时不能静默通过：
+     * 那会让"从未真正比对过两端"看起来像"比对一致"。返回 77 = 环境不具备，
+     * 回归记为 SKIP（既不冒认通过，也不算代码缺陷）。真正的执行入口是
+     * scripts/run_c2_align.sh，它保证夹具先被生成。 */
+    {
+        FILE *probe = fopen("/tmp/py_seal.bin", "rb");
+        if (!probe) {
+            printf("[SKIP] 缺少夹具 /tmp/py_seal.bin；"
+                   "请先运行 13_c2_server/tools/align_proto.py seal"
+                   "（或 scripts/run_c2_align.sh）\n");
+            return 77;
+        }
+        fclose(probe);
+    }
+
     memset(PSK, 0x0b, sizeof PSK);
     memset(SALT_REG, 0x01, sizeof SALT_REG);
     memset(SERVER_ID, 0x02, sizeof SERVER_ID);

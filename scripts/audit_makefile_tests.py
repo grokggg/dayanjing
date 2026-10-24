@@ -48,6 +48,8 @@ DECL_ASSIGN_RE = re.compile(r'^\s*[A-Z][A-Z0-9_]*\s*:?=\s*(.*)$')
 DECL_BARE_RE = re.compile(r'\b(test_[A-Za-z0-9_]+)\b(?!\.)')
 # 模块可声明"回归实际会调用的其他目标"，如 agent_windows 的 winshim-build
 AUDIT_GOALS_RE = re.compile(r'^\s*AUDIT_GOALS\s*:?=\s*(.*)$', re.M)
+# 模块可声明"由专用驱动执行的测试"，如 02_c2 的 test_align（需 Python 侧夹具）
+RUN_BY_RE = re.compile(r'^\s*RUN_BY\s*:?=\s*(.*)$', re.M)
 
 BUILT_RE = re.compile(r'-o\s+(\S+)')
 
@@ -76,6 +78,42 @@ def declared_tests(mf: str):
         if mo and not mo.group(1).startswith('$('):
             names |= set(DECL_BARE_RE.findall(mo.group(1)))
     return names
+
+
+def run_by(mf: str):
+    """{测试名: 驱动路径}——这些测试不由默认目标构建，而由专用脚本驱动。"""
+    raw = open(mf, encoding='utf-8', errors='replace').read()
+    mo = RUN_BY_RE.search(_join_continuations(raw))
+    out = {}
+    if mo:
+        for item in mo.group(1).split():
+            if '=' in item:
+                k, v = item.split('=', 1)
+                out[k.strip()] = v.strip()
+    return out
+
+
+def orphan_sources(md: str, mf: str):
+    """tests/ 下存在、但 Makefile 从未引用的测试源码。
+
+    这是与"跑陈旧产物"方向相反的缺口：被测二进制根本不存在，
+    源码里的断言一次都没执行过。实测 02_c2/tests/test_align.c
+    写了三年从未被编译——跨语言协议对齐无人把关。
+    """
+    tdir = os.path.join(md, 'tests')
+    if not os.path.isdir(tdir):
+        return []
+    raw = open(mf, encoding='utf-8', errors='replace').read()
+    src = _join_continuations(raw)
+    orphans = []
+    for f in sorted(os.listdir(tdir)):
+        if not (f.startswith('test_') and f.endswith(('.c', '.cpp', '.cc'))):
+            continue
+        stem = os.path.splitext(f)[0]
+        # \b 保证 test_c2 不会匹配到 test_c2_frame
+        if not re.search(r'\b%s\b' % re.escape(stem), src):
+            orphans.append('tests/' + f)
+    return orphans
 
 
 def audit_goals(mf: str):
@@ -137,8 +175,20 @@ def main():
             print(f'[ERR ] {m}: {st}')
             bad += 1
             continue
-        miss = sorted(decl - built)
+        # 由专用驱动执行的测试：不要求默认目标构建它，但驱动必须真实存在
+        rb = run_by(mf)
+        for t, drv in sorted(rb.items()):
+            if not os.path.isfile(os.path.join(ROOT, drv)):
+                bad += 1
+                print(f'[MISS] {m}: RUN_BY 声明 {t} 由 {drv} 驱动，但该文件不存在')
+        ext = set(rb)
+        miss = sorted((decl - built) - ext)
         orph = orphan_binaries(md, decl)
+        srcorph = orphan_sources(md, mf)
+        if srcorph:
+            bad += 1
+            print(f'[MISS] {m}: {len(srcorph)} 个测试源码从未被 Makefile 引用，'
+                  f'其断言从未执行: {srcorph}')
         gdesc = '默认目标' + (f' + {" ".join(audit_goals(mf))}' if len(goals) > 1 else '')
         if miss:
             bad += 1
@@ -148,7 +198,8 @@ def main():
             print(f'[WARN] {m}: 全部 {len(decl)} 个均会被构建；'
                   f'但 build/ 有 {len(orph)} 个已不再声明的残留: {orph}')
         else:
-            print(f'[OK  ] {m}: {len(decl)} 个测试目标全部由{gdesc}构建')
+            extra = f'（另 {len(ext)} 个由专用驱动执行）' if ext else ''
+            print(f'[OK  ] {m}: {len(decl)} 个测试目标全部由{gdesc}构建{extra}')
     print('---')
     print('MISS 模块数 =', bad)
     return 1 if bad else 0
