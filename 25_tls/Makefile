@@ -16,7 +16,7 @@ OBJS    = $(SRCS:.c=.o) $(CRYPTO:.c=.o)
 
 TESTS   = $(BUILD)/test_bn $(BUILD)/test_asn1 $(BUILD)/test_x509 $(BUILD)/test_tls \
           $(BUILD)/test_tls_srv $(BUILD)/test_tls_ch $(BUILD)/test_tls_hs \
-          $(BUILD)/test_tls_seq
+          $(BUILD)/test_tls_seq $(BUILD)/test_tls_ch_struct
 
 # 跨实现互操作工具：把服务端/客户端挂到真实 TCP 端口，与 OpenSSL 的
 # s_client / s_server 对连。它们不是单元测试，由 scripts/interop_openssl.sh 驱动。
@@ -49,6 +49,13 @@ $(BUILD)/test_tls_srv: tests/test_tls_srv.c $(OBJS) | $(BUILD)
 
 # 真实 ClientHello 解析器健壮性：必须进默认目标，否则又是一个"写了没接"的测试
 $(BUILD)/test_tls_ch: tests/test_tls_ch.c tests/clienthello_default.h $(OBJS) | $(BUILD)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+# ClientHello 结构化变异（未知扩展 / GREASE / 声明长度不符 / 重复扩展）。
+# 用例头文件由 scripts/gen_ch_struct.py 生成，声明为依赖以便重新生成后重编。
+# 必须进默认目标，否则又是一个"写了没接"的测试。
+$(BUILD)/test_tls_ch_struct: tests/test_tls_ch_struct.c tests/clienthello_struct.h \
+                             tests/clienthello_default.h $(OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # 完整握手序列上的变异健壮性（MITM 代理）。必须进默认目标，

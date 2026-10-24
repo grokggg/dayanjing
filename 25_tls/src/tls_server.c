@@ -245,6 +245,13 @@ static tls_err parse_client_hello(tls_server_ctx *c, const uint8_t *b, size_t bl
     uint16_t cslen = (uint16_t)((b[o] << 8) | b[o + 1]);
     o += 2;
     if (o + cslen > blen) return TLS_ERR_HANDSHAKE;
+    /* CipherSuite 是 2 字节定长项，奇数长度的向量不可能是合法套件列表。
+     *
+     * 为什么必须显式拒绝：实测把套件长度写成 +1（奇数）发给 OpenSSL
+     * s_server，它回 decode_error 告警。我们若照单接受并握成，两者行为
+     * 就产生了可观测差异 —— 探测者只需发一个畸形 ClientHello，就能把
+     * 我们与真实 TLS 服务端区分开。这类指纹比"功能不对"更致命。 */
+    if (cslen == 0 || (cslen & 1u)) return TLS_ERR_HANDSHAKE;
     int want_cs = 0;
     for (size_t i = 0; i + 1 < cslen; i += 2) {
         uint16_t cs = (uint16_t)((b[o + i] << 8) | b[o + i + 1]);
@@ -263,11 +270,23 @@ static tls_err parse_client_hello(tls_server_ctx *c, const uint8_t *b, size_t bl
         o += 2;
         if (o + extlen > blen) return TLS_ERR_HANDSHAKE;
         size_t end = o + extlen;
+        /* 同一类型的扩展不得出现两次（RFC 5246 7.4.1.4 / RFC 8446 4.2：
+           "There MUST NOT be more than one extension of the same type"）。
+           OpenSSL 对重复扩展发 decode_error（实测），我们若接受就成了指纹。
+         *
+         * 用 65536 位位图而不是回头线性扫描：扩展体最长 65535 字节、
+         * 每条至少 4 字节，最坏约 16000 条，O(n^2) 会比较 2.5 亿次 ——
+         * 那等于给对端一个只发一个包就能占满 CPU 的 DoS。位图是 O(1)。 */
+        uint8_t seen_ext[8192];
+        memset(seen_ext, 0, sizeof(seen_ext));
         while (o + 4 <= end) {
             uint16_t et = (uint16_t)((b[o] << 8) | b[o + 1]);
             o += 2;
             uint16_t el = (uint16_t)((b[o] << 8) | b[o + 1]);
             o += 2;
+            if (seen_ext[et >> 3] & (uint8_t)(1u << (et & 7u)))
+                return TLS_ERR_HANDSHAKE;            /* 重复扩展 */
+            seen_ext[et >> 3] |= (uint8_t)(1u << (et & 7u));
             if (o + el > end) return TLS_ERR_HANDSHAKE;
             const uint8_t *ev = b + o;
             if (et == 0x0000 && el >= 5) {              /* server_name */
@@ -283,15 +302,29 @@ static tls_err parse_client_hello(tls_server_ctx *c, const uint8_t *b, size_t bl
                     }
                 }
             } else if (et == 0x000a && el >= 4) {       /* supported_groups */
+                /* 内层列表长度必须自洽：2 字节前缀 + 声明长度 == 扩展体长度。
+                 * 不校验的话，我们只看外层 el 去扫，声明长度写错也照样握手成功，
+                 * 而 OpenSSL 对同一报文发 decode_error（实测）。 */
+                uint16_t nl = (uint16_t)((ev[0] << 8) | ev[1]);
+                if (2u + nl != el) return TLS_ERR_HANDSHAKE;
                 for (size_t i = 2; i + 1 < el; i += 2) {
                     uint16_t g = (uint16_t)((ev[i] << 8) | ev[i + 1]);
                     if (g == 0x001d) has_x25519 = 1;
                 }
             } else if (et == 0x000d && el >= 4) {       /* signature_algorithms */
+                uint16_t nl = (uint16_t)((ev[0] << 8) | ev[1]);
+                if (2u + nl != el) return TLS_ERR_HANDSHAKE;
                 for (size_t i = 2; i + 1 < el; i += 2) {
                     uint16_t s = (uint16_t)((ev[i] << 8) | ev[i + 1]);
                     if (s == 0x0401) has_rsa_sha256 = 1;
                 }
+            } else if (et == 0x002b) {                 /* supported_versions */
+                /* 我们不实现 TLS 1.3，对内容一律忽略；但结构仍要校验。
+                 * 只实现 1.2 的服务端忽略这个扩展是正确的（RFC 8446 允许
+                 * 客户端同时通告），而 OpenSSL 对「1 字节前缀 + 声明长度
+                 * 不等于扩展体长度」发 decode_error（实测），所以这里必须
+                 * 同步严格，否则又是一处可探测指纹。 */
+                if (el < 1 || 1u + ev[0] != el) return TLS_ERR_HANDSHAKE;
             } else if (et == 0x0010 && c->alpn_want[0]) {  /* ALPN */
                 size_t p = 2;                            /* 跳过 list 长度 */
                 size_t wl = strlen(c->alpn_want);

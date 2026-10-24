@@ -94,6 +94,48 @@ MUTATIONS = [
         "bin": "build/test_front_real",
     },
     {
+        # 这四条是"结构化变异"防回归：它们的危害不是崩溃，而是"该拒绝的
+        # 没拒绝"。实测 OpenSSL s_server 对这些报文发 decode_error 告警，
+        # 我们若照单收下并握成，探测者只需发一个畸形 ClientHello 就能把
+        # 我们与真实服务端区分开 —— 这类指纹比功能出错更致命。
+        "id": "M23",
+        "desc": "25_tls: 套件列表长度不再校验奇数（畸形容忍度与 OpenSSL 分歧）",
+        "file": "25_tls/src/tls_server.c",
+        "old": "    if (cslen == 0 || (cslen & 1u)) return TLS_ERR_HANDSHAKE;",
+        "new": "    if (0) return TLS_ERR_HANDSHAKE;",
+        "mod": "25_tls",
+        "bin": "build/test_tls_ch_struct",
+    },
+    {
+        "id": "M24",
+        "desc": "25_tls: 不再拒绝重复扩展（RFC 5246/8446 禁止，OpenSSL 发 decode_error）",
+        "file": "25_tls/src/tls_server.c",
+        "old": "            if (seen_ext[et >> 3] & (uint8_t)(1u << (et & 7u)))\n                return TLS_ERR_HANDSHAKE;            /* 重复扩展 */",
+        "new": "            /* MUT */",
+        "mod": "25_tls",
+        "bin": "build/test_tls_ch_struct",
+    },
+    {
+        # 锚点必须带上后继的 uint16_t g：signature_algorithms 下有一模一样的
+        # 这一行，只写单行会同时命中两处，脚本的模糊替换拒绝是对的。
+        "id": "M25",
+        "desc": "25_tls: supported_groups 内层列表长度不再校验（声明与实际不符被接受）",
+        "file": "25_tls/src/tls_server.c",
+        "old": "                if (2u + nl != el) return TLS_ERR_HANDSHAKE;\n                for (size_t i = 2; i + 1 < el; i += 2) {\n                    uint16_t g = (uint16_t)((ev[i] << 8) | ev[i + 1]);",
+        "new": "                if (0) return TLS_ERR_HANDSHAKE;\n                for (size_t i = 2; i + 1 < el; i += 2) {\n                    uint16_t g = (uint16_t)((ev[i] << 8) | ev[i + 1]);",
+        "mod": "25_tls",
+        "bin": "build/test_tls_ch_struct",
+    },
+    {
+        "id": "M26",
+        "desc": "25_tls: supported_versions 结构不再校验（我们不实现 1.3 但结构须同步严格）",
+        "file": "25_tls/src/tls_server.c",
+        "old": "                if (el < 1 || 1u + ev[0] != el) return TLS_ERR_HANDSHAKE;",
+        "new": "                if (0) return TLS_ERR_HANDSHAKE;",
+        "mod": "25_tls",
+        "bin": "build/test_tls_ch_struct",
+    },
+    {
         "id": "M3",
         "desc": "20_packer: 入口 nop 垫恒为 0（首字节变回跨构建恒定签名）",
         "file": "20_packer/src/poly.c",
