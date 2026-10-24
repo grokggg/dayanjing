@@ -192,7 +192,7 @@ int p2p_route_handle_conn(const p2p_mesh_t *m, const uint8_t *my_id, int cfd) {
     }
 
     /* 4) 校验 ids[0] 是自己——防止电路被错送到别的节点 */
-    /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+    /* SEC-CMP:ID: 校验路径首跳是否为自身。节点 ID 在 mesh 路由中公开广播，非秘密。 */
     if (memcmp(ids[0], my_id, P2P_NODE_ID_LEN) != 0) return P2P_ERR_NOTFOUND;
 
     if (n_ids == 1) {

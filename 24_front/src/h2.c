@@ -252,7 +252,7 @@ h2_err h2_hpack_status(const uint8_t *in, size_t len, int *status) {
         if (hr_str(&r, &v, &vl)) return H2_ERR_HPACK;
 
         int is_status = have_name_idx ? (ni == HPACK_IDX_STATUS)
-                                      /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+                                      /* SEC-CMP:PUBLIC: HTTP/2 伪头名 :status，RFC 7540 公开定义。 */
                                       : (nl == 7 && !memcmp(nm, ":status", 7));
         if (is_status) {
             if (vl == 0 || vl > 3) return H2_ERR_HPACK;

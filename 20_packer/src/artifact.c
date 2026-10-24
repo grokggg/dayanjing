@@ -68,7 +68,7 @@ static int art_prepare(const pk_binding_t *b,
     if (!b || !k_c2s || !k_s2c || !ctx || !ctx_len) return PK_ERR_ARG;
 
     /* 单向密钥退化会让"两个方向同一个密钥"，削弱分离性 —— 直接拒绝 */
-    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
+    /* SEC-CMP:DEGENERATE: 拒绝双向同钥（PK_ERR_DEGEN）。相等是异常态，攻击者无法据此获得可观测预言。 */
     if (memcmp(k_c2s, k_s2c, PK_SESSION_KEY_LEN) == 0) return PK_ERR_DEGEN;
 
     rc = pk_binding_encode(b, ctx, ctx_cap, ctx_len);

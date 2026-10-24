@@ -61,7 +61,7 @@ rsa_err rsa_verify_sha256(const bn_t *n, uint32_t e,
     i++;
     size_t tlen = k - i;
     if (tlen != DI_SHA256_LEN + SHA256_DIGEST_LEN) return RSA_ERR_PAD;
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: PKCS#1 v1.5 的 DigestInfo 前缀，RFC 8017 公开定义的常量字节串。 */
     if (memcmp(p + i, DI_SHA256, DI_SHA256_LEN) != 0) return RSA_ERR_PAD;
 
     uint8_t h[SHA256_DIGEST_LEN];

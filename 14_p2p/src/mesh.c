@@ -26,7 +26,7 @@ const char *p2p_errstr(int e) {
 
 static int node_idx(const p2p_mesh_t *m, const uint8_t *id) {
     for (int i = 0; i < m->n_nodes; i++)
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(m->nodes[i].id, id, P2P_NODE_ID_LEN) == 0)
             return i;
     return -1;
@@ -37,7 +37,7 @@ static int node_idx(const p2p_mesh_t *m, const uint8_t *id) {
 static int nbr_index(const p2p_mesh_t *m, int ia, const uint8_t *b) {
     const p2p_node_t *A = &m->nodes[ia];
     for (int j = 0; j < A->n_neighbors; j++)
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(A->neighbors[j], b, P2P_NODE_ID_LEN) == 0) return j;
     return -1;
 }
@@ -83,7 +83,7 @@ int p2p_node_del(p2p_mesh_t *m, const uint8_t *id) {
         if (k == i) continue;
         p2p_node_t *o = &m->nodes[k];
         for (int j = 0; j < o->n_neighbors; j++) {
-            /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+            /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
             if (memcmp(o->neighbors[j], id, P2P_NODE_ID_LEN) == 0) {
                 /* 与末位交换后收缩，j 回退以重新检查换上来的元素；
                  * 度量数组必须与邻居数组同下标 swap，否则会错位 */
@@ -204,7 +204,7 @@ int p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
     p2p_node_t *A = &m->nodes[ia], *B = &m->nodes[ib];
     int found = 0;
     for (int i = 0; i < A->n_neighbors; i++) {
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(A->neighbors[i], b, P2P_NODE_ID_LEN) == 0) {
             int last = A->n_neighbors - 1;
             memcpy(A->neighbors[i], A->neighbors[last], P2P_NODE_ID_LEN);
@@ -220,7 +220,7 @@ int p2p_neighbor_unlink(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
         }
     }
     for (int i = 0; i < B->n_neighbors; i++) {
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(B->neighbors[i], a, P2P_NODE_ID_LEN) == 0) {
             int last = B->n_neighbors - 1;
             memcpy(B->neighbors[i], B->neighbors[last], P2P_NODE_ID_LEN);
@@ -243,7 +243,7 @@ int p2p_neighbor_has(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b) {
     if (ia < 0) return 0;
     const p2p_node_t *A = &m->nodes[ia];
     for (int i = 0; i < A->n_neighbors; i++)
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(A->neighbors[i], b, P2P_NODE_ID_LEN) == 0) return 1;
     return 0;
 }
@@ -482,10 +482,10 @@ static int find_edge(p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
     *ia = x; *ib = y;
     *ka = -1; *kb = -1;
     for (int i = 0; i < m->nodes[x].n_neighbors; i++)
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(m->nodes[x].neighbors[i], b, P2P_NODE_ID_LEN) == 0) { *ka = i; break; }
     for (int i = 0; i < m->nodes[y].n_neighbors; i++)
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(m->nodes[y].neighbors[i], a, P2P_NODE_ID_LEN) == 0) { *kb = i; break; }
     if (*ka < 0 || *kb < 0) return P2P_ERR_NOLINK;
     return P2P_OK;
@@ -523,7 +523,7 @@ int p2p_link_get_qos(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
     if (x < 0) return P2P_ERR_NOTFOUND;
     int k = -1;
     for (int i = 0; i < m->nodes[x].n_neighbors; i++)
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(m->nodes[x].neighbors[i], b, P2P_NODE_ID_LEN) == 0) { k = i; break; }
     if (k < 0) return P2P_ERR_NOLINK;
     const p2p_node_t *n = &m->nodes[x];
@@ -692,7 +692,7 @@ static int edge_idx_a(const p2p_mesh_t *m, const uint8_t *a, const uint8_t *b,
     int x = p2p_node_find(m, a);
     if (x < 0) return P2P_ERR_NOTFOUND;
     for (int i = 0; i < m->nodes[x].n_neighbors; i++) {
-        /* SEC-CMP:ID: 标识符相等性判定，非秘密凭证；攻击者无法提交猜测来探测 */
+        /* SEC-CMP:ID: mesh 邻居/节点 ID 查找。节点 ID 在 mesh 中公开交换（见 14_p2p/src/mesh.c 邻居同步），非秘密。 */
         if (memcmp(m->nodes[x].neighbors[i], b, P2P_NODE_ID_LEN) == 0) {
             if (ia) *ia = x;
             if (ka) *ka = i;

@@ -131,7 +131,7 @@ static int pk_shape_mask(const uint8_t *seed, size_t seed_len,
  */
 static int shaped_hdr_parse(const uint8_t *h, pk_hdr *out)
 {
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: v4 制品头标识，位于【已掩码】的头内（整头经 HKDF 派生掩码）。这里是解掩码后的比对，明文不在制品上出现。 */
     if (memcmp(h, V4_MAGIC, PK_MAGIC_LEN) != 0) return PK_ERR_AUTH;
 
     out->version = get32(h + 8);

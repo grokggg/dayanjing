@@ -68,7 +68,7 @@ int x509_name_eq(const der_buf *a, const der_buf *b) {
     size_t la = 0, lb = 0;
     if (name_canon(a, ca, sizeof(ca), &la) != 0) return 0;
     if (name_canon(b, cb, sizeof(cb), &lb) != 0) return 0;
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: 证书 DN/名称比较。X.509 证书是公开信息（握手中明文传输），比对的是公开字段。 */
     return la == lb && (la == 0 || memcmp(ca, cb, la) == 0);
 }
 
@@ -420,13 +420,13 @@ x509_err x509_store_load_pem(x509_store *st, const char *path) {
     size_t bl = strlen(begin), el = strlen(end);
     int loaded = 0;
     for (size_t i = 0; i + bl < n; i++) {
-        /* SEC-CMP:PATTERN: 内存模式/特征扫描，非秘密比较 */
+        /* SEC-CMP:PATTERN: PEM 起始边界搜索。公开格式标记。 */
         if (memcmp(s + i, begin, bl) != 0) continue;
         const char *body = s + i + bl;
         size_t rest = n - (body - s);
         const char *e = NULL;
         for (size_t j = 0; j + el < rest; j++) {
-            /* SEC-CMP:PATTERN: 内存模式/特征扫描，非秘密比较 */
+            /* SEC-CMP:PATTERN: PEM 结束边界（-----END-----）搜索。公开格式标记。 */
             if (memcmp(body + j, end, el) == 0) { e = body + j; break; }
         }
         if (!e) break;

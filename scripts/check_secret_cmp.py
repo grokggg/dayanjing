@@ -120,7 +120,9 @@ def orphan_marks():
             except Exception:
                 continue
             for i, ln in enumerate(lines):
-                if MARK in ln and "/*" in ln:
+                # 必须是真正的标注 "SEC-CMP:<CLASS>:"；正文里提到
+                # "不在 SEC-CMP 扫描范围" 这类说明不算标注，否则会被判成孤儿。
+                if (MARK + ":") in ln and "/*" in ln:
                     nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
                     # 标注必须紧邻它说明的那条比较语句
                     if "memcmp" not in nxt and "constant_time_eq" not in nxt:
@@ -132,6 +134,41 @@ def norm(line):
     """规范化：去行首空白、去 // 注释、压掉连续空白。"""
     line = re.sub(r"//.*$", "", line).strip()
     return re.sub(r"\s+", " ", line)
+
+
+def strip_block_comments(lines):
+    """
+    返回与 lines 等长的"仅代码"文本列表，块注释内容替换为空格（保行号）。
+
+    必需：扫描器此前按整行子串匹配 "memcmp"，于是一句写了解释的比较代码
+    只要注释里出现 "非 memcmp" 就会被当成调用点；同理 "已改用 crypto_ct_cmp"
+    这类说明也会制造假阳性。判据必须只看真正会被编译的代码。
+    """
+    out = []
+    in_blk = False
+    for ln in lines:
+        res = []
+        i = 0
+        while i < len(ln):
+            if in_blk:
+                if ln.startswith("*/", i):
+                    res.append("  ")
+                    i += 2
+                    in_blk = False
+                else:
+                    res.append(" " if ln[i] != "\t" else "\t")
+                    i += 1
+            elif ln.startswith("/*", i):
+                res.append("  ")
+                i += 2
+                in_blk = True
+            elif ln.startswith("//", i):
+                break
+            else:
+                res.append(ln[i])
+                i += 1
+        out.append("".join(res))
+    return out
 
 
 def scan():
@@ -151,13 +188,15 @@ def scan():
                 lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
             except Exception:
                 continue
+            # 只在"代码文本"里找 memcmp；注释里的字样不算调用点
+            code = strip_block_comments(lines)
             i = 0
             while i < len(lines):
-                if "memcmp" in lines[i] and not lines[i].strip().startswith("*"):
-                    buf, depth, j = lines[i], lines[i].count("(") - lines[i].count(")"), i
+                if "memcmp" in code[i]:
+                    buf, depth, j = code[i], code[i].count("(") - code[i].count(")"), i
                     while depth > 0 and j + 1 < len(lines) and j - i < 3:
                         j += 1
-                        buf += " " + lines[j]
+                        buf += " " + code[j]
                         depth = buf.count("(") - buf.count(")")
                     out.append((rel, i + 1, norm(buf)))
                     i = j + 1

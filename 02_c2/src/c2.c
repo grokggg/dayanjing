@@ -155,7 +155,7 @@ int c2_derive_session(const uint8_t master[C2_KEY_LEN],
     zero(prk, sizeof(prk));
 
     /* 强制方向密钥分离：碰撞即拒绝输出（H8 修正，禁单密钥退化） */
-    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
+    /* SEC-CMP:DEGENERATE: 拒绝两个方向的密钥取同一值（否则 send/recv 退化成一把，nonce 空间重合）。判据是【相等即拒绝】，调用方本就已知自己传了两把密钥；攻击者无法观测该结论——相等只在实现错误时出现。 */
     if (memcmp(k_c2s, k_s2c, C2_KEY_LEN) == 0) {
         zero(k_c2s, sizeof(k_c2s)); zero(k_s2c, sizeof(k_s2c));
         zero(k_confirm, sizeof(k_confirm));

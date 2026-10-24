@@ -178,7 +178,7 @@ int pk_binding_decode(const uint8_t *in, size_t in_len, pk_binding_t *out)
     if (!in || !out) return PK_ERR_ARG;
     if (in_len < PK_BINDING_FIXED_LEN) return PK_ERR_SMALL;
 
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: 与 HKDF 域分离标签常量比对。标签是公开常量（不参与保密，只做域分离），非秘密。 */
     if (memcmp(in, PK_BINDING_LABEL, PK_BINDING_LABEL_LEN) != 0)
         return PK_ERR_MAGIC;
     off += PK_BINDING_LABEL_LEN;

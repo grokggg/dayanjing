@@ -250,6 +250,7 @@ MUTATIONS = [
         "mod": "00_crypto",
         "bin": "build/test_gcm",
         "known_blind": True,
+        "expect": "SURVIVED",
         #
         # 【实测：本环境测不出，如实记为盲区】
         # 两种写法的条件跳转数**都是 4**（编译器把 x<y 优化成 sub+shr，

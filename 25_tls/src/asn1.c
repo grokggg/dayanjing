@@ -145,7 +145,7 @@ asn1_err der_find_tag(const uint8_t *p, size_t len, uint8_t tag, der_buf *out) {
 
 int der_eq(const der_buf *a, const der_buf *b) {
     if (a->len != b->len) return 0;
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: ASN.1/DER 内容比较。比较对象是证书/签名的公开结构字段（如 OID、算法标识），非秘密。注：全仓无调用者（死代码），若将来用于比较秘密值须重新判定。 */
     return a->len == 0 || memcmp(a->p, b->p, a->len) == 0;
 }
 

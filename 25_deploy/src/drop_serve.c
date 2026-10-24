@@ -93,7 +93,7 @@ static int read_request(int fd, char *buf, size_t cap, size_t *rlen)
         if (n < 0) return -1;
         if (n == 0) break;
         off += (size_t)n;
-        /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+        /* SEC-CMP:PUBLIC: HTTP 头结束标记 \r\n\r\n，协议公开常量。 */
         if (off >= 4 && memcmp(buf + off - 4, "\r\n\r\n", 4) == 0) break;
     }
     *rlen = off;

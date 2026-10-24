@@ -187,7 +187,7 @@ int pk_header_parse(const uint8_t *blob, size_t blob_len, pk_hdr *h)
 
     if (!blob || !h) return PK_ERR_ARG;
     if (blob_len < PK_HDR_LEN) return PK_ERR_SMALL;
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: 制品格式魔数。明文位于制品头，是格式标记而非密钥。 */
     if (memcmp(blob, PK_MAGIC, PK_MAGIC_LEN) != 0) return PK_ERR_MAGIC;
 
     h->version = get32(blob + 8);

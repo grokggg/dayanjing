@@ -469,7 +469,7 @@ tls_err tls_handshake(tls_ctx *c) {
         if (i < 10 || i >= k || q[i] != 0x00) return TLS_ERR_SKE;
         i++;
         if (k - i != sizeof(DI) + SHA256_DIGEST_LEN) return TLS_ERR_SKE;
-        /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+        /* SEC-CMP:PUBLIC: DigestInfo 前缀常量（RFC 8017 公开）。注意本文件另一处 Finished 校验（tls.c:546）比较的是 PRF(master_secret)，那处已改常量时间。 */
         if (memcmp(q + i, DI, sizeof(DI)) != 0) return TLS_ERR_SKE;
         /* SEC-CMP:PUBLIC: 同上：被比较的摘要覆盖公开传输的 tbs，不承载秘密 */
         if (memcmp(q + i + sizeof(DI), h, SHA256_DIGEST_LEN) != 0) return TLS_ERR_SKE;

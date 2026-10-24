@@ -20,6 +20,7 @@
 #include "exfil_link.h"
 
 #include "crypto_hash.h"
+#include "crypto_gcm.h"
 
 #include <string.h>
 
@@ -36,7 +37,7 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
 
     if (!ch || !ks || !kr || !pfx) return EXF_TASK_ERR_ARG;
     /* 方向分离不可退化：同一把密钥会让两个方向的 IV 空间重合 */
-    /* SEC-CMP:DEGENERATE: 退化比较（判两方是否相等以拒绝同值输入），结果调用方本就已知，不构成预言 */
+    /* SEC-CMP:DEGENERATE: 拒绝双向同钥（send/recv 退化则 nonce 空间重合）。相等是异常态，正常派生下永不出现，攻击者无法观测该结论。注意：本文件另两处【排序】比较比的是同一对密钥但用于定序，已改用 crypto_ct_cmp —— 判据不同，不能一概而论。 */
     if (memcmp(ks, kr, 16) == 0) return EXF_TASK_ERR_ARG;
 
     memset(ch, 0, sizeof *ch);
@@ -50,9 +51,16 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
      */
     {
         const uint8_t *klo, *khi;
-        /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
-        if (memcmp(ks, kr, 16) < 0) { klo = ks; khi = kr; }
-        else                        { klo = kr; khi = ks; }
+        /*
+         * SEC-CMP:ORDER: 此处比较对象是【双向会话密钥 ks/kr】，不是节点 ID。
+         *   类级理由在这里不成立 —— 密钥是秘密，memcmp 会在首个失配字节
+         *   终止，泄露"两密钥首处分歧位置"。改用常量时间三路比较
+         *   crypto_ct_cmp（步数恒为 len，循环体内无数据相关分支）。
+         *   攻击者无法注入密钥、也无法测量单次本地比较，风险等级低；
+         *   但这是"测不出来"而非"不存在"，故按秘密处理。
+         */
+        if (crypto_ct_cmp(ks, kr, 16) < 0) { klo = ks; khi = kr; }
+        else                               { klo = kr; khi = ks; }
         memcpy(ikm, klo, 16);
         memcpy(ikm + 16, khi, 16);
     }
@@ -67,8 +75,8 @@ int exfil_task_chan_init(exfil_task_chan_t *ch,
      * 两端因此得到同一把下行密钥。
      */
     {
-        /* SEC-CMP:ORDER: 排序/规范序比较，仅泄露 1 比特顺序；比较对象为自有或公开 ID */
-        int ks_is_lo = (memcmp(ks, kr, 16) < 0);
+        /* 常量时间排序（已用 crypto_ct_cmp，非 memcmp，不在 SEC-CMP 扫描范围）：比较对象是双向会话密钥，memcmp 会在首个失配字节终止、泄露分歧位置。攻击者既无法注入密钥也无法测量单次本地比较，风险等级低，但按秘密处理。 */
+        int ks_is_lo = (crypto_ct_cmp(ks, kr, 16) < 0);
         const uint8_t *info_s = ks_is_lo
                               ? (const uint8_t *)"cell:dir:lo"
                               : (const uint8_t *)"cell:dir:hi";

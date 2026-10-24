@@ -141,7 +141,7 @@ int sc_decode(const uint8_t *blob, size_t blob_len,
     if (!seed || seed_len == 0) return LD_ERR_ARG;
     if (blob_len < SC_HDR_LEN + SC_TAG_LEN) return LD_ERR_TRUNC;
 
-    /* SEC-CMP:PUBLIC: 双方均为公开数据（传输中可见或可自行计算），无秘密可泄露 */
+    /* SEC-CMP:PUBLIC: 格式魔数校验。SC_MAGIC 是容器格式标记，明文出现在载荷头部。 */
     if (memcmp(blob, SC_MAGIC, 4) != 0) return LD_ERR_FORMAT;
     if (blob[4] != SC_VER) return LD_ERR_FORMAT;
 
