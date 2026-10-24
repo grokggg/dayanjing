@@ -246,7 +246,7 @@ MUTATIONS = [
         # 这一条会漏。
     },
     {
-        "id": "M16",
+        "id": "M21",
         "desc": "00_crypto: crypto_ct_cmp 用带分支的写法（步数不变，源码层漏过）",
         "file": "00_crypto/src/crypto_gcm.c",
         "old": "        unsigned undecided = (gt | lt) ^ 1u;\n        gt |= undecided & gt_b;\n        lt |= undecided & lt_b;",
@@ -271,7 +271,7 @@ MUTATIONS = [
         # 误报，应重新标定而不是放宽判据。
     },
     {
-        "id": "M17",
+        "id": "M22",
         "desc": "00_crypto: crypto_ct_cmp 改回比较运算符 x>y / x<y",
         "file": "00_crypto/src/crypto_gcm.c",
         "old": "        unsigned lt_b = ((x - y) >> CT_SIGN_BIT) & 1u;   /* x < y */\n        unsigned gt_b = ((y - x) >> CT_SIGN_BIT) & 1u;   /* x > y */",
@@ -326,6 +326,39 @@ MUTATIONS = [
         "bin": "build/test_exfil",
         "all_occurrences": True,
     },
+    {
+        "id": "M19",
+        "desc": "25_tls: 服务端 hs_read 静默忽略非握手记录（握手前夹带应用数据被接受）",
+        "file": "25_tls/src/tls_server.c",
+        "old": "             * rec_read 循环，不经过 hs_read。 */\n            return TLS_ERR_HANDSHAKE;",
+        "new": "             * rec_read 循环，不经过 hs_read。 */\n            continue;",
+        "mod": "25_tls",
+        "bin": "build/test_tls_seq",
+        #
+        # 【真实缺陷，不是假想变异】2026-10 由 test_tls_seq 的语义断言抓到：
+        # 在 ClientHello 之前注入一条格式正确的应用数据记录，服务端原样
+        # 跳过并继续等握手消息，最终 stage=7 完整握手成功、回显正确。
+        # 字节级变异（test_tls_hs）永远碰不到它 —— 那条记录一个字节都没改。
+        #
+        # 危害不是"崩了"，而是"该拒绝的没拒绝"：对端获得一条静默通道，
+        # 可在握手期间夹带任意记录类型而不触发任何告警。握手完成前不得有
+        # 应用数据，这条不变式原先只靠"恰好没去处理它"维持着。
+        #
+        # 反向已验：改回 continue 后该断言变红（cli_rc=0 srv_rc=0 stage=7）。
+    },
+    {
+        "id": "M20",
+        "desc": "25_tls: 客户端 hs_read 静默忽略非握手记录（恶意服务端可夹带数据）",
+        "file": "25_tls/src/tls.c",
+        "old": "             * 察觉，客户端照样完成握手 —— 等于把\"是否安全\"交给对方决定。 */\n            return TLS_ERR_HANDSHAKE;",
+        "new": "             * 察觉，客户端照样完成握手 —— 等于把\"是否安全\"交给对方决定。 */\n            continue;",
+        "mod": "25_tls",
+        "bin": "build/test_tls_seq",
+        # 客户端侧同源缺陷。若只修服务端就宣称"意外消息已覆盖"，客户端
+        # 仍会把"是否安全"交给恶意服务端决定 —— 它可以在 ServerHello 与
+        # Finished 之间插入数据，客户端照样报握手成功。
+        # 反向已验：改回 continue 后该断言变红（cli_rc=0 srv_rc=0 stage=7）。
+    },
 ]
 
 # 变异 -> 应当出现的症状。多数变异期望被测试以失败捕获（CAUGHT），
@@ -333,6 +366,25 @@ MUTATIONS = [
 # 否则常态化审计会出现随机失败项，进而被整体忽略。
 EXPECT = {m["id"]: m["expect"] for m in MUTATIONS if "expect" in m}
 BLIND = {m["id"]: True for m in MUTATIONS if m.get("known_blind")}
+
+
+def _check_ids():
+    """ID 必须唯一。EXPECT / BLIND 都以 id 为键，撞号时后定义的覆盖前者，
+    结果是某个变异错享另一个的 expect（把 FAIL 判成"符合预期症状"）——
+    那是假通过，比漏掉一个变异危险得多。历史上 M16/M17 就被 24_front
+    与 00_crypto 各用了一次，靠人工核对才发现。"""
+    seen = {}
+    for m in MUTATIONS:
+        i = m["id"]
+        if i in seen:
+            raise SystemExit(
+                "[FATAL] 变异 ID 重复：%s 同时用于 %s 与 %s"
+                % (i, seen[i], m.get("file")))
+        seen[i] = m.get("file")
+    return seen
+
+
+_check_ids()
 
 
 def sh(cmd, cwd, timeout=900):

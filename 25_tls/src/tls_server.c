@@ -208,6 +208,15 @@ static tls_err hs_read(tls_server_ctx *c, uint8_t *type, uint8_t **body, size_t 
             if (c->hs_len + rl > sizeof(c->hs)) return TLS_ERR_RANGE;
             memcpy(c->hs + c->hs_len, rb, rl);
             c->hs_len += rl;
+        } else {
+            /* 握手消息不得与其它记录类型交错。原先这里静默跳过继续等，
+             * 等于给对端一条静默通道：握手期间夹带应用数据、CCS、未知类型
+             * 都不触发任何告警，"握手完成前不得有应用数据"这条不变式只靠
+             * "恰好没去处理它"维持着。RFC 5246 对此要求 unexpected_message
+             * 致命告警，这里以握手错误返回。
+             * 注意 CCS 不会走到这里：等 CCS 用的是 accept 里那个独立的
+             * rec_read 循环，不经过 hs_read。 */
+            return TLS_ERR_HANDSHAKE;
         }
     }
 }

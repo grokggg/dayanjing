@@ -270,6 +270,11 @@ static tls_err hs_read(tls_ctx *c, uint8_t *type, uint8_t **body, size_t *blen) 
             if (c->hs_len + rl > sizeof(c->hs)) return TLS_ERR_RANGE;
             memcpy(c->hs + c->hs_len, rb, rl);
             c->hs_len += rl;
+        } else {
+            /* 与服务端同源：握手期间不得夹带其它记录类型。静默跳过会让
+             * 恶意服务端在 ServerHello 与 Finished 之间插入应用数据而不被
+             * 察觉，客户端照样完成握手 —— 等于把"是否安全"交给对方决定。 */
+            return TLS_ERR_HANDSHAKE;
         }
     }
 }
