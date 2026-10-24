@@ -141,6 +141,30 @@ static void test_offline(void) {
     CK(wl == C2_HS_WELCOME_PREFIX + C2_HS_MAC_LEN, "WELCOME 长度 97");
     CK(c2_hsmsg_type(welcome, wl) == C2_HSMSG_WELCOME, "WELCOME 类型识别");
 
+    /* 参数校验：任一必填指针为 NULL 必须返回 ARG，不得静默解引用。
+       这四条是变异审计逼出来的——把整行校验删掉后本文件曾全绿，
+       即"这层防护从未被任何断言覆盖"。out=NULL 是合法的（仅查询长度），
+       故不在此列，另有 cap 边界用例单独覆盖。 */
+    {
+        size_t dwl = 0;
+        CK(c2_hsmsg_encode_welcome(welcome, sizeof welcome, NULL, C2_HS_VERSION,
+                                   C2_HS_SUITE, snonce, SERVER_ID, GENERATION,
+                                   km.k_identity, hello, hello_len) == C2_ERR_ARG,
+           "WELCOME 编码 len=NULL 被拒 ARG");
+        CK(c2_hsmsg_encode_welcome(welcome, sizeof welcome, &dwl, C2_HS_VERSION,
+                                   C2_HS_SUITE, NULL, SERVER_ID, GENERATION,
+                                   km.k_identity, hello, hello_len) == C2_ERR_ARG,
+           "WELCOME 编码 snonce=NULL 被拒 ARG");
+        CK(c2_hsmsg_encode_welcome(welcome, sizeof welcome, &dwl, C2_HS_VERSION,
+                                   C2_HS_SUITE, snonce, NULL, GENERATION,
+                                   km.k_identity, hello, hello_len) == C2_ERR_ARG,
+           "WELCOME 编码 server_static_id=NULL 被拒 ARG");
+        CK(c2_hsmsg_encode_welcome(welcome, sizeof welcome, &dwl, C2_HS_VERSION,
+                                   C2_HS_SUITE, snonce, SERVER_ID, GENERATION,
+                                   NULL, hello, hello_len) == C2_ERR_ARG,
+           "WELCOME 编码 k_identity=NULL 被拒 ARG");
+    }
+
     uint8_t g_sn[C2_HS_NONCE_LEN], g_sid[C2_SERVER_ID_LEN]; uint64_t g_gen = 0;
     CK(c2_hsmsg_decode_welcome(welcome, wl, &v, &s, g_sn, g_sid, &g_gen,
                                km.k_identity, hello, hello_len) == C2_OK,
