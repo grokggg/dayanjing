@@ -617,6 +617,23 @@ def count_cond_jumps(binpath, symbol):
     return n
 
 
+# 环境类原因：命令明确报告"没测成"，而不是被测代码有问题。
+# 这两条都必须被识别出来，否则自检会把环境问题报成守卫失效：
+#   - 77(SKIP)：无 openssl 或缺证书，--check 直接放弃；
+#   - s_server 起不来：端口被占、探测无法启动，同样拿不到真值。
+# 归 FAIL 的后果与守卫自身失效一样糟：无 openssl 的机器上回归一直红，
+# 最后被人加个 || true 关掉 —— 那时它连"环境缺失"都不再报了。
+_ENV_REASONS = ("环境缺失未验证（SKIP）", "s_server 起不来")
+
+
+def _env_reason(msg):
+    """返回环境原因；不是环境问题则返回 None。"""
+    for k in _ENV_REASONS:
+        if k in msg:
+            return k
+    return None
+
+
 def selftest_py():
     """永久钉死"命令崩溃不得算作捕获"这条判据。
 
@@ -631,7 +648,23 @@ def selftest_py():
 
         崩溃   -> 必须是 ERROR（不是 CAUGHT）
         中性   -> 必须是 SURVIVED（不是 ERROR，证明守卫没有误伤）
+
+    两条用例都依赖真值探测能真的跑起来。环境不具备时--check 返回 77，
+    崩溃用例会【恰好】拿到 ERROR（因为无标记即 ERROR），中性用例却拿到
+    ERROR 而非 SURVIVED —— 于是自检报 FAIL，读起来像"守卫失效了"，
+    真相是"这台机器没有 openssl"。排查方向完全被带偏，故先探环境再跑，
+    且逐例按原因区分，命中环境原因一律记 SKIP(77) 而非 FAIL。
     """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    try:
+        import tls_truth
+        ok_env, why = tls_truth.openssl_available()
+    except Exception as e:
+        ok_env, why = False, "tls_truth 导入失败：%s" % e
+    if not ok_env:
+        print("[SKIP] Python runner 判定标记守卫自检：环境不具备（%s）" % why)
+        return 77
+
     target = "scripts/tls_truth.py"
     cmds = ["python3 scripts/gen_ch_struct.py --check",
             "python3 scripts/gen_cke_struct.py --check"]
@@ -643,14 +676,25 @@ def selftest_py():
                "new": "def classify_records(buf):\n    # 中性改写：行为不变"}
 
     ok = True
+    env_hit = None
     for m, want in ((crash, "ERROR"), (neutral, "SURVIVED")):
         r = run_one_py(m)
-        got = r[1]
+        got, why_msg = r[1], r[2]
+        # 状态字即便"对上了"，也可能只是环境造成的巧合：崩溃用例期望
+        # ERROR，而 77 同样落到 ERROR。所以先查原因，再谈状态字。
+        if _env_reason(why_msg):
+            env_hit = _env_reason(why_msg)
+            print("[SKIP] %-16s 环境不具备：%s" % (m["id"], why_msg[:90]))
+            continue
         mark = "OK " if got == want else "BAD"
         if got != want:
             ok = False
         print("[%s] %-16s 期望=%-8s 实测=%-8s %s"
-              % (mark, m["id"], want, got, r[2][:90]))
+              % (mark, m["id"], want, got, why_msg[:90]))
+
+    if env_hit:
+        print("[SKIP] Python runner 判定标记守卫自检：环境不具备（%s）" % env_hit)
+        return 77
     print("[%s] Python runner 判定标记守卫自检" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 

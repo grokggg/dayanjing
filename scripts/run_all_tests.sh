@@ -421,6 +421,11 @@ if [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     if [ $rc -eq 0 ]; then
         echo "  [PASS] $(grep -E '^\[PASS\]' /data/ma_selftest.log | sed 's/^\[PASS\] //')"
         passed=$((passed + 1))
+    elif [ $rc -eq 77 ]; then
+        # 无 openssl / 缺证书 / 端口起不来：自检拿不到真值，记 SKIP。
+        # 归 FAIL 会让这类环境里回归一直红，最后被人加 || true 关掉。
+        echo "  [SKIP] $(grep -E '^\[SKIP\]' /data/ma_selftest.log | head -1 | sed 's/^\[SKIP\] //')"
+        skipped=$((skipped + 1))
     else
         echo "  [FAIL] Python runner 判定标记守卫失效（崩溃被记成捕获）"
         grep -E '^\[BAD\]|^\[FAIL\]' /data/ma_selftest.log | sed 's/^/         /'
