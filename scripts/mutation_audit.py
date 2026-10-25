@@ -189,6 +189,51 @@ MUTATIONS = [
                  "python3 scripts/gen_cke_struct.py --check"],
     },
     {
+        # 这两个变异针对【Python 守卫自身】。
+        #
+        # 为什么必须登记：check_gen_dedup.py 与 check_secret_cmp.py 是仓库里
+        # 唯二没有测试的 Python 守卫 —— C 侧每条断言都有变异盯着，它们没有。
+        # 于是唯一的失效模式无人看管：
+        #
+        #     守卫自己被改坏 -> 恒返回"通过" -> 报告一片全绿 -> 无人察觉。
+        #
+        # 这和 C 侧"测试假设掩盖缺陷"同类，只是更隐蔽：守卫的价值恰恰在于
+        # "在正确的时候变红"，而恒绿守卫看起来和健康守卫一模一样。
+        #
+        # 检测者是 scripts/check_guards.py（元守卫），它跑正反双向：
+        # 合规 fixture 必须 PASS、违规 fixture 必须 FAIL。只验一侧的话，
+        # "恒绿"或"恒红"其中一个仍能溜过去。
+        "id": "M31",
+        "desc": "scripts: 去重守卫恒绿（重复实现被复制回去也不再报错）",
+        "file": "scripts/check_gen_dedup.py",
+        "old": "    if bad:\n        print(\"[FAIL] 探测基础设施出现重复实现\")",
+        "new": "    if False:\n        print(\"[FAIL] 探测基础设施出现重复实现\")",
+        "lang": "py",
+        "cmds": ["python3 scripts/check_guards.py"],
+    },
+    {
+        "id": "M32",
+        "desc": "scripts: 秘密比较守卫恒绿（未分类/SECRET 调用点都不再报错）",
+        "file": "scripts/check_secret_cmp.py",
+        "old": "    if banned or unknown or annot_bad or annot_miss or orph:",
+        "new": "    if False:",
+        "lang": "py",
+        "cmds": ["python3 scripts/check_guards.py"],
+    },
+    {
+        # 与 M32 方向不同：M32 是"整个判定被短路"，M33 是"SECRET 这一类不再
+        # 被认出来"。后者更接近真实编码错误 —— 改坏的人不会写 if False，
+        # 只会让某个条件不再成立。危害也更隐蔽：判为 SECRET 的调用点会退化
+        # 成"已分类但不是秘密"，守卫从"拦下秘密比较"退化成"什么都不拦"。
+        "id": "M33",
+        "desc": "scripts: SECRET 分类不再被识别（秘密比较点被当成普通已分类放过）",
+        "file": "scripts/check_secret_cmp.py",
+        "old": "        elif cls(allow[key]) == BANNED:",
+        "new": "        elif False:",
+        "lang": "py",
+        "cmds": ["python3 scripts/check_guards.py"],
+    },
+    {
         "id": "M3",
         "desc": "20_packer: 入口 nop 垫恒为 0（首字节变回跨构建恒定签名）",
         "file": "20_packer/src/poly.c",

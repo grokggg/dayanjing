@@ -206,7 +206,22 @@ def scan():
 
 
 def main():
-    args = sys.argv[1:]
+    global ROOT, ALLOW
+    argv = sys.argv[1:]
+    # --root <dir> / --allow <json>：把扫描根与判据表参数化，供 fixture 复用。
+    # 默认行为与加参数前逐字相同（不传即走仓库根与 scripts/secret_cmp_allow.json）。
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--root", "--allow") and i + 1 < len(argv):
+            if a == "--root":
+                ROOT = os.path.abspath(argv[i + 1])
+            else:
+                ALLOW = os.path.abspath(argv[i + 1])
+            i += 2
+            continue
+        break
+    args = argv[i:]
     sites = scan()
     try:
         allow = json.load(open(ALLOW, encoding="utf-8"))

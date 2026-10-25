@@ -48,17 +48,42 @@ def imported_modules(path):
     return out
 
 
-def main():
+def parse_args(argv):
+    """--dir <path>：改为检查指定目录（fixture 用），默认 scripts/。"""
+    out = {"dir": None}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--dir" and i + 1 < len(argv):
+            out["dir"] = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--dir="):
+            out["dir"] = a.split("=", 1)[1]
+            i += 1
+            continue
+        print("[FATAL] 未知参数: %s" % a)
+        return None
+    return out
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    a = parse_args(argv)
+    if a is None:
+        return 2
+    SDIR = a["dir"] if a["dir"] else os.path.join(ROOT, "scripts")
+
     bad = []
 
-    sp = os.path.join(ROOT, "scripts", SHARED)
+    sp = os.path.join(SDIR, SHARED)
     have = top_defs(sp)
     for f in MUST_BE_SHARED:
         if f not in have:
             bad.append("%s 缺少 %s —— 公共模块不该被削薄" % (SHARED, f))
 
     for g in GENERATORS:
-        gp = os.path.join(ROOT, "scripts", g)
+        gp = os.path.join(SDIR, g)
         if not os.path.exists(gp):
             bad.append("%s 不存在" % g)
             continue

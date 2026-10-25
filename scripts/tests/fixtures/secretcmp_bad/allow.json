@@ -1,0 +1,3 @@
+{
+  "src/a.c|return memcmp(a, \"MAGIC\", 5);": "SECRET"
+}
