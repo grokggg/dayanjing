@@ -234,6 +234,30 @@ MUTATIONS = [
         "cmds": ["python3 scripts/check_guards.py"],
     },
     {
+        # 为什么必须登记：persist_linux_ensure 的返回值语义被修过 —— 旧写法
+        #     return (newly > 0) ? 0 : -1;
+        # 会把"sshkey 因未注入真实公钥而装不上"当成整体失败。于是 systemd
+        # + cron 已真实落位的机器被报成 -1，常驻进程据此拒绝运行：明明驻留
+        # 成功，却因为一个**本就可选**的机制而退出。
+        #
+        # 更险的是这段逻辑此前**零覆盖**：既有 test_persist.c 在开头就用
+        # persist_sshkey_pubkey 注入了真实公钥，三项全能装上，ensure 在
+        #     if (already == (int)nms) return 1;
+        # 处即返回，永远走不到后续判定 —— 把逻辑改回缺陷写法，那 54 项断言
+        # 依然全绿（实测确认）。故守护者是新建的 test_persist_partial：
+        # 全程不注入公钥，刻意让 sshkey 装不上，从而进入该分支。
+        #
+        # 能区分新旧写法的唯一状态是"第二次 ensure"（already=2 < nms=3 且
+        # newly=0）：旧写法 -1、新写法 1。
+        "id": "M34",
+        "desc": "09_persistence: 驻留部分成功被判失败（已驻留却返回 -1，常驻进程退出）",
+        "file": "09_persistence/src/persist.c",
+        "old": "    int total = 0;\n    for (size_t i = 0; i < nms; i++)\n        if (persist_installed(root_prefix, ms[i]) == 1) total++;\n\n    if (total == 0) return -1;\n    return (newly > 0) ? 0 : 1;",
+        "new": "    return (newly > 0) ? 0 : -1;",
+        "mod": "09_persistence",
+        "bin": "build/test_persist_partial",
+    },
+    {
         "id": "M3",
         "desc": "20_packer: 入口 nop 垫恒为 0（首字节变回跨构建恒定签名）",
         "file": "20_packer/src/poly.c",
