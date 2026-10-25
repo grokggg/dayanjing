@@ -35,6 +35,8 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tls_truth
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REAL_H = os.path.join(ROOT, "25_tls", "tests", "hs_msgs_real.h")
 DST = os.path.join(ROOT, "25_tls", "tests", "cke_struct.h")
@@ -149,172 +151,21 @@ def build_cases(ch, cke):
 # ---------------------------------------------------------------------------
 # 用真实 OpenSSL s_server 逐例测真值
 # ---------------------------------------------------------------------------
+#
+# 探测基础设施在 scripts/tls_truth.py，与 gen_ch_struct.py 共用（抽取原因
+# 见那里的说明：两份实现此前逐字复制，改一处漏另一处会产生两套口径，而
+# 固化进头文件的期望值不会暴露这个分叉）。
+#
+# CKE 侧的输入约定：只发 CH + CKE，与喂给我们服务端的字节完全一样。早先
+# 版本多发了一条 CCS + 垃圾 Finished，想靠告警码区分「已接受」，结果两边
+# 输入不对称 —— OpenSSL 因为收到后续字节才补齐记录并解析，我们这边却直接
+# EOF，同一用例两边根本不在比同一件事。对称比判据精致更重要。
+#
+# 也正因如此，判定只看「有没有告警」：不再细分 desc==20（bad_record_mac）
+# 之类。我们的服务端在 Finished 解密失败时发的是 decode_error 而不是
+# bad_record_mac，细分反而制造分歧。
+CKE_READ_TIMEOUT = 2.0
 
-def port_free(port):
-    """这个端口上有没有别的监听者。
-
-    若端口被上一次被强杀留下的 s_server 占着，连接会立刻成功，我们就把
-    报文发给了一个【不属于本次探测】的服务端，拿它的反应当真值。两个监听
-    者不能共存于同一 addr:port（SO_REUSEADDR 也不允许），所以「能不能
-    bind」正好等价于「有没有别的监听者」。
-    """
-    s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.bind(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-def next_free_port(start, window=512):
-    """从 start 起找第一个没有监听者的端口。"""
-    for i in range(window):
-        p = start + i
-        if p > 65535:
-            break
-        if port_free(p):
-            return p
-    return None
-
-
-def probe_openssl_retry(stream, base_port, tries=8):
-    """端口被占就换一个再测。
-
-    这里最要紧的不是「能不能测出真值」，而是【测不出来时绝不能落进头文件】。
-    早期版本 probe 返回 None 时，调用点用 .get(r, ANY) 把它映射成了
-    EXPECT_ANY 并继续生成——于是端口冲突被永久写成了「本例不做断言」，
-    一条真实分歧就此消失，且没有任何报错。
-
-    先扫描出空闲端口再起 s_server，而不是盲目 +1：每次试错都要等 s_server
-    bind 失败并退出，代价远高于一次 bind 探测。
-    """
-    port = base_port
-    for _ in range(tries):
-        port = next_free_port(port)
-        if port is None:
-            return None
-        v = probe_openssl(stream, port)
-        if v is not None:
-            return v
-        port += 1
-    return None
-
-
-def probe_openssl(stream, port):
-    """测出真实 OpenSSL 对这条 CKE 的判定。
-
-    判据为什么不是「有没有告警」：
-        只发 CH+CKE 就停下，OpenSSL 在 CKE 合法时会静默等 Finished —— 不发
-        告警。而 CKE 非法时它同样可能因为「记录还没收齐」而静默等待。两者
-        都不发告警，用二值判据会把「卡住」记成「接受」。
-
-    所以多发两步：CCS + 一条随机 Finished。
-        * 走到 Finished 才失败 -> bad_record_mac(20)，说明 CKE 已被解析并
-          接受，密钥派生也走通了（只是我们给的 Finished 是垃圾）
-        * 在那之前就失败    -> 别的告警码，说明 CKE 解析这一步就出了问题
-        * 完全无告警        -> 连记录层都没收齐，本例给不出结论（UNKNOWN）
-
-    返回 "TOLERATE" / "REJECT" / "UNKNOWN"。
-    """
-    # CCS 记录 + 一条随机 Finished（加密态下必然解不开）
-    #
-    # 长度必须够 GCM 的开销：显式 nonce 8 + 密文 + tag 16。早先版本只发
-    # 16 字节，OpenSSL 直接报 internal_error(80)「invalid aad」—— 那是
-    # 记录层长度不合法，根本没走到解密，于是「CKE 已接受」这个信号被
-    # 错误地判成了 REJECT。
-    cmd = ["openssl", "s_server", "-accept", str(port),
-           "-cert", os.path.join(DATA, "leaf.pem"),
-           "-key", os.path.join(DATA, "leaf.key"),
-           "-tls1_2", "-cipher", "ECDHE-RSA-AES128-GCM-SHA256",
-           "-curves", "X25519", "-no_dhe", "-quiet", "-naccept", "1"]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
-    try:
-        # 等监听就绪
-        s = None
-        for _ in range(60):
-            # s_server 自己退出 = bind 失败或参数不可用，不能拿「连不上」
-            # 冒充真值，交给上层换端口重试。
-            if p.poll() is not None:
-                return None
-            try:
-                s = socket.create_connection(("127.0.0.1", port), 0.5)
-                break
-            except OSError:
-                time.sleep(0.05)
-        if s is None:
-            return None
-        s.settimeout(1.5)
-        try:
-            # 只发 CH + CKE，与喂给我们服务端的字节完全一样。
-            # 早先版本多发了一条 CCS + 垃圾 Finished，想靠告警码区分「已
-            # 接受」，结果两边输入不对称：OpenSSL 因为收到了后续字节才补齐
-            # 记录并解析，我们这边却直接 EOF —— 同一用例两边根本不在比
-            # 同一件事。对称比判据精致更重要。
-            s.sendall(stream)
-        except OSError:
-            return "UNKNOWN"
-        buf = b""
-        t0 = time.time()
-        while time.time() - t0 < 2.0:
-            try:
-                d = s.recv(65536)
-                if not d:
-                    break
-                buf += d
-            except socket.timeout:
-                break
-            except OSError:
-                break
-        s.close()
-    finally:
-        try:
-            os.killpg(os.getpgid(p.pid), 9)
-        except OSError:
-            pass
-        try:
-            p.wait(2)
-        except Exception:
-            pass
-
-    # 解析记录，找告警
-    off = 0
-    saw_hs = False
-    while off + 5 <= len(buf):
-        ct = buf[off]
-        ln = struct.unpack(">H", buf[off + 3:off + 5])[0]
-        body = buf[off + 5:off + 5 + ln]
-        if ct == 21 and ln >= 2:
-            # 服务端主动发了告警 —— 它对这条 CKE 的表态是「拒绝」。
-            # 不再细分告警码：有 tail 的那版想靠 desc==20 判断「已接受」，
-            # 但那需要两边输入一致，而我们的服务端在 Finished 解密失败时
-            # 发的是 decode_error 不是 bad_record_mac，细分反而制造分歧。
-            return "REJECT"
-        if ct == 22:
-            saw_hs = True
-        off += 5 + ln
-    if not saw_hs:
-        return "UNKNOWN"   # 服务端根本没响应，给不出结论
-    # 收到了服务端的握手消息、且没发告警 —— 它吃下了这条 CKE，正在等 CCS
-    return "TOLERATE"
-
-
-def openssl_available():
-    """真值探测的前置条件（与 gen_ch_struct.py 同源，口径必须一致）。"""
-    try:
-        v = subprocess.run(["openssl", "version"], capture_output=True,
-                           text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return False, "openssl 不可用"
-    if v.returncode != 0:
-        return False, "openssl version 返回 %d" % v.returncode
-    for f in ("leaf.pem", "leaf.key"):
-        if not os.path.exists(os.path.join(DATA, f)):
-            return False, "缺少证书文件 %s" % f
-    return True, v.stdout.strip()
 
 
 def frozen_expects(text):
@@ -330,7 +181,7 @@ def main():
     argv = sys.argv[1:]
     check = "--check" in argv
     if check:
-        ok, why = openssl_available()
+        ok, why = tls_truth.openssl_available()
         if not ok:
             print("[SKIP] 真值漂移检查未执行：%s" % why)
             print("[SKIP] 已固化期望值未经验证 —— 不等于它们仍然正确")
@@ -352,7 +203,8 @@ def main():
         if only == "no-probe":
             exp = ANY
         else:
-            r = probe_openssl_retry(c["stream"], port)
+            r = tls_truth.probe_openssl_retry(c["stream"], port,
+                                              CKE_READ_TIMEOUT)
             port += 1
             if r is None:
                 # 早期版本走到这里会落成 ANY 并继续生成，把「测不出来」

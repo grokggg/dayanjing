@@ -32,6 +32,8 @@ import struct
 import subprocess
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tls_truth
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "25_tls", "tests", "data")
 SRC = os.path.join(ROOT, "25_tls", "tests", "clienthello_default.h")
@@ -156,138 +158,23 @@ def dup_exts(p, t, newbody=None):
 # 用真实 OpenSSL s_server 逐例测真值
 # ---------------------------------------------------------------------------
 #
-# 为什么必须有这一段：本文件早先的 47 例期望值全是手写的，注释里写着
+# 探测基础设施（起 s_server / 换端口重试 / 记录层判定）在 scripts/tls_truth.py，
+# 与 gen_cke_struct.py 共用。两份实现此前是逐字复制的，改一处漏另一处会让
+# 同一套真值体系里出现两套口径，而固化进头文件的期望值不会暴露这个分叉 ——
+# 它只会表现为"某个用例的期望值和另一组不一致"，那时没人知道该信哪个。
+#
+# 为什么必须有真值探测：本文件早先的 47 例期望值全是手写的，注释里写着
 # 「OpenSSL 实测拒绝」的其实一条也没测过。手写的后果在 C10_hs_len_plus10
-# 上暴露：握手体声明长度 +10，OpenSSL 其实是在等剩余字节、并不发告警，
-# 而手写的期望写成了 REJECT —— 于是我们把一个「两边完全一致」的行为
-# 记成了缺陷。
+# 上暴露：握手体声明长度 +10，OpenSSL 其实是在等剩余字节、并不发告警，而
+# 手写的期望写成了 REJECT —— 于是把一个「两边完全一致」的行为记成了缺陷。
 #
-# 判据（与 gen_cke_struct.py 同源）：
-#   收到 ct==21   -> REJECT（服务端明确表态）
-#   收到 ct==22   -> TOLERATE（吃下了，正在等后续）
-#   什么都没收到  -> UNKNOWN（给不出结论，绝不猜成拒绝）
+# CH 侧的输入约定：只发这一条 ClientHello，不多发。不对称的输入会让两边
+# 不在比同一件事（这个坑在 CKE 那版犯过一次）。
 #
-# 输入必须与喂给我们服务端的一模一样：只发这条 ClientHello，不多发。
-# 不对称的输入会让两边不在比同一件事（这个坑在 CKE 那版犯过一次）。
+# 收响应窗口单独保留：改它会让已固化的 47 例期望值整体漂移，而那种漂移
+# 看起来像一下子发现了 47 个新缺陷。
+CH_READ_TIMEOUT = 1.5
 
-
-def _classify(buf):
-    off = 0
-    saw_hs = False
-    while off + 5 <= len(buf):
-        ct = buf[off]
-        ln = struct.unpack(">H", buf[off + 3:off + 5])[0]
-        if ct == 21 and ln >= 2:
-            return "REJECT"
-        if ct == 22:
-            saw_hs = True
-        off += 5 + ln
-    return "TOLERATE" if saw_hs else "UNKNOWN"
-
-
-def port_free(port):
-    """这个端口上有没有别的监听者。
-
-    为什么不能只靠「连得上就算就绪」：
-        若端口被上一次被强杀留下的 s_server 占着，连接会立刻成功，我们
-        就把报文发给了一个【不属于本次探测】的服务端，拿它的反应当真值。
-        而两个监听者不能共存于同一 addr:port（SO_REUSEADDR 也不允许），
-        所以「能不能 bind」正好等价于「有没有别的监听者」。
-    """
-    s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.bind(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-def next_free_port(start, window=512):
-    """从 start 起找第一个没有监听者的端口。"""
-    for i in range(window):
-        p = start + i
-        if p > 65535:
-            break
-        if port_free(p):
-            return p
-    return None
-
-
-def probe_openssl_retry(blob, base_port, tries=8):
-    """端口被占就换一个再测，而不是把「起不来」当成真值。
-
-    早期版本端口是固定的，一旦被占（并发跑回归、上一次被强杀留下的残留
-    进程），probe 返回 None，上层把它当成 FATAL 报出去——于是「端口冲突」
-    和「真值漂移」在回归报告里长得一模一样，两种截然不同的故障被混为一谈。
-
-    先扫描出空闲端口再起 s_server，而不是盲目 +1 去试：每次试错都要等
-    s_server bind 失败并退出，代价远高于一次 bind 探测。端口连续被占一段
-    （并发回归各占一片）时，盲试很快就耗尽次数。
-    """
-    port = base_port
-    for _ in range(tries):
-        port = next_free_port(port)
-        if port is None:
-            return None
-        v = probe_openssl(blob, port)
-        if v is not None:
-            return v
-        port += 1
-    return None
-
-
-def probe_openssl(blob, port):
-    cmd = ["openssl", "s_server", "-accept", str(port),
-           "-cert", os.path.join(DATA, "leaf.pem"),
-           "-key", os.path.join(DATA, "leaf.key"),
-           "-tls1_2", "-cipher", "ECDHE-RSA-AES128-GCM-SHA256",
-           "-curves", "X25519", "-no_dhe", "-quiet", "-naccept", "1"]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
-    try:
-        s = None
-        for _ in range(60):
-            # s_server 自己退出了 —— 多半是 bind 失败（端口被占），也可能是
-            # 证书/套件不可用。任何一种都不能拿「连不上」冒充真值，交给上层
-            # 换端口重试。
-            if p.poll() is not None:
-                return None
-            try:
-                s = socket.create_connection(("127.0.0.1", port), 0.5)
-                break
-            except OSError:
-                time.sleep(0.05)
-        if s is None:
-            return None
-        s.settimeout(1.5)
-        try:
-            s.sendall(blob)
-        except OSError:
-            return "UNKNOWN"
-        buf = b""
-        t0 = time.time()
-        while time.time() - t0 < 1.5:
-            try:
-                d = s.recv(65536)
-                if not d:
-                    break
-                buf += d
-            except (socket.timeout, OSError):
-                break
-        s.close()
-    finally:
-        try:
-            os.killpg(os.getpgid(p.pid), 9)
-        except OSError:
-            pass
-        try:
-            p.wait(2)
-        except Exception:
-            pass
-    return _classify(buf)
 
 
 def cases(p):
@@ -529,27 +416,6 @@ def emit(C):
     return "\n".join(L) + "\n"
 
 
-def openssl_available():
-    """真值探测的前置条件。缺 openssl 或证书时返回 (False, 原因)。
-
-    为什么单独拎出来：--check 要能区分「真值漂移」与「测不了」。
-    若把两者都归为失败，无 openssl 的环境里回归会一直红，最后被人
-    加个 || true 关掉；若都归为通过，就等于什么都没验。所以让调用方
-    拿到明确原因，自己决定记 SKIP 还是 FAIL。
-    """
-    try:
-        v = subprocess.run(["openssl", "version"], capture_output=True,
-                           text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return False, "openssl 不可用"
-    if v.returncode != 0:
-        return False, "openssl version 返回 %d" % v.returncode
-    for f in ("leaf.pem", "leaf.key"):
-        if not os.path.exists(os.path.join(DATA, f)):
-            return False, "缺少证书文件 %s" % f
-    return True, v.stdout.strip()
-
-
 def frozen_expects(text):
     """从已固化的头文件里抽出 {用例名: expect}，用于漂移时点名。"""
     out = {}
@@ -567,7 +433,7 @@ def main():
         raise SystemExit("[FATAL] --check 与 --no-measure 互斥："
                          "不测真值的比对没有意义（比的是两份手写值）")
     if check:
-        ok, why = openssl_available()
+        ok, why = tls_truth.openssl_available()
         if not ok:
             print("[SKIP] 真值漂移检查未执行：%s" % why)
             print("[SKIP] 已固化期望值未经验证 —— 不等于它们仍然正确")
@@ -581,7 +447,8 @@ def main():
         port = 19400 + (os.getpid() % 300)
         verdict = {}
         for i, (nm, blob, _exp, _why) in enumerate(C):
-            v = probe_openssl_retry(blob, port)
+            v = tls_truth.probe_openssl_retry(blob, port,
+                                              CH_READ_TIMEOUT)
             if v is None:
                 raise SystemExit(
                     "[FATAL] s_server 起不来（第 %d 例 %s，已重试换端口）。"
