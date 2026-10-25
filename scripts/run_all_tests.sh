@@ -347,6 +347,9 @@ for g in gen_ch_struct gen_cke_struct; do
             skipped=$((skipped + 1))
         else
             echo "  [FAIL] 真值已漂移或检查失败（见 /tmp/$g.log）"
+            # 区分两种故障：「起不来」（环境/端口问题）与「真值漂移」（真缺陷）。
+            # 不区分的话，一次端口冲突会被当成产品缺陷去查。
+            grep -E "^\[FATAL\]" /tmp/$g.log | sed 's/^/         [环境] /'
             grep -E "^\[FAIL\]|^       " /tmp/$g.log | sed 's/^/         /'
             failed=$((failed + 1))
         fi

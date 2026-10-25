@@ -150,6 +150,59 @@ def build_cases(ch, cke):
 # 用真实 OpenSSL s_server 逐例测真值
 # ---------------------------------------------------------------------------
 
+def port_free(port):
+    """这个端口上有没有别的监听者。
+
+    若端口被上一次被强杀留下的 s_server 占着，连接会立刻成功，我们就把
+    报文发给了一个【不属于本次探测】的服务端，拿它的反应当真值。两个监听
+    者不能共存于同一 addr:port（SO_REUSEADDR 也不允许），所以「能不能
+    bind」正好等价于「有没有别的监听者」。
+    """
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def next_free_port(start, window=512):
+    """从 start 起找第一个没有监听者的端口。"""
+    for i in range(window):
+        p = start + i
+        if p > 65535:
+            break
+        if port_free(p):
+            return p
+    return None
+
+
+def probe_openssl_retry(stream, base_port, tries=8):
+    """端口被占就换一个再测。
+
+    这里最要紧的不是「能不能测出真值」，而是【测不出来时绝不能落进头文件】。
+    早期版本 probe 返回 None 时，调用点用 .get(r, ANY) 把它映射成了
+    EXPECT_ANY 并继续生成——于是端口冲突被永久写成了「本例不做断言」，
+    一条真实分歧就此消失，且没有任何报错。
+
+    先扫描出空闲端口再起 s_server，而不是盲目 +1：每次试错都要等 s_server
+    bind 失败并退出，代价远高于一次 bind 探测。
+    """
+    port = base_port
+    for _ in range(tries):
+        port = next_free_port(port)
+        if port is None:
+            return None
+        v = probe_openssl(stream, port)
+        if v is not None:
+            return v
+        port += 1
+    return None
+
+
 def probe_openssl(stream, port):
     """测出真实 OpenSSL 对这条 CKE 的判定。
 
@@ -183,6 +236,10 @@ def probe_openssl(stream, port):
         # 等监听就绪
         s = None
         for _ in range(60):
+            # s_server 自己退出 = bind 失败或参数不可用，不能拿「连不上」
+            # 冒充真值，交给上层换端口重试。
+            if p.poll() is not None:
+                return None
             try:
                 s = socket.create_connection(("127.0.0.1", port), 0.5)
                 break
@@ -295,8 +352,16 @@ def main():
         if only == "no-probe":
             exp = ANY
         else:
-            r = probe_openssl(c["stream"], port)
+            r = probe_openssl_retry(c["stream"], port)
             port += 1
+            if r is None:
+                # 早期版本走到这里会落成 ANY 并继续生成，把「测不出来」
+                # 永久写进头文件。测不出真值就必须停下来。
+                raise SystemExit(
+                    "[FATAL] s_server 起不来（%s，已重试换端口）。没有真值就"
+                    "不许写 ANY —— 那会把一条真实分歧永久抹掉。"
+                    "确认 openssl 与证书可用、端口未被长期占用后重跑。"
+                    % c["name"])
             # probe 返回的是语义字符串，必须显式映射成头文件里的常量。
             # 早期版本直接存了布尔值，导致「拒绝」被写成 TOLERATE、
             # 全部期望值反向 —— 教训：跨表示的赋值必须显式转换。

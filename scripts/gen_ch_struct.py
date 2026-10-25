@@ -185,6 +185,60 @@ def _classify(buf):
     return "TOLERATE" if saw_hs else "UNKNOWN"
 
 
+def port_free(port):
+    """这个端口上有没有别的监听者。
+
+    为什么不能只靠「连得上就算就绪」：
+        若端口被上一次被强杀留下的 s_server 占着，连接会立刻成功，我们
+        就把报文发给了一个【不属于本次探测】的服务端，拿它的反应当真值。
+        而两个监听者不能共存于同一 addr:port（SO_REUSEADDR 也不允许），
+        所以「能不能 bind」正好等价于「有没有别的监听者」。
+    """
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def next_free_port(start, window=512):
+    """从 start 起找第一个没有监听者的端口。"""
+    for i in range(window):
+        p = start + i
+        if p > 65535:
+            break
+        if port_free(p):
+            return p
+    return None
+
+
+def probe_openssl_retry(blob, base_port, tries=8):
+    """端口被占就换一个再测，而不是把「起不来」当成真值。
+
+    早期版本端口是固定的，一旦被占（并发跑回归、上一次被强杀留下的残留
+    进程），probe 返回 None，上层把它当成 FATAL 报出去——于是「端口冲突」
+    和「真值漂移」在回归报告里长得一模一样，两种截然不同的故障被混为一谈。
+
+    先扫描出空闲端口再起 s_server，而不是盲目 +1 去试：每次试错都要等
+    s_server bind 失败并退出，代价远高于一次 bind 探测。端口连续被占一段
+    （并发回归各占一片）时，盲试很快就耗尽次数。
+    """
+    port = base_port
+    for _ in range(tries):
+        port = next_free_port(port)
+        if port is None:
+            return None
+        v = probe_openssl(blob, port)
+        if v is not None:
+            return v
+        port += 1
+    return None
+
+
 def probe_openssl(blob, port):
     cmd = ["openssl", "s_server", "-accept", str(port),
            "-cert", os.path.join(DATA, "leaf.pem"),
@@ -196,6 +250,11 @@ def probe_openssl(blob, port):
     try:
         s = None
         for _ in range(60):
+            # s_server 自己退出了 —— 多半是 bind 失败（端口被占），也可能是
+            # 证书/套件不可用。任何一种都不能拿「连不上」冒充真值，交给上层
+            # 换端口重试。
+            if p.poll() is not None:
+                return None
             try:
                 s = socket.create_connection(("127.0.0.1", port), 0.5)
                 break
@@ -522,12 +581,12 @@ def main():
         port = 19400 + (os.getpid() % 300)
         verdict = {}
         for i, (nm, blob, _exp, _why) in enumerate(C):
-            v = probe_openssl(blob, port)
+            v = probe_openssl_retry(blob, port)
             if v is None:
                 raise SystemExit(
-                    "[FATAL] s_server 起不来（第 %d 例 %s）。"
+                    "[FATAL] s_server 起不来（第 %d 例 %s，已重试换端口）。"
                     "没有真值就不许沿用手写期望 —— 那正是本轮要修的毛病。"
-                    "确认 openssl 与证书可用后重跑。" % (i, nm))
+                    "确认 openssl 与证书可用、端口未被长期占用后重跑。" % (i, nm))
             verdict[nm] = v
         M = {"TOLERATE": EXPECT_TOLERATE,
              "REJECT": EXPECT_REJECT,
