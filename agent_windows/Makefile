@@ -98,6 +98,22 @@ TEST_BINS := $(TESTS:%=$(BUILD)/%)
 # 显式调用 winshim-build 来构建。声明给审计脚本，避免被判为"默认目标漏构建"。
 AUDIT_GOALS := winshim-build
 
+# 默认目标必须显式钉为 all。
+#
+# GNU make 的默认目标是「文件中第一个不以 '.' 开头、且非模式规则的目标」。
+# upstream-deps 这个 phony 目标定义在 all 之前（它只作为 test_cam_daemon 的
+# order-only 前置），于是裸 `make` 的默认目标一直是 upstream-deps：只确保上游
+# 模块已构建，**一个测试二进制都不产出，而退出码仍是 0**。
+#
+# 危害与 26_lateral_auto / 08_lateral / 14_p2p 那一类同源：回归脚本先 `make`
+# 再扫 build/ 下的 test_*，裸 make 什么都不建时，扫到的都是上一次显式构建
+# 留下的旧二进制——源码改了、报告照样全绿。实测：清空 build/linux 后跑裸 make，
+# 产出 0 个 test_*，rc=0。
+#
+# 用 .DEFAULT_GOAL 而不是把 all 挪到前面：后者依赖「规则定义的先后顺序」这一
+# 隐式约定，将来任何人再往上插一个 phony 目标就会重新踩坑。
+.DEFAULT_GOAL := all
+
 .PHONY: all test clean win dirs
 
 all: $(TEST_BINS)
