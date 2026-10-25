@@ -841,6 +841,14 @@ def run_one(m):
 # check_guards.py 正常跑完必然打印其中之一。变异可用 "markers" 覆盖。
 PY_VERDICT_MARKERS = ("[PASS]", "[FAIL]", "[FATAL]")
 
+# 基线对照的重试次数与间隔。
+#
+# 1 次重试即可区分"偶发"与"确实不具备"：端口被占这类瞬态故障通常撑不过
+# 一次完整重跑（每次约 40s），而真正不具备条件时重试多少次都是同一个码。
+# 定得更大只会线性拉长审计耗时，换不来新的判别力。
+BASELINE_RETRIES = 1
+BASELINE_RETRY_SLEEP = 2.0
+
 
 def run_one_py(m):
     """Python 侧变异：无构建步骤、无二进制，判定靠命令的退出码与输出。
@@ -903,11 +911,16 @@ def run_one_py(m):
                 #
                 # 不做对照就一律记"环境"，M28 这类缺陷会被误记成【审计
                 # 失效】—— 明明已覆盖的缺陷，被报成没覆盖，方向正好相反。
-                brc = _baseline_rc(path, bak, cmd, m.get("timeout", 300))
+                brc, bcodes = _baseline_rc(path, bak, cmd,
+                                           m.get("timeout", 300))
                 if _env_code_of(brc):
                     return (m["id"], "ERROR",
-                            "环境原因未验证（退出码 %d，基线同为 %d）：%s"
-                            % (trc, brc, cmd), trc)
+                            "环境原因未验证（退出码 %d，基线 %d 次尝试均为"
+                            " %s）：%s" % (trc, len(bcodes), bcodes, cmd), trc)
+                if len(bcodes) > 1:
+                    print("[WARN] %s 基线首次 %s、重试后 %d —— 首次失败为偶"
+                          "发，按基线可用处理"
+                          % (m["id"], bcodes[0], brc))
                 mk = tuple(m.get("markers", PY_VERDICT_MARKERS))
                 if not any(x in tout for x in mk):
                     return (m["id"], "ERROR",
@@ -916,8 +929,10 @@ def run_one_py(m):
                 bad = [l for l in tout.splitlines()
                        if "FAIL" in l or "FATAL" in l]
                 return (m["id"], "CAUGHT",
-                        "基线正常(rc=0)，变异下拒绝推进(rc=%d)：%s"
-                        % (trc, bad[0][:80].strip() if bad else cmd))
+                        "基线可用(%d 次尝试，末次 rc=0)，变异下拒绝推进"
+                        "(rc=%d)：%s"
+                        % (len(bcodes), trc,
+                           bad[0][:80].strip() if bad else cmd))
             if not tout.strip():
                 return (m["id"], "HANG", "命令零输出：%s" % cmd)
 
@@ -960,19 +975,37 @@ def run_one_py(m):
         _purge_pycache(path)
 
 
-def _baseline_rc(path, bak, cmd, timeout):
+def _baseline_rc(path, bak, cmd, timeout, retries=BASELINE_RETRIES):
     """在未变异状态下跑同一条命令，作为环境类退出码的对照组。
 
     为什么必须当场跑而不是缓存：环境会中途劣化（端口被别的进程占走）。
     用早先缓存的"基线正常"去定性现在的 78，会把一次真实的环境故障判成
     "变异让工具拒绝推进"，虚报一条捕获。
 
-    代价：只在真正撞上 77/78 时才付这一次命令开销，正常路径零成本。
+    为什么基线失败要重试：基线只跑一次时，一次【偶发】失败（端口恰好
+    在那一秒被别的进程占住）会让整条判据翻转 —— 明明是变异让工具拒绝
+    推进，却被记成"环境原因未验证"，把一条已覆盖的缺陷降级成没覆盖。
+    这与不做对照时 M28 被误记成审计失效是同一类误判，方向相反但都要防。
+
+    重试不改变"两次都不行才算环境"的语义：只有连续 attempts 次全部落到
+    环境码，才认定这台机器/这次跑不具备条件。只要有一次基线跑通，就说明
+    环境是好的，78 来自变异本身。
+
+    返回 (rc, 各次尝试的退出码列表)，调用方据此判断是否偶发。
     """
-    shutil.copy2(bak, path)
-    _purge_pycache(path)
-    rc, _out = sh(cmd, ROOT, timeout)
-    return rc
+    codes = []
+    attempt = 0
+    while True:
+        shutil.copy2(bak, path)
+        _purge_pycache(path)
+        rc, _out = sh(cmd, ROOT, timeout)
+        codes.append(rc)
+        if not _env_code_of(rc) or attempt >= retries:
+            return (rc, codes)
+        attempt += 1
+        print("[WARN] 基线第 %d 次退出 %d，%gs 后重试（偶发环境故障会误判"
+              "为未验证）" % (attempt, rc, BASELINE_RETRY_SLEEP))
+        time.sleep(BASELINE_RETRY_SLEEP)
 
 
 def _purge_pycache(path):
