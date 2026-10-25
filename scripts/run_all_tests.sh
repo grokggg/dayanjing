@@ -404,6 +404,31 @@ if [ -f "$ROOT/scripts/check_guards.py" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Python runner 判定标记守卫的自检。
+#
+# 守护的是变异审计【报告里每一个 CAUGHT 的含义】。退出码非零不等于抓到了
+# 缺陷：生成器或守卫自己崩溃时同样 rc=1，与"真漂移/真违规"在退出码上完全
+# 一样。不区分的话，报告显示一片 CAUGHT，读起来像所有缺陷都有防回归，实际
+# 其中一部分只是工具崩了 —— M28~M30 此前就混着这一类。
+#
+# 不能靠一条普通变异条目来锁：CAUGHT 在归类时被直接跳过、永远不计入失败，
+# 所以守卫退化会被 CAUGHT 静默接受。故用独立子命令直接断言状态字。
+# ---------------------------------------------------------------------------
+if [ -f "$ROOT/scripts/mutation_audit.py" ]; then
+    echo "=== mutation_audit selftest-py（崩溃不得算作捕获） ==="
+    python3 "$ROOT/scripts/mutation_audit.py" selftest-py > /data/ma_selftest.log 2>&1
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "  [PASS] $(grep -E '^\[PASS\]' /data/ma_selftest.log | sed 's/^\[PASS\] //')"
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] Python runner 判定标记守卫失效（崩溃被记成捕获）"
+        grep -E '^\[BAD\]|^\[FAIL\]' /data/ma_selftest.log | sed 's/^/         /'
+        failed=$((failed + 1))
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 构建契约审计：每个模块声明的测试二进制，是否都会被回归实际调用的目标构建。
 #
 # 这一层守护的是上面所有数字的【可信度】。回归先 `make` 再执行 build/ 下的

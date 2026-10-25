@@ -617,6 +617,44 @@ def count_cond_jumps(binpath, symbol):
     return n
 
 
+def selftest_py():
+    """永久钉死"命令崩溃不得算作捕获"这条判据。
+
+    为什么不能用一条普通变异条目来锁：
+
+        CAUGHT 在归类时被直接 continue，永远不计入失败（见 main 的注释）。
+        所以即便登记一条"崩溃型"变异并写 expect="ERROR"，一旦有人把标记
+        守卫改弱，它会被判成 CAUGHT —— 而 CAUGHT 恒不失败，守卫的退化
+        就这样被静默接受。
+
+    故做成本命令，直接断言状态字：
+
+        崩溃   -> 必须是 ERROR（不是 CAUGHT）
+        中性   -> 必须是 SURVIVED（不是 ERROR，证明守卫没有误伤）
+    """
+    target = "scripts/tls_truth.py"
+    cmds = ["python3 scripts/gen_ch_struct.py --check",
+            "python3 scripts/gen_cke_struct.py --check"]
+    crash = {"id": "SELFTEST-CRASH", "file": target, "lang": "py", "cmds": cmds,
+             "old": "def classify_records(buf):",
+             "new": "def classify_records(buf):\n    ((( 语法错误"}
+    neutral = {"id": "SELFTEST-NEUTRAL", "file": target, "lang": "py", "cmds": cmds,
+               "old": "def classify_records(buf):",
+               "new": "def classify_records(buf):\n    # 中性改写：行为不变"}
+
+    ok = True
+    for m, want in ((crash, "ERROR"), (neutral, "SURVIVED")):
+        r = run_one_py(m)
+        got = r[1]
+        mark = "OK " if got == want else "BAD"
+        if got != want:
+            ok = False
+        print("[%s] %-16s 期望=%-8s 实测=%-8s %s"
+              % (mark, m["id"], want, got, r[2][:90]))
+    print("[%s] Python runner 判定标记守卫自检" % ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def run_one(m):
     path = os.path.join(ROOT, m["file"])
     if not os.path.exists(path):
@@ -720,6 +758,26 @@ def run_one(m):
         _purge_build(path)
 
 
+# Python 侧命令"真的给出了判定"的标记。
+#
+# 为什么必须存在：退出码非零不等于"抓到了缺陷"。
+#
+#   - 生成器/守卫自己崩溃（语法错误、导入失败、未捕获异常）时也是 rc=1；
+#   - 漂移/违规被真正识别出来时同样是 rc=1。
+#
+# 两者在退出码上完全一样，而意义截然相反：前者是什么都没验，后者是验了
+# 并且发现问题。不区分的话，审计报告会显示一片 CAUGHT，读起来像"所有
+# 缺陷都有防回归"，实际其中一部分只是工具崩了。
+#
+# 这正是 check_guards.py 内部已经修过的同一形态（"子守卫崩了"与"子守卫
+# 履职报 FAIL"退出码相同），此处把它推广到 Python runner —— M28~M30 的
+# CAUGHT 里此前就混着这一类。
+#
+# 三条标记覆盖两条命令的全部出口：gen_*_struct.py --check 与
+# check_guards.py 正常跑完必然打印其中之一。变异可用 "markers" 覆盖。
+PY_VERDICT_MARKERS = ("[PASS]", "[FAIL]", "[FATAL]")
+
+
 def run_one_py(m):
     """Python 侧变异：无构建步骤、无二进制，判定靠命令的退出码与输出。
 
@@ -771,6 +829,25 @@ def run_one_py(m):
                         "环境缺失未验证（SKIP）：%s" % cmd)
             if not tout.strip():
                 return (m["id"], "HANG", "命令零输出：%s" % cmd)
+
+            # 判定标记守卫：命令必须真的走到判定并打印结论。
+            #
+            # 缺标记有两种可能，都不可信：
+            #   rc!=0 -> 命令崩溃（SyntaxError / ImportError / 未捕获异常），
+            #            traceback 里没有一条是断言失败；
+            #   rc==0 -> 命令根本没做判定就退出了（例如被改成了 no-op）。
+            #
+            # 二者此前分别被记成 CAUGHT（虚高覆盖）与 SURVIVED（假缺口），
+            # 方向相反但同样是假结论。
+            markers = tuple(m.get("markers", PY_VERDICT_MARKERS))
+            if not any(mk in tout for mk in markers):
+                last = [l for l in tout.splitlines() if l.strip()][-1:]
+                return (m["id"], "ERROR",
+                        "命令未产出判定标记 %s（rc=%d 不可信，非捕获亦非存活）"
+                        "%s | 末行: %s"
+                        % ("/".join(markers), trc, cmd.split()[-1],
+                           last[0][:100].strip() if last else "<无输出>"))
+
             if trc != 0:
                 bad = [l for l in tout.splitlines()
                        if "FAIL" in l or "FATAL" in l]
@@ -991,6 +1068,8 @@ def main():
         else:
             print("[HEAL] 无残留变异备份")
         sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest-py":
+        sys.exit(selftest_py())
     try:
         sel, sample = parse_args(sys.argv[1:])
     except Usage as e:
