@@ -470,8 +470,50 @@ def emit(C):
     return "\n".join(L) + "\n"
 
 
+def openssl_available():
+    """真值探测的前置条件。缺 openssl 或证书时返回 (False, 原因)。
+
+    为什么单独拎出来：--check 要能区分「真值漂移」与「测不了」。
+    若把两者都归为失败，无 openssl 的环境里回归会一直红，最后被人
+    加个 || true 关掉；若都归为通过，就等于什么都没验。所以让调用方
+    拿到明确原因，自己决定记 SKIP 还是 FAIL。
+    """
+    try:
+        v = subprocess.run(["openssl", "version"], capture_output=True,
+                           text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False, "openssl 不可用"
+    if v.returncode != 0:
+        return False, "openssl version 返回 %d" % v.returncode
+    for f in ("leaf.pem", "leaf.key"):
+        if not os.path.exists(os.path.join(DATA, f)):
+            return False, "缺少证书文件 %s" % f
+    return True, v.stdout.strip()
+
+
+def frozen_expects(text):
+    """从已固化的头文件里抽出 {用例名: expect}，用于漂移时点名。"""
+    out = {}
+    for m in re.finditer(r'\{"([A-Za-z0-9_]+)",\s*CHS_\w+,\s*sizeof\([^)]+\),'
+                         r'\s*(-?\d+),', text):
+        out[m.group(1)] = int(m.group(2))
+    return out
+
+
 def main():
-    no_measure = "--no-measure" in sys.argv[1:]
+    argv = sys.argv[1:]
+    check = "--check" in argv
+    no_measure = "--no-measure" in argv
+    if check and no_measure:
+        raise SystemExit("[FATAL] --check 与 --no-measure 互斥："
+                         "不测真值的比对没有意义（比的是两份手写值）")
+    if check:
+        ok, why = openssl_available()
+        if not ok:
+            print("[SKIP] 真值漂移检查未执行：%s" % why)
+            print("[SKIP] 已固化期望值未经验证 —— 不等于它们仍然正确")
+            sys.exit(77)
+
     b = load_real()
     p = parse(b)
     C = cases(p)
@@ -509,6 +551,29 @@ def main():
         print("[WARN] --no-measure：沿用手写期望值，未经真值校验")
 
     out = emit(C)
+    if check:
+        # 为什么用逐字节比对而不是只比 expect：头文件里还固化了报文本体。
+        # 生成器改动而头文件没重新生成，同样会让测试跑的不是当前用例 ——
+        # 那和「跑陈旧产物」是同一类问题，只是藏在生成侧。
+        if not os.path.exists(DST):
+            print("[FAIL] 已固化头文件不存在：%s" % DST)
+            sys.exit(1)
+        cur = open(DST, encoding="utf-8").read()
+        if cur == out:
+            print("[PASS] 真值无漂移：%d 例期望值与当前 OpenSSL 实测一致"
+                  % len(C))
+            sys.exit(0)
+        print("[FAIL] 真值已漂移：%s 与实测结果不一致" % DST)
+        old = frozen_expects(cur)
+        for nm, _blob, exp, _why in C:
+            if old.get(nm) != exp:
+                print("       %-26s 固化=%-3s 实测=%-3d"
+                      % (nm, old.get(nm, "<无>"), exp))
+        if not old:
+            print("       （无法从头文件解析出用例，可能是手改过的）")
+        print("[FAIL] 重新运行：python3 %s" % os.path.abspath(__file__))
+        sys.exit(1)
+
     open(DST, "w", encoding="utf-8").write(out)
     print("[OK] 生成 %d 个结构化用例 -> %s" % (len(C), DST))
     for nm, blob, exp, why in C:

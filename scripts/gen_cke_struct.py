@@ -245,12 +245,50 @@ def probe_openssl(stream, port):
     return "TOLERATE"
 
 
+def openssl_available():
+    """真值探测的前置条件（与 gen_ch_struct.py 同源，口径必须一致）。"""
+    try:
+        v = subprocess.run(["openssl", "version"], capture_output=True,
+                           text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False, "openssl 不可用"
+    if v.returncode != 0:
+        return False, "openssl version 返回 %d" % v.returncode
+    for f in ("leaf.pem", "leaf.key"):
+        if not os.path.exists(os.path.join(DATA, f)):
+            return False, "缺少证书文件 %s" % f
+    return True, v.stdout.strip()
+
+
+def frozen_expects(text):
+    """从已固化头文件抽出 {用例名: expect}，用于漂移时点名。"""
+    out = {}
+    for m in re.finditer(r'\.name\s*=\s*"([A-Za-z0-9_]+)",.*?\.expect\s*=\s*(-?\d+)',
+                         text, re.S):
+        out[m.group(1)] = int(m.group(2))
+    return out
+
+
 def main():
+    argv = sys.argv[1:]
+    check = "--check" in argv
+    if check:
+        ok, why = openssl_available()
+        if not ok:
+            print("[SKIP] 真值漂移检查未执行：%s" % why)
+            print("[SKIP] 已固化期望值未经验证 —— 不等于它们仍然正确")
+            return 77
     ch, cke = load_real()
     cases = build_cases(ch, cke)
     print("[GEN] 用例数 %d" % len(cases))
 
-    only = sys.argv[1] if len(sys.argv) > 1 else "all"
+    only = "all"
+    for a in argv:
+        if not a.startswith("--"):
+            only = a
+    if check and only == "no-probe":
+        raise SystemExit("[FATAL] --check 与 no-probe 互斥："
+                         "不测真值的比对没有意义")
     port = 19300
     results = []
     for c in cases:
@@ -343,6 +381,26 @@ static const cke_case_t CKE_CASES[] = {
                                                             c["expect"], c["len"], i)
             for i, c in enumerate(results)),
     }
+
+    if check:
+        if not os.path.exists(DST):
+            print("[FAIL] 已固化头文件不存在：%s" % DST)
+            return 1
+        cur = open(DST, encoding="utf-8").read()
+        if cur == hdr:
+            print("[PASS] 真值无漂移：%d 例期望值与当前 OpenSSL 实测一致"
+                  % len(results))
+            return 0
+        print("[FAIL] 真值已漂移：%s 与实测结果不一致" % DST)
+        old = frozen_expects(cur)
+        for c in results:
+            if old.get(c["name"]) != c["expect"]:
+                print("       %-26s 固化=%-3s 实测=%-3d"
+                      % (c["name"], old.get(c["name"], "<无>"), c["expect"]))
+        if not old:
+            print("       （无法从头文件解析出用例，可能是手改过的）")
+        print("[FAIL] 重新运行：python3 %s" % os.path.abspath(__file__))
+        return 1
 
     open(DST, "w", encoding="utf-8").write(hdr)
     print("[GEN] 已写入 %s（%d 例）" % (DST, len(results)))
