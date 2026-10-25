@@ -146,6 +146,49 @@ MUTATIONS = [
         "bin": "build/test_tls_ch_struct",
     },
     {
+        # 这三个变异针对真值探测本身（scripts/tls_truth.py）。
+        #
+        # 为什么必须登记：47+17 例的期望值是**固化进头文件**的快照，而快照
+        # 由 tls_truth.py 实测取得。这个文件一旦改坏，两侧（CH/CKE）仍然
+        # 各自全绿 —— 固化下来的常量不会暴露分叉，它只会表现为"某个用例的
+        # 期望值与另一组不一致"，那时没人知道该信哪个。
+        #
+        # 形态上它们与 C 侧变异不同：没有构建步骤、没有二进制，判定靠
+        # 生成器 --check 的退出码与输出，故用 lang="py" 走独立 runner。
+        "id": "M28",
+        "desc": "scripts: 端口探测恒失败（s_server 起不来，真值无从取得）",
+        "file": "scripts/tls_truth.py",
+        "old": "    s = socket.socket()\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    try:\n        s.bind((\"127.0.0.1\", port))\n        return True\n    except OSError:\n        return False\n    finally:\n        s.close()",
+        "new": "    return False",
+        "lang": "py",
+        "cmds": ["python3 scripts/gen_ch_struct.py --check",
+                 "python3 scripts/gen_cke_struct.py --check"],
+    },
+    {
+        "id": "M29",
+        "desc": "scripts: 记录层判定恒为 REJECT（把'静默等待'误判成'对端告警'）",
+        "file": "scripts/tls_truth.py",
+        "old": "    off = 0\n    saw_hs = False\n    while off + 5 <= len(buf):",
+        "new": "    if True:\n        return \"REJECT\"\n    off = 0\n    saw_hs = False\n    while off + 5 <= len(buf):",
+        "lang": "py",
+        "cmds": ["python3 scripts/gen_ch_struct.py --check",
+                 "python3 scripts/gen_cke_struct.py --check"],
+    },
+    {
+        # 与 M29 方向相反：M29 是"把沉默误判成拒绝"，M30 是"漏识别告警"。
+        # 后者更接近真实编码错误 —— 改坏判据的人不会写明"恒为 REJECT"，
+        # 只会让某个条件不再成立。危害也更隐蔽：本该 REJECT 的用例被降级
+        # 成 ANY（不做断言），测试从"验一条真实分歧"退化成"只验不崩"。
+        "id": "M30",
+        "desc": "scripts: 告警识别失效，ct==21 不再判为 REJECT（真分歧被降级成不断言）",
+        "file": "scripts/tls_truth.py",
+        "old": "        if ct == 21 and ln >= 2:\n            return \"REJECT\"",
+        "new": "        if False:\n            return \"REJECT\"",
+        "lang": "py",
+        "cmds": ["python3 scripts/gen_ch_struct.py --check",
+                 "python3 scripts/gen_cke_struct.py --check"],
+    },
+    {
         "id": "M3",
         "desc": "20_packer: 入口 nop 垫恒为 0（首字节变回跨构建恒定签名）",
         "file": "20_packer/src/poly.c",
@@ -534,6 +577,9 @@ def run_one(m):
     if not os.path.exists(path):
         return (m["id"], "ERROR", "文件不存在（变异集合已腐烂）")
 
+    if m.get("lang") == "py":
+        return run_one_py(m)
+
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
 
@@ -627,6 +673,83 @@ def run_one(m):
         # 变异二进制。同一机制也能反向造成"假通过"，那更危险。
         # 故还原后清除该模块构建产物，使下次构建必然从当前源码重新编译。
         _purge_build(path)
+
+
+def run_one_py(m):
+    """Python 侧变异：无构建步骤、无二进制，判定靠命令的退出码与输出。
+
+    为什么不能复用 C 侧那套 build/bin 流程：Python 改完即生效，没有
+    "构建是否更新了被测产物"这回事。C 侧那条 mtime 守卫（构建没产出新
+    二进制就判 ERROR）在这里既不适用，也不能省 —— 它防的是"跑陈旧产物"，
+    而 Python 侧对应的风险是"命令没真的执行"，用退出码 77 与零输出来防。
+
+    退出码口径必须与回归脚本一致：
+        0   -> 命令认为一切正常（对 --check 而言即无漂移）
+        77  -> 环境缺失未验证。既不是"没抓到"也不是"抓到了"，判 ERROR：
+               把它算成 CAUGHT 会让无 openssl 的机器一直"全绿通过"，
+               算成 SURVIVED 又会让真缺口被环境噪音掩盖。
+        其它 -> 抓到（漂移或 FATAL）
+    """
+    path = os.path.join(ROOT, m["file"])
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    n = src.count(m["old"])
+    if n == 0:
+        return (m["id"], "ERROR", "锚点失效：未找到 %r —— 变异已不再测任何东西"
+                % m["old"][:50])
+    if n > 1:
+        return (m["id"], "ERROR", "锚点出现 %d 次，替换目标不明确" % n)
+
+    before_hash = blob_hash(path)
+    bak = path + ".mutbak"
+    shutil.copy2(path, bak)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(src.replace(m["old"], m["new"], 1))
+
+        if blob_hash(path) == before_hash:
+            return (m["id"], "ERROR", "变异未改变文件内容（old/new 相同？）")
+
+        # 每条命令都必须被抓到：只跑一条的话，另一侧生成器仍会拿被改坏的
+        # 公共模块产出错误真值，而审计报告却是绿的。
+        for cmd in m["cmds"]:
+            trc, tout = sh(cmd, ROOT, m.get("timeout", 300))
+            if trc == -999:
+                return (m["id"], "HANG", "命令超时：%s" % cmd)
+            if not tout.strip():
+                return (m["id"], "HANG", "命令零输出：%s" % cmd)
+            if trc == 77:
+                return (m["id"], "ERROR",
+                        "环境缺失未验证（SKIP）：%s" % cmd)
+            if trc != 0:
+                bad = [l for l in tout.splitlines()
+                       if "FAIL" in l or "FATAL" in l]
+                return (m["id"], "CAUGHT", "%s -> rc=%d, 例: %s"
+                        % (cmd.split()[-1], trc,
+                           bad[0][:80].strip() if bad else "rc=%d" % trc))
+        return (m["id"], "SURVIVED", "%d 条命令仍全部通过 —— 该缺陷无法被捕获"
+                % len(m["cmds"]))
+    finally:
+        shutil.move(bak, path)
+        after = blob_hash(path)
+        if after != before_hash:
+            print("[FATAL] %s 恢复失败: %s -> %s，请检查工作区"
+                  % (m["id"], before_hash, after))
+            sys.exit(2)
+        # Python 无构建产物，但 .pyc 缓存同样会留着变异后的字节码。
+        # 实测风险与 C 侧 .o 残留同源：源码看着干净，跑的却是缺陷代码。
+        os.utime(path, None)
+        _purge_pycache(path)
+
+
+def _purge_pycache(path):
+    """清除被变异文件所在目录的 __pycache__，杜绝陈旧字节码被复用。"""
+    import shutil as _sh
+    d = os.path.dirname(os.path.abspath(path))
+    pc = os.path.join(d, "__pycache__")
+    if os.path.isdir(pc):
+        _sh.rmtree(pc, ignore_errors=True)
 
 
 def _purge_build(path):
