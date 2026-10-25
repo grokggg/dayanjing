@@ -225,7 +225,15 @@ $(BUILD)/test_exfil_burst_cover: tests/test_exfil_burst_cover.c \
 verify-upload:
 	@python3 tests/verify_upload.py
 
-test: verify-upload $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+# C2 收端：正向链路（起收端 -> camd 边采边发 -> 断言收到）与反向验证
+# （注入故障，断言命令必须变红）。两者必须都跑——只跑正向证明不了守卫有效。
+verify-c2:
+	@python3 tests/verify_c2_chain.py
+
+verify-c2-reverse:
+	@python3 tests/verify_c2_reverse.py
+
+test: verify-upload verify-c2 verify-c2-reverse $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -249,4 +257,4 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse
