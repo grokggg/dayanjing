@@ -163,6 +163,25 @@ int main(int argc, char **argv)
         return 6;
     }
 
+    /* 密钥可来自环境，供 systemd 的 EnvironmentFile 注入。
+     *
+     * 为何必须有这条路：密钥若作为命令行参数写进 .service，单元文件在
+     * 默认 umask 下是 0644，任何本地用户 cat 一下即得到 AEAD 主密钥，
+     * 进而解密回传的全部画面。改由 EnvironmentFile 从 0600 的 conf 注入后，
+     * 单元文件本身不再含机密，可保持标准 0644。
+     *
+     * 命令行 --key 优先，便于手工调试与既有测试。 */
+    if (!have_key) {
+        const char *ek = getenv("CAMD_KEY");
+        if (ek && *ek) {
+            if (parse_hex(ek, key, 32) != 0) {
+                fprintf(stderr, "[FATAL] CAMD_KEY 必须是 64 个十六进制字符\n");
+                return 2;
+            }
+            have_key = 1;
+        }
+    }
+
     if (!have_key) {
         fprintf(stderr, "[FATAL] 必须指定 --key。拒绝回落到内置测试密钥——\n"
                         "        那会让部署产物与任何握有该默认密钥的人共享明文。\n");

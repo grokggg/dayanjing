@@ -160,16 +160,28 @@ install_bin() {
 }
 
 persist_systemd() {
-  [ "$HAVE_SYSTEMD" = 1 ] || return 0
-  cat > "$UNIT" <<EOF
+  # 先渲染到临时文件。此前单元文件只在 HAVE_SYSTEMD=1 时才生成，于是容器/CI 里
+  # 它从未被产生、也就从未被校验过——而那恰恰是唯一能提前发现语法错误的时机。
+  # 渲染与校验因此与"是否真的安装"解耦：任何环境都产出并校验，安装另按探测结果。
+  # 文件名必须是合法单元名（以有效单元类型后缀结尾）。实测用
+  # "camd.service.$$" 会被 systemd 拒绝：Failed to prepare filename ... Invalid argument。
+  UNIT_DIR="${TMPDIR:-/tmp}/camd-unit-$$"
+  mkdir -p "$UNIT_DIR" || DIE "无法创建临时单元目录"
+  UNIT_TMP="$UNIT_DIR/camd.service"
+  cat > "$UNIT_TMP" <<EOF
 [Unit]
 Description=camd
 After=network.target
 
 [Service]
 Type=simple
+# 密钥不写进 ExecStart：单元文件默认 0644，且命令行参数会出现在
+# systemctl show / ps 的输出里，任何本地用户都能取到 AEAD 主密钥，
+# 进而解密回传的全部画面。改由 EnvironmentFile 从 0600 的 conf 注入，
+# camd 侧读 CAMD_KEY。
+EnvironmentFile=$CONF_DIR/camd.conf
 ExecStart=$BIN_DST $ROOTARG --backend $BACKEND --sink $CELLS \\
-  --key $KEY --interval-ms $INTERVAL_MS --jitter-ms $JITTER_MS \\
+  --interval-ms $INTERVAL_MS --jitter-ms $JITTER_MS \\
   --capture-ms $CAPTURE_MS --frames $FRAMES --quality $QUALITY \\
   --width $WIDTH --height $HEIGHT --fps $FPS --pid $PIDF
 Restart=always
@@ -178,6 +190,30 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+  # 官方静态校验器。它不需要 systemd 正在运行，因此容器里同样可用。
+  # 实测能抓出指令拼写、路径、依赖等错误；二进制尚未安装时报的
+  # "Command ... is not executable" 也在此列，故放在 install_bin 之后。
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    if systemd-analyze verify "$UNIT_TMP" >"$UNIT_TMP.log" 2>&1; then
+      OK "systemd 单元校验通过"
+    else
+      cat "$UNIT_TMP.log" >&2
+      rm -rf "$UNIT_DIR" "$UNIT_TMP.log"
+      DIE "systemd 单元校验失败（未安装）"
+    fi
+  else
+    WARN "无 systemd-analyze，单元未做静态校验"
+  fi
+  rm -f "$UNIT_TMP.log"
+  if [ "$HAVE_SYSTEMD" != 1 ]; then
+    rm -rf "$UNIT_DIR"
+    WARN "systemd 未运行，单元已校验但未安装（降级到 cron）"
+    return 0
+  fi
+  mkdir -p "$(dirname "$UNIT")" || DIE "无法创建 $(dirname "$UNIT")"
+  cat "$UNIT_TMP" > "$UNIT" || DIE "无法写入 $UNIT"
+  chmod 0644 "$UNIT" || DIE "无法设置单元权限"
+  rm -rf "$UNIT_DIR"
   # 顺序不可换：老 systemd（<229）上 enable 依赖 reload 后的内存状态，
   # 先 enable 后 reload 会报 Failed to enable unit。
   systemctl daemon-reload && systemctl enable camd.service \
@@ -196,9 +232,13 @@ persist_cron() {
   m=$(date +%S)
   m=$((m % 60))
   cat > "$CRON" <<EOF
-$m * * * * root flock -n /run/camd.lock -c '$BIN_DST $ROOTARG --backend $BACKEND --sink $CELLS --key $KEY --interval-ms $INTERVAL_MS --jitter-ms $JITTER_MS --capture-ms $CAPTURE_MS --frames $FRAMES --quality $QUALITY --width $WIDTH --height $HEIGHT --fps $FPS --pid $PIDF'
+# 同理：crontab 里的命令会被 ps 看到，且 /etc/cron.d 下文件默认 0644。
+# 密钥置于文件内环境变量行，并把该文件收紧为 0600（cron 以 root 运行）。
+CAMD_KEY=$KEY
+$m * * * * root flock -n /run/camd.lock -c '$BIN_DST $ROOTARG --backend $BACKEND --sink $CELLS --interval-ms $INTERVAL_MS --jitter-ms $JITTER_MS --capture-ms $CAPTURE_MS --frames $FRAMES --quality $QUALITY --width $WIDTH --height $HEIGHT --fps $FPS --pid $PIDF'
 EOF
-  chmod 0644 "$CRON" || { WARN "cron 写入失败（降级路径，不中断）"; return 0; }
+  # 0600：文件内含 CAMD_KEY。cron 以 root 运行，收紧权限不影响它读取。
+  chmod 0600 "$CRON" || { WARN "cron 写入失败（降级路径，不中断）"; return 0; }
   OK "cron 驻留成功（分位 $m）"
 }
 
@@ -212,7 +252,8 @@ start_now() {
   fi
   mkdir -p "$(dirname "$PIDF")" 2>/dev/null
   # shellcheck disable=SC2086
-  "$BIN_DST" $ROOTARG --backend "$BACKEND" --sink "$CELLS" --key "$KEY" \
+  # 同样经环境传密钥：命令行参数会被 ps aux 看到。
+  CAMD_KEY="$KEY" "$BIN_DST" $ROOTARG --backend "$BACKEND" --sink "$CELLS" \
     --interval-ms "$INTERVAL_MS" --jitter-ms "$JITTER_MS" \
     --capture-ms "$CAPTURE_MS" --frames "$FRAMES" --quality "$QUALITY" \
     --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --pid "$PIDF" \
