@@ -44,9 +44,27 @@
  *
  * weak 让"未链入的后端"解析为 NULL，由下面的判空决定行为。于是一份
  * cam_factory.c 能无条件编译进所有平台，不必为每个链接组合写条件编译。 */
+/* extern "C" 不可省。
+ *
+ * 本文件在 winshim 链里被 -x c++ 编译（与 shim 的 C++ 源码共存）。C++ 会对
+ * 函数名做 name mangling，于是这三个引用变成 _Z21cam_source_create_mfv 之类，
+ * 与各后端 extern "C" 导出的纯 C 符号 cam_source_create_mf 不匹配。
+ *
+ * 症状极隐蔽：weak 未解析时链接器不报错（约定解析为 0），运行期构造判空
+ * 命中 NULL 分支，cam_source_create("mf") 返回 NULL —— 而 cam_source_create
+ * 自身因为 camera.h 有 extern "C" 保护、链接正常，所以整条链毫无告警。
+ * 实跑 winshim-build 才暴露（test_mf_logic 0 pass 1 fail）。 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern cam_source_t *cam_source_create_mock(void) __attribute__((weak));
 extern cam_source_t *cam_source_create_v4l2(void) __attribute__((weak));
 extern cam_source_t *cam_source_create_mf(void)   __attribute__((weak));
+
+#ifdef __cplusplus
+}
+#endif
 
 cam_source_t *cam_source_create(const char *backend)
 {

