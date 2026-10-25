@@ -38,7 +38,15 @@ typedef enum {
 
 const char *tls_errstr(tls_err e);
 
-/* 发送：返回 0 成功。接收：返回读到字节数，<=0 视为失败/关闭 */
+/* 发送：返回**实际发出的字节数**。接收：返回读到的字节数。两者均以 <=0
+ * 表示失败/关闭。
+ *
+ * 本注释此前写的是"发送：返回 0 成功"，与实现相反——tls.c 的 io_send_all
+ * 是 `off += (size_t)r; if (r <= 0) return TLS_ERR_IO;`，把返回值当字节数
+ * 累加而非当成功标志。照旧注释实现的回调会在第一次发送成功后被就地判为
+ * IO 错误：握手报 transport error，对端只看到连接被关掉（OpenSSL 侧表现为
+ * UNEXPECTED_EOF_WHILE_READING），而本地看不出是回调契约错了。
+ * 既有实现见 25_tls/tests/test_tls.c:45。 */
 typedef int (*tls_send_cb)(void *arg, const uint8_t *data, size_t len);
 typedef int (*tls_recv_cb)(void *arg, uint8_t *buf, size_t cap);
 

