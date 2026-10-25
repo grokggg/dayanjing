@@ -43,6 +43,15 @@ def run(cmd):
 
 
 def main():
+    # 子守卫若崩了（语法错误、ImportError、参数写错），退出码同样是 1 ——
+    # 与"履职报 FAIL"在退出码上无法区分。靠输出标记区分：正常跑完的子守卫
+    # 必然打印 [PASS] 或 [FAIL]，两者都没有说明它没跑到判定就死了。
+    #
+    # 不区分的后果：元守卫腐坏后，变异审计会把"它崩了"记成"它抓到了变异"，
+    # 于是审计报告一片 CAUGHT，而实际什么都没验。
+    def crashed(out):
+        return "[PASS]" not in out and "[FAIL]" not in out
+
     cases = [
         # (守卫名, 命令, 期望退出码)
         ("check_gen_dedup  真实仓库",
@@ -69,6 +78,12 @@ def main():
     bad = []
     for name, cmd, want in cases:
         rc, out = run(cmd)
+        if crashed(out):
+            print("[FATAL] 子守卫未产出判定标记（崩溃或参数错误），命令：%s"
+                  % " ".join(cmd))
+            print("       %s" % out.strip().splitlines()[-1][:160]
+                  if out.strip() else "       （无输出）")
+            return 1
         if rc != want:
             bad.append("%s -> 期望退出码 %d，实测 %d" % (name, want, rc))
             for ln in out.strip().splitlines()[:6]:

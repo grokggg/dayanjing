@@ -379,6 +379,31 @@ if [ -f "$ROOT/scripts/check_gen_dedup.py" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# check_guards（Python 守卫自身的正反双向防回归）
+#
+# 上面两个 check_* 是仓库里唯二没有测试的 Python 守卫：C 侧每条断言都有
+# 变异条目盯着，它们没有。于是唯一失效模式无人看管 —— 守卫自己被改坏后
+# 恒返回"通过"，报告一片全绿。
+#
+# 本项跑正反双向（合规 fixture 须 PASS、违规 fixture 须 FAIL），任一侧不符
+# 即判失败。只跑上面两项无法替代：它们只证明"此刻通过"，证明不了"该红的
+# 时候会红"。
+# ---------------------------------------------------------------------------
+if [ -f "$ROOT/scripts/check_guards.py" ]; then
+    echo "=== check_guards（Python 守卫自身双向有效） ==="
+    python3 "$ROOT/scripts/check_guards.py" > /tmp/guards.log 2>&1
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "  [PASS] $(grep -E '^\[PASS\]' /tmp/guards.log | sed 's/^\[PASS\] //')"
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] Python 侧守卫自身失效（恒绿或恒红）"
+        grep -E '^       |^\[FATAL\]' /tmp/guards.log | sed 's/^/         /'
+        failed=$((failed + 1))
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 构建契约审计：每个模块声明的测试二进制，是否都会被回归实际调用的目标构建。
 #
 # 这一层守护的是上面所有数字的【可信度】。回归先 `make` 再执行 build/ 下的
