@@ -155,8 +155,10 @@ static int run_case(const uint8_t *in, size_t in_len,
     uint64_t sent = 0;
     int      err = -1, alert = 0;
     if (read(pfd[0], &sent, sizeof(sent)) == (ssize_t)sizeof(sent)) {
-        if (read(pfd[0], &err, sizeof(err)) == (ssize_t)sizeof(err))
-            (void)read(pfd[0], &alert, sizeof(alert));
+        if (read(pfd[0], &err, sizeof(err)) == (ssize_t)sizeof(err)) {
+            ssize_t ra = read(pfd[0], &alert, sizeof(alert));
+            (void)ra;
+        }
     }
     close(pfd[0]);
 
