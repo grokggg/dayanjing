@@ -617,21 +617,36 @@ def count_cond_jumps(binpath, symbol):
     return n
 
 
-# 环境类原因：命令明确报告"没测成"，而不是被测代码有问题。
-# 这两条都必须被识别出来，否则自检会把环境问题报成守卫失效：
-#   - 77(SKIP)：无 openssl 或缺证书，--check 直接放弃；
-#   - s_server 起不来：端口被占、探测无法启动，同样拿不到真值。
+# 环境类原因一律用【结构化退出码】判定，不靠在输出里匹配文案。
+#
+# 为什么弃用文本匹配（本轮修掉的老毛病）：早先靠在命令输出里搜
+# "s_server 起不来" 来判断"这次是环境、不是真缺陷"。只要有人改了那句
+# 报错的措辞 —— 或换个说法描述同一件事 —— 检测就静默失效，环境问题会
+# 被当成产品缺陷去查，排查方向完全相反，而报告不会有任何提示。
+#
+# 退出码是契约，文本是给人看的。判定只看码。
+#
+# 两个码都必须识别（定义见 tls_truth.EX_*）：
+#   77 SKIP      前置不具备（无 openssl / 缺证书），根本没开始测
+#   78 NO_SERVER 前置具备但探测起不来（端口被占等），测了没拿到真值
 # 归 FAIL 的后果与守卫自身失效一样糟：无 openssl 的机器上回归一直红，
 # 最后被人加个 || true 关掉 —— 那时它连"环境缺失"都不再报了。
-_ENV_REASONS = ("环境缺失未验证（SKIP）", "s_server 起不来")
 
 
-def _env_reason(msg):
-    """返回环境原因；不是环境问题则返回 None。"""
-    for k in _ENV_REASONS:
-        if k in msg:
-            return k
-    return None
+def _env_code_of(cmd_rc, fallback_msg=""):
+    """返回环境退出码（77/78），不是环境问题返回 0。
+
+    cmd_rc 为 None 时退化为对 msg 做一次兜底识别（仅用于无法取到码的
+    场合），但主路径必须拿到真实退出码 —— 兜底识别不了就没法区分
+    "没验证"与"验证出错了"，而这两者混淆正是本轮要消灭的。
+    """
+    if cmd_rc is None:
+        return 0
+    try:
+        import tls_truth
+        return tls_truth.env_code(cmd_rc)
+    except Exception:
+        return cmd_rc if cmd_rc in (77, 78) else 0
 
 
 def selftest_py():
@@ -681,10 +696,15 @@ def selftest_py():
         r = run_one_py(m)
         got, why_msg = r[1], r[2]
         # 状态字即便"对上了"，也可能只是环境造成的巧合：崩溃用例期望
-        # ERROR，而 77 同样落到 ERROR。所以先查原因，再谈状态字。
-        if _env_reason(why_msg):
-            env_hit = _env_reason(why_msg)
-            print("[SKIP] %-16s 环境不具备：%s" % (m["id"], why_msg[:90]))
+        # ERROR，而环境退出码同样落到 ERROR。所以先看码，再谈状态字。
+        #
+        # 这里必须取【结构化退出码】而不是在 why_msg 里搜文案：文案一改
+        # 检测就静默失效，环境缺失会被记成"守卫失效"，排查方向完全相反。
+        code = r[3] if len(r) > 3 else 0
+        if code:
+            env_hit = "退出码 %d" % code
+            print("[SKIP] %-16s 环境不具备（退出码 %d）：%s"
+                  % (m["id"], code, why_msg[:90]))
             continue
         mark = "OK " if got == want else "BAD"
         if got != want:
@@ -830,12 +850,17 @@ def run_one_py(m):
     二进制就判 ERROR）在这里既不适用，也不能省 —— 它防的是"跑陈旧产物"，
     而 Python 侧对应的风险是"命令没真的执行"，用退出码 77 与零输出来防。
 
-    退出码口径必须与回归脚本一致：
+    退出码口径必须与回归脚本一致（常量定义见 tls_truth.EX_*）：
         0   -> 命令认为一切正常（对 --check 而言即无漂移）
-        77  -> 环境缺失未验证。既不是"没抓到"也不是"抓到了"，判 ERROR：
-               把它算成 CAUGHT 会让无 openssl 的机器一直"全绿通过"，
+        77  -> 前置不具备（无 openssl / 缺证书），根本没开始测
+        78  -> 探测起不来（端口被占等），测了但没拿到真值
+        77/78 都不是"抓到"也不是"没抓到"，而是【这次没验证成】，判
+               ERROR：算成 CAUGHT 会让无 openssl 的机器一直"全绿通过"，
                算成 SURVIVED 又会让真缺口被环境噪音掩盖。
         其它 -> 抓到（漂移或 FATAL）
+
+    返回 4 元组，第 4 项是环境退出码（非环境问题为 0）。调用方要区分
+    "没验证"与"验证出错了"时看它，不要去匹配输出文本。
     """
     path = os.path.join(ROOT, m["file"])
     with open(path, "r", encoding="utf-8") as f:
@@ -868,9 +893,9 @@ def run_one_py(m):
             # 实测：一个静默 exit(77) 的命令没有输出，若先判零输出就会
             # 被记成 HANG（"疑似挂起"），把"环境缺失没验证"误导成"进程
             # 卡死" —— 排查方向完全不同。SKIP 是明确的语义，优先识别。
-            if trc == 77:
+            if _env_code_of(trc):
                 return (m["id"], "ERROR",
-                        "环境缺失未验证（SKIP）：%s" % cmd)
+                        "环境原因未验证（退出码 %d）：%s" % (trc, cmd), trc)
             if not tout.strip():
                 return (m["id"], "HANG", "命令零输出：%s" % cmd)
 

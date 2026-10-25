@@ -437,7 +437,7 @@ def main():
         if not ok:
             print("[SKIP] 真值漂移检查未执行：%s" % why)
             print("[SKIP] 已固化期望值未经验证 —— 不等于它们仍然正确")
-            sys.exit(77)
+            sys.exit(tls_truth.EX_SKIP)
 
     b = load_real()
     p = parse(b)
@@ -450,10 +450,14 @@ def main():
             v = tls_truth.probe_openssl_retry(blob, port,
                                               CH_READ_TIMEOUT)
             if v is None:
-                raise SystemExit(
+                # 退出码 78 = 环境类（探测起不来），不是真值漂移。
+                # 用结构化码而非让上层去匹配"起不来"这几个字：文案一改，
+                # 文本检测就静默失效，端口冲突会被当成产品缺陷去查。
+                print(
                     "[FATAL] s_server 起不来（第 %d 例 %s，已重试换端口）。"
                     "没有真值就不许沿用手写期望 —— 那正是本轮要修的毛病。"
                     "确认 openssl 与证书可用、端口未被长期占用后重跑。" % (i, nm))
+                sys.exit(tls_truth.EX_NO_SERVER)
             verdict[nm] = v
         M = {"TOLERATE": EXPECT_TOLERATE,
              "REJECT": EXPECT_REJECT,

@@ -332,8 +332,9 @@ fi
 # 判据用逐字节比对而非只比 expect：头文件里还固化着报文本体，生成器改了
 # 而头文件没重新生成，同样会让测试跑的不是当前用例。
 #
-# 退出码 77 = 环境不具备（无 openssl 或缺证书）。记为 SKIP 而非 PASS：
-# 未验证不等于无漂移，显式报出来，不许混进通过数里。
+# 退出码 77 = 前置不具备（无 openssl 或缺证书）；78 = 探测起不来（端口被占）。
+# 两者都记为 SKIP 而非 PASS：未验证不等于无漂移，显式报出来，不许混进通过数。
+# 用退出码区分而不是在输出里匹配文案 —— 文案一改，文本检测就静默失效。
 for g in gen_ch_struct gen_cke_struct; do
     if [ -f "$ROOT/scripts/$g.py" ]; then
         echo "=== $g --check（结构化变异真值漂移） ==="
@@ -344,6 +345,10 @@ for g in gen_ch_struct gen_cke_struct; do
             passed=$((passed + 1))
         elif [ $rc -eq 77 ]; then
             echo "  [SKIP] 未验证：$(grep -E '^\[SKIP\]' /tmp/$g.log | head -1 | sed 's/^\[SKIP\] //')"
+            skipped=$((skipped + 1))
+        elif [ $rc -eq 78 ]; then
+            echo "  [SKIP] 探测起不来（退出码 78，端口被占等）—— 未取得真值"
+            grep -E "^\[FATAL\]" /tmp/$g.log | sed 's/^/         [环境] /'
             skipped=$((skipped + 1))
         else
             echo "  [FAIL] 真值已漂移或检查失败（见 /tmp/$g.log）"

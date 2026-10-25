@@ -185,7 +185,7 @@ def main():
         if not ok:
             print("[SKIP] 真值漂移检查未执行：%s" % why)
             print("[SKIP] 已固化期望值未经验证 —— 不等于它们仍然正确")
-            return 77
+            return tls_truth.EX_SKIP
     ch, cke = load_real()
     cases = build_cases(ch, cke)
     print("[GEN] 用例数 %d" % len(cases))
@@ -209,11 +209,15 @@ def main():
             if r is None:
                 # 早期版本走到这里会落成 ANY 并继续生成，把「测不出来」
                 # 永久写进头文件。测不出真值就必须停下来。
-                raise SystemExit(
+                #
+                # 退出码 78 = 环境类（探测起不来），与「真值漂移」分开。
+                # 用结构化码而非让上层匹配文案：文本一改检测就静默失效。
+                print(
                     "[FATAL] s_server 起不来（%s，已重试换端口）。没有真值就"
                     "不许写 ANY —— 那会把一条真实分歧永久抹掉。"
                     "确认 openssl 与证书可用、端口未被长期占用后重跑。"
                     % c["name"])
+                sys.exit(tls_truth.EX_NO_SERVER)
             # probe 返回的是语义字符串，必须显式映射成头文件里的常量。
             # 早期版本直接存了布尔值，导致「拒绝」被写成 TOLERATE、
             # 全部期望值反向 —— 教训：跨表示的赋值必须显式转换。
