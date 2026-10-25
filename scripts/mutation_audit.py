@@ -894,8 +894,30 @@ def run_one_py(m):
             # 被记成 HANG（"疑似挂起"），把"环境缺失没验证"误导成"进程
             # 卡死" —— 排查方向完全不同。SKIP 是明确的语义，优先识别。
             if _env_code_of(trc):
-                return (m["id"], "ERROR",
-                        "环境原因未验证（退出码 %d）：%s" % (trc, cmd), trc)
+                # 环境类退出码有两种截然不同的成因，必须靠【基线对照】定性：
+                #   基线同样起不来 -> 这台机器/这次跑不具备条件，不判
+                #   基线正常       -> 是变异让工具拒绝推进，而"拒绝推进"
+                #                     正是这类变异要抓的行为（早先 CKE 侧
+                #                     是把 None 落成 ANY 继续生成，把一次
+                #                     端口冲突永久写成"本例不做断言"）
+                #
+                # 不做对照就一律记"环境"，M28 这类缺陷会被误记成【审计
+                # 失效】—— 明明已覆盖的缺陷，被报成没覆盖，方向正好相反。
+                brc = _baseline_rc(path, bak, cmd, m.get("timeout", 300))
+                if _env_code_of(brc):
+                    return (m["id"], "ERROR",
+                            "环境原因未验证（退出码 %d，基线同为 %d）：%s"
+                            % (trc, brc, cmd), trc)
+                mk = tuple(m.get("markers", PY_VERDICT_MARKERS))
+                if not any(x in tout for x in mk):
+                    return (m["id"], "ERROR",
+                            "基线正常(rc=0)而变异下退出 %d 且无判定标记 —— "
+                            "不可信：%s" % (trc, cmd))
+                bad = [l for l in tout.splitlines()
+                       if "FAIL" in l or "FATAL" in l]
+                return (m["id"], "CAUGHT",
+                        "基线正常(rc=0)，变异下拒绝推进(rc=%d)：%s"
+                        % (trc, bad[0][:80].strip() if bad else cmd))
             if not tout.strip():
                 return (m["id"], "HANG", "命令零输出：%s" % cmd)
 
@@ -936,6 +958,21 @@ def run_one_py(m):
         # 实测风险与 C 侧 .o 残留同源：源码看着干净，跑的却是缺陷代码。
         os.utime(path, None)
         _purge_pycache(path)
+
+
+def _baseline_rc(path, bak, cmd, timeout):
+    """在未变异状态下跑同一条命令，作为环境类退出码的对照组。
+
+    为什么必须当场跑而不是缓存：环境会中途劣化（端口被别的进程占走）。
+    用早先缓存的"基线正常"去定性现在的 78，会把一次真实的环境故障判成
+    "变异让工具拒绝推进"，虚报一条捕获。
+
+    代价：只在真正撞上 77/78 时才付这一次命令开销，正常路径零成本。
+    """
+    shutil.copy2(bak, path)
+    _purge_pycache(path)
+    rc, _out = sh(cmd, ROOT, timeout)
+    return rc
 
 
 def _purge_pycache(path):
