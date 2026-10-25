@@ -717,11 +717,15 @@ def run_one_py(m):
             trc, tout = sh(cmd, ROOT, m.get("timeout", 300))
             if trc == -999:
                 return (m["id"], "HANG", "命令超时：%s" % cmd)
-            if not tout.strip():
-                return (m["id"], "HANG", "命令零输出：%s" % cmd)
+            # 77 必须排在零输出判定之前。
+            # 实测：一个静默 exit(77) 的命令没有输出，若先判零输出就会
+            # 被记成 HANG（"疑似挂起"），把"环境缺失没验证"误导成"进程
+            # 卡死" —— 排查方向完全不同。SKIP 是明确的语义，优先识别。
             if trc == 77:
                 return (m["id"], "ERROR",
                         "环境缺失未验证（SKIP）：%s" % cmd)
+            if not tout.strip():
+                return (m["id"], "HANG", "命令零输出：%s" % cmd)
             if trc != 0:
                 bad = [l for l in tout.splitlines()
                        if "FAIL" in l or "FATAL" in l]
