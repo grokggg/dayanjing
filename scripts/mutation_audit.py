@@ -136,6 +136,16 @@ MUTATIONS = [
         "bin": "build/test_tls_ch_struct",
     },
     {
+        "id": "M27",
+        "desc": "25_tls: 握手消息未收齐时对端关闭 -> 发告警（真实实现选择沉默等待，"
+                "发告警即产生可被探测的分歧）",
+        "file": "25_tls/src/tls_server.c",
+        "old": "        tls_err e = rec_read(c, &rt, &rb, &rl);\n        if (e != TLS_OK) return e;\n        if (rt == CT_ALERT) return TLS_ERR_ALERT;",
+        "new": "        tls_err e = rec_read(c, &rt, &rb, &rl);\n        if (e != TLS_OK) { rec_write(c, CT_ALERT, (const uint8_t *)\"\\x02\\x32\", 2); return e; }\n        if (rt == CT_ALERT) return TLS_ERR_ALERT;",
+        "mod": "25_tls",
+        "bin": "build/test_tls_ch_struct",
+    },
+    {
         "id": "M3",
         "desc": "20_packer: 入口 nop 垫恒为 0（首字节变回跨构建恒定签名）",
         "file": "20_packer/src/poly.c",

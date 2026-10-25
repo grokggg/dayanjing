@@ -140,7 +140,12 @@ static tls_err rec_read(tls_server_ctx *c, uint8_t *type, uint8_t **body, size_t
     /* 上限必须随加密状态收紧：明文阶段 2^14，加密后 2^14+8+16。
        一律按 18432 收的话，一个声明六万多字节的记录会被接受并去等
        那些永远不会到的字节 —— 阻塞式 IO 下就是一直等下去。 */
-    if (len == 0 || len > (c->rdec_on ? (size_t)REC_MAX_CT : (size_t)REC_MAX_PLAIN))
+    /* 零长记录在明文阶段是允许的（握手分片会出现），真实实现直接跳过；
+       此前这里把 len==0 一并拒掉，于是对端一分片就被我们拒，而 OpenSSL
+       不会 —— 这一个字节的差别就足以把我们从真实服务端里区分出来。
+       加密阶段不用单独判零长：GCM 记录至少要有 nonce+tag，下面的
+       len < 8+16 已经覆盖了。 */
+    if (len > (c->rdec_on ? (size_t)REC_MAX_CT : (size_t)REC_MAX_PLAIN))
         return TLS_ERR_RECORD;
     e = io_recv_exact(c, c->rec, len);
     if (e != TLS_OK) return e;
@@ -439,7 +444,54 @@ static tls_err derive_keys(tls_server_ctx *c) {
     return TLS_OK;
 }
 
-tls_err tls_server_accept(tls_server_ctx *c) {
+/* ---------------------------------------------------------------------------
+ * 失败时为什么要主动发告警
+ *
+ * 早先所有失败路径都是「直接 return 错误码」，一个字节都不发。后果是对端
+ * 只能看到连接被关掉 —— 它无法区分「对方按协议拒绝了我」和「网络断了 /
+ * 对方崩了」。而真实实现（OpenSSL）在结构非法时会明确发 fatal 告警，于是
+ * 探测者只需发一个畸形报文，就能靠「有没有告警」把我们和真实服务端区分开。
+ * 对需要隐蔽的服务端来说，这比功能出错严重得多。
+ *
+ * 为什么 IO 类错误不发：
+ *   连接已经断了，告警发不出去；而且 EOF 是正常结束的一种，把它当协议
+ *   失败发出去，会把「对方正常收尾」误报成「对方拒绝了」。
+ * ------------------------------------------------------------------------- */
+
+/* 告警描述码（RFC 5246 7.2）*/
+#define AL_CLOSE_NOTIFY        0
+#define AL_UNEXPECTED_MESSAGE 10
+#define AL_BAD_RECORD_MAC     20
+#define AL_HANDSHAKE_FAILURE  40
+#define AL_BAD_CERTIFICATE    43
+#define AL_ILLEGAL_PARAMETER  47
+#define AL_DECODE_ERROR       50
+#define AL_DECRYPT_ERROR      51
+#define AL_PROTOCOL_VERSION   70
+#define AL_INTERNAL_ERROR     80
+
+static tls_err alert_send(tls_server_ctx *c, uint8_t desc) {
+    uint8_t b[2];
+    b[0] = 2;          /* fatal */
+    b[1] = desc;
+    return rec_write(c, CT_ALERT, b, 2);
+}
+
+static uint8_t alert_desc_for(tls_err e) {
+    switch (e) {
+    case TLS_ERR_VERSION:  return AL_PROTOCOL_VERSION;
+    case TLS_ERR_RECORD:   return AL_DECODE_ERROR;
+    case TLS_ERR_CIPHER:   return AL_HANDSHAKE_FAILURE;
+    case TLS_ERR_SKE:      return AL_DECRYPT_ERROR;
+    case TLS_ERR_CERT:     return AL_BAD_CERTIFICATE;
+    case TLS_ERR_FINISHED: return AL_DECRYPT_ERROR;
+    case TLS_ERR_RANGE:
+    case TLS_ERR_TRUNC:    return AL_INTERNAL_ERROR;
+    default:               return AL_UNEXPECTED_MESSAGE;
+    }
+}
+
+static tls_err accept_inner(tls_server_ctx *c) {
     if (!c) return TLS_ERR_ARG;
     sha256_init(&c->tr);
     c->tr_prev = c->tr;
@@ -488,6 +540,16 @@ tls_err tls_server_accept(tls_server_ctx *c) {
         e = rec_read(c, &rt, &rb, &rl);
         if (e != TLS_OK) return e;
         if (rt == CT_CCS) break;
+        if (rt == CT_ALERT) return TLS_ERR_ALERT;
+        /* 零长记录是允许的（握手分片时会出现），真实实现直接跳过。
+           不跳过的话，我们会把它当成「CCS 之前的意外数据」而拒绝，
+           于是对端一旦分片就被我们拒掉 —— 而 OpenSSL 不会。 */
+        if (rl == 0) continue;
+        /* 除 CCS 与告警外，此时不该出现别的记录。早先这里是「不是 CCS
+           就继续循环」，等于静默吞掉一切：重复的 CKE、夹带的应用数据
+           都会被无视，而对端（真实客户端）会一直等到超时才发现不对。
+           真实实现发 unexpected_message，我们同样必须明确拒绝。 */
+        return TLS_ERR_HANDSHAKE;
     }
     c->rdec_on = 1;
     c->rseq = 0;
@@ -526,6 +588,17 @@ tls_err tls_server_accept(tls_server_ctx *c) {
 
     c->handshaked = 1;
     return TLS_OK;
+}
+
+tls_err tls_server_accept(tls_server_ctx *c) {
+    tls_err e = accept_inner(c);
+    if (e == TLS_OK) return e;
+    /* 这几类不是协议问题：连接已断 / 调用方用错 / 自己资源不足。
+       发出告警既发不出去，也会把 EOF 伪装成「对方拒绝了我」。 */
+    if (e == TLS_ERR_ARG || e == TLS_ERR_MEM || e == TLS_ERR_IO ||
+        e == TLS_ERR_CLOSED) return e;
+    (void)alert_send(c, alert_desc_for(e));   /* 发不出去也不改变返回值 */
+    return e;
 }
 
 tls_err tls_server_read(tls_server_ctx *c, uint8_t *buf, size_t cap, size_t *out_len) {

@@ -27,8 +27,13 @@
 import os
 import re
 import sys
+import socket
+import struct
+import subprocess
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.path.join(ROOT, "25_tls", "tests", "data")
 SRC = os.path.join(ROOT, "25_tls", "tests", "clienthello_default.h")
 DST = os.path.join(ROOT, "25_tls", "tests", "clienthello_struct.h")
 
@@ -145,6 +150,85 @@ def dup_exts(p, t, newbody=None):
             out.append({"type": t, "body": nb})
             break
     return out
+
+
+# ---------------------------------------------------------------------------
+# 用真实 OpenSSL s_server 逐例测真值
+# ---------------------------------------------------------------------------
+#
+# 为什么必须有这一段：本文件早先的 47 例期望值全是手写的，注释里写着
+# 「OpenSSL 实测拒绝」的其实一条也没测过。手写的后果在 C10_hs_len_plus10
+# 上暴露：握手体声明长度 +10，OpenSSL 其实是在等剩余字节、并不发告警，
+# 而手写的期望写成了 REJECT —— 于是我们把一个「两边完全一致」的行为
+# 记成了缺陷。
+#
+# 判据（与 gen_cke_struct.py 同源）：
+#   收到 ct==21   -> REJECT（服务端明确表态）
+#   收到 ct==22   -> TOLERATE（吃下了，正在等后续）
+#   什么都没收到  -> UNKNOWN（给不出结论，绝不猜成拒绝）
+#
+# 输入必须与喂给我们服务端的一模一样：只发这条 ClientHello，不多发。
+# 不对称的输入会让两边不在比同一件事（这个坑在 CKE 那版犯过一次）。
+
+
+def _classify(buf):
+    off = 0
+    saw_hs = False
+    while off + 5 <= len(buf):
+        ct = buf[off]
+        ln = struct.unpack(">H", buf[off + 3:off + 5])[0]
+        if ct == 21 and ln >= 2:
+            return "REJECT"
+        if ct == 22:
+            saw_hs = True
+        off += 5 + ln
+    return "TOLERATE" if saw_hs else "UNKNOWN"
+
+
+def probe_openssl(blob, port):
+    cmd = ["openssl", "s_server", "-accept", str(port),
+           "-cert", os.path.join(DATA, "leaf.pem"),
+           "-key", os.path.join(DATA, "leaf.key"),
+           "-tls1_2", "-cipher", "ECDHE-RSA-AES128-GCM-SHA256",
+           "-curves", "X25519", "-no_dhe", "-quiet", "-naccept", "1"]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
+    try:
+        s = None
+        for _ in range(60):
+            try:
+                s = socket.create_connection(("127.0.0.1", port), 0.5)
+                break
+            except OSError:
+                time.sleep(0.05)
+        if s is None:
+            return None
+        s.settimeout(1.5)
+        try:
+            s.sendall(blob)
+        except OSError:
+            return "UNKNOWN"
+        buf = b""
+        t0 = time.time()
+        while time.time() - t0 < 1.5:
+            try:
+                d = s.recv(65536)
+                if not d:
+                    break
+                buf += d
+            except (socket.timeout, OSError):
+                break
+        s.close()
+    finally:
+        try:
+            os.killpg(os.getpgid(p.pid), 9)
+        except OSError:
+            pass
+        try:
+            p.wait(2)
+        except Exception:
+            pass
+    return _classify(buf)
 
 
 def cases(p):
@@ -337,8 +421,10 @@ def emit(C):
     L = []
     L.append("/* clienthello_struct.h —— ClientHello 结构化变异用例")
     L.append(" *")
-    L.append(" * 由 scripts/gen_ch_struct.py 从真实 OpenSSL 3.0.2 s_client 报文生成。")
-    L.append(" * 不要手改本文件：改生成器再重新生成。")
+    L.append(" * 报文基底来自真实 OpenSSL 3.0.2 s_client；每例的期望值由生成器")
+    L.append(" * 连真实 s_server 逐例实测取得（不是手写猜测 —— 手写版本曾被证明")
+    L.append(" * 把「两边行为一致」误标成缺陷）。不要手改本文件：改生成器再重新")
+    L.append(" * 生成，且必须重跑实测。")
     L.append(" *")
     L.append(" * 与 test_tls_ch.c 的分工：")
     L.append(" *   那个做字节级变异（截断 / 单字节置 00-FF），这个做结构化变异 ——")
@@ -385,9 +471,43 @@ def emit(C):
 
 
 def main():
+    no_measure = "--no-measure" in sys.argv[1:]
     b = load_real()
     p = parse(b)
     C = cases(p)
+
+    if not no_measure:
+        port = 19400 + (os.getpid() % 300)
+        verdict = {}
+        for i, (nm, blob, _exp, _why) in enumerate(C):
+            v = probe_openssl(blob, port)
+            if v is None:
+                raise SystemExit(
+                    "[FATAL] s_server 起不来（第 %d 例 %s）。"
+                    "没有真值就不许沿用手写期望 —— 那正是本轮要修的毛病。"
+                    "确认 openssl 与证书可用后重跑。" % (i, nm))
+            verdict[nm] = v
+        M = {"TOLERATE": EXPECT_TOLERATE,
+             "REJECT": EXPECT_REJECT,
+             "UNKNOWN": EXPECT_ANY}
+        fixed = []
+        for i, (nm, blob, exp, why) in enumerate(C):
+            got = M[verdict[nm]]
+            if got != exp:
+                fixed.append((nm, exp, got, verdict[nm]))
+            C[i] = (nm, blob, got, "[实测:%s] %s" % (verdict[nm], why))
+        print("[INFO] 期望值由真实 OpenSSL %s 逐例实测取得"
+              % subprocess.run(["openssl", "version"], capture_output=True,
+                               text=True).stdout.strip())
+        if fixed:
+            print("[WARN] 与手写猜测不一致的 %d 例（手写不可信，以实测为准）："
+                  % len(fixed))
+            for nm, old, new, v in fixed:
+                print("       %-26s 手写=%-2d 实测=%-2d (%s)"
+                      % (nm, old, new, v))
+    else:
+        print("[WARN] --no-measure：沿用手写期望值，未经真值校验")
+
     out = emit(C)
     open(DST, "w", encoding="utf-8").write(out)
     print("[OK] 生成 %d 个结构化用例 -> %s" % (len(C), DST))

@@ -16,7 +16,8 @@ OBJS    = $(SRCS:.c=.o) $(CRYPTO:.c=.o)
 
 TESTS   = $(BUILD)/test_bn $(BUILD)/test_asn1 $(BUILD)/test_x509 $(BUILD)/test_tls \
           $(BUILD)/test_tls_srv $(BUILD)/test_tls_ch $(BUILD)/test_tls_hs \
-          $(BUILD)/test_tls_seq $(BUILD)/test_tls_ch_struct
+          $(BUILD)/test_tls_seq $(BUILD)/test_tls_ch_struct \
+          $(BUILD)/test_tls_cke_struct
 
 # 跨实现互操作工具：把服务端/客户端挂到真实 TCP 端口，与 OpenSSL 的
 # s_client / s_server 对连。它们不是单元测试，由 scripts/interop_openssl.sh 驱动。
@@ -65,6 +66,11 @@ $(BUILD)/test_tls_hs: tests/test_tls_hs.c $(OBJS) | $(BUILD)
 
 # 协议时序攻击（丢弃/重放/重排/注入）+ 语义断言：该拒绝的必须拒绝。
 # 必须进默认目标。
+$(BUILD)/test_tls_cke_struct: tests/test_tls_cke_struct.c tests/cke_struct.h \
+                              tests/hs_msgs_real.h $(OBJS) | $(BUILD)
+	$(CC) $(CFLAGS) -DTLS_TESTDATA='"$(PWD)/tests/data"' \
+	      -Iinclude -Isrc -Itests $< $(OBJS) -o $@
+
 $(BUILD)/test_tls_seq: tests/test_tls_seq.c $(OBJS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 

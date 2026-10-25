@@ -52,14 +52,36 @@ static int pass = 0, fail = 0;
 typedef struct {
     const uint8_t *in;
     size_t         in_len, in_off;
+    uint8_t        out[4096];
     size_t         sent;
 } io_st;
 
 static int snd_cb(void *arg, const uint8_t *d, size_t n) {
     io_st *io = (io_st *)arg;
-    (void)d;
+    if (io->sent + n <= sizeof(io->out))
+        memcpy(io->out + io->sent, d, n);
     io->sent += n;
     return (int)n;
+}
+
+/* 输出流里是否出现了告警记录（ct == 21）
+ *
+ * 为什么判据从「有没有产出字节」改成「有没有发告警」：
+ *   服务端原本在任何失败路径上一个字节都不发，于是「拒绝」表现为 sent=0。
+ *   但这不是协议行为 —— 对端只能看到连接被关，无法区分「被拒绝」和
+ *   「网络断了」，而真实实现会明确发 fatal 告警。补齐告警之后，「拒绝」
+ *   的表现变成 sent=7（一条告警记录），原来的 sent==0 判据就反了。
+ *   「有没有主动发告警」才是服务端对该报文的真实表态。 */
+static int sent_alert(const uint8_t *b, size_t len) {
+    size_t off = 0;
+    while (off + 5 <= len) {
+        uint8_t ct = b[off];
+        size_t  ln = ((size_t)b[off + 3] << 8) | b[off + 4];
+        if (ct == 21) return 1;
+        off += 5 + ln;
+        if (ln == 0) break;
+    }
+    return 0;
 }
 
 static int rcv_cb(void *arg, uint8_t *b, size_t cap) {
@@ -106,9 +128,11 @@ static void child_run(const uint8_t *in, size_t in_len,
     sent = (uint64_t)io.sent;
 
     {
+        int alert = sent_alert(io.out, io.sent);
         ssize_t w1 = write(fd, &sent, sizeof(sent));
         ssize_t w2 = write(fd, &err,  sizeof(err));
-        (void)w1; (void)w2;
+        ssize_t w3 = write(fd, &alert, sizeof(alert));
+        (void)w1; (void)w2; (void)w3;
     }
     _exit(0);
 }
@@ -117,7 +141,7 @@ static void child_run(const uint8_t *in, size_t in_len,
 static int run_case(const uint8_t *in, size_t in_len,
                     const rsa_privkey *key,
                     const uint8_t *der, size_t der_len,
-                    uint64_t *out_sent, int *out_err) {
+                    uint64_t *out_sent, int *out_err, int *out_alert) {
     int pfd[2];
     if (pipe(pfd) != 0) return -1;
 
@@ -131,10 +155,12 @@ static int run_case(const uint8_t *in, size_t in_len,
     close(pfd[1]);
 
     uint64_t sent = 0;
-    int      err  = -1;
+    int      err  = -1, alert = 0;
     if (read(pfd[0], &sent, sizeof(sent)) == (ssize_t)sizeof(sent)) {
-        ssize_t r2 = read(pfd[0], &err, sizeof(err));
-        (void)r2;
+        if (read(pfd[0], &err, sizeof(err)) == (ssize_t)sizeof(err)) {
+            if (read(pfd[0], &alert, sizeof(alert)) != (ssize_t)sizeof(alert))
+                alert = 0;
+        }
     }
     close(pfd[0]);
 
@@ -143,6 +169,7 @@ static int run_case(const uint8_t *in, size_t in_len,
 
     *out_sent = sent;
     *out_err  = err;
+    *out_alert = alert;
     if (WIFSIGNALED(st)) return -2 - WTERMSIG(st);
     int ec = WEXITSTATUS(st);
     if (ec == 99) return -99;
@@ -183,35 +210,45 @@ int main(void) {
 
     /* ---- 1. 逐用例：不崩不挂 + 按期望接受/拒绝 ---- */
     int crash = 0, hang = 0;
-    int wrong_tolerate = 0, wrong_reject = 0;
+    int wrong_tolerate = 0, wrong_reject = 0, wrong_any = 0;
     int n_tol = 0, n_rej = 0, n_any = 0;
 
     for (size_t i = 0; i < CHS_N; i++) {
         const chs_case_t *c = &CHS_CASES[i];
         uint64_t sent = 0;
         int      err  = -1;
-        int rc = run_case(c->buf, c->len, &key, der, der_len, &sent, &err);
+        int alert = 0;
+        int rc = run_case(c->buf, c->len, &key, der, der_len, &sent, &err, &alert);
 
         if (rc == -99) hang++;
         else if (rc < 0) crash++;
 
         if (c->expect == CH_EXPECT_TOLERATE) {
             n_tol++;
-            if (sent == 0) {
+            if (alert) {
                 wrong_tolerate++;
                 printf("[FAIL] %s 必须被接受（未知扩展/GREASE 被拒 = 真实互联网上握不上手），"
-                       "但 sent=0 rc=%d err=%d\n", c->name, rc, err);
+                       "却发出了告警 rc=%d err=%d\n", c->name, rc, err);
             }
         } else if (c->expect == CH_EXPECT_REJECT) {
             n_rej++;
-            if (sent != 0) {
+            if (!alert) {
                 wrong_reject++;
-                printf("[FAIL] %s 必须被干净拒绝，但产出了 %llu 字节响应"
-                       "（多半是照错误长度读过去了）\n",
-                       c->name, (unsigned long long)sent);
+                printf("[FAIL] %s 必须被拒绝并发告警，但没发告警"
+                       "（多半是照错误长度读过去了，或静默失败）sent=%llu err=%d\n",
+                       c->name, (unsigned long long)sent, err);
             }
         } else {
             n_any++;
+            /* 真值未定，但有一件事是确定的：实测中 OpenSSL 对这些用例
+             * 一个告警都没发。我们若发了，就把「等数据」和「拒绝」混为
+             * 一谈 —— 那正是可被探测的分歧。所以这里不是「什么都不验」。 */
+            if (alert) {
+                wrong_any++;
+                printf("[FAIL] %s 真实实现未发告警（多半在等剩余字节），"
+                       "我们却发了 sent=%llu err=%d\n",
+                       c->name, (unsigned long long)sent, err);
+            }
         }
 
         /* 逐例实际结果，供与 OpenSSL 做行为比对（scripts 里的 oracle）。
@@ -226,8 +263,11 @@ int main(void) {
     CHECK(wrong_tolerate == 0,
           "必须被容忍的 %d 例（未知扩展 / GREASE / 自检）：全部产出响应", n_tol);
     CHECK(wrong_reject == 0,
-          "必须被拒绝的 %d 例（声明长度不符）：全部未产出响应", n_rej);
-    printf("[INFO] 不强求接受或拒绝的 %d 例（重复扩展 / 极端但合法）只校验不崩不挂\n", n_any);
+          "必须被拒绝的 %d 例（声明长度不符）：全部发出告警", n_rej);
+    CHECK(wrong_any == 0,
+          "真值未定的 %d 例：不得发出告警（真实实现在这些用例上也没发）", n_any);
+    printf("[INFO] 真值未定的 %d 例（真实实现无响应，多半在等剩余字节）"
+           "：不崩不挂且未发告警\n", n_any);
 
     printf("\n=== result: %d pass, %d fail ===\n", pass, fail);
     rsa_privkey_clear(&key);
