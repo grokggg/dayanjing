@@ -397,7 +397,25 @@ int persist_linux_ensure(const char *root_prefix,
         }
     }
     if (already == (int)nms) return 1;
-    return (newly > 0) ? 0 : -1;
+
+    /*
+     * 只有一项都没装上才算失败。
+     *
+     * 不能因为没有装满三项就判 -1：sshkey 机制要求调用方先用
+     * persist_sshkey_pubkey 注入真实公钥，未注入时 generate 按设计返回 0
+     * （拒绝写入无法认证的占位 key）。若把"sshkey 不可用"当成整体失败，
+     * 则 systemd + cron 已真实驻留的机器会被报成 -1，常驻进程据此拒绝
+     * 运行 —— 明明已经驻留成功，却因为一个**本就可选**的机制而退出。
+     *
+     * 因此以"最终已装机制总数"为准：0 项 = 失败；否则按是否有新增分
+     * 0（新装）/ 1（已驻留，幂等）。
+     */
+    int total = 0;
+    for (size_t i = 0; i < nms; i++)
+        if (persist_installed(root_prefix, ms[i]) == 1) total++;
+
+    if (total == 0) return -1;
+    return (newly > 0) ? 0 : 1;
 }
 
 int persist_linux_query(const char *root_prefix,

