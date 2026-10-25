@@ -484,15 +484,17 @@ static void mf_close(cam_source_t *self)
 /* 工厂                                                               */
 /* ------------------------------------------------------------------ */
 
-cam_source_t *cam_source_create(const char *backend)
-{
-    /* backend 选择：当前仅实现 "mf" */
-    if (backend && _stricmp(backend, "mock") == 0)
-        return NULL; /* mock 在 cam_mock.c 中提供 */
+/* 前向声明：create 需把 destroy 指针写进结构体，而 destroy 定义在后面。
+ * 两者都必须 extern "C"，cam_factory.c 才能按 C 符号引用。 */
+extern "C" void cam_source_destroy_mf(cam_source_t *src);
 
+extern "C" cam_source_t *cam_source_create_mf(void)
+{
+    /* 分发已上移到 cam_factory.c；本函数只负责构造 MF 后端本身 */
     cam_source_t *src = (cam_source_t *)CoTaskMemAlloc(sizeof(cam_source_t));
     if (!src)
         return NULL;
+    src->destroy = cam_source_destroy_mf;
     ZeroMemory(src, sizeof(*src));
 
     mf_priv *p = new (std::nothrow) mf_priv();
@@ -515,7 +517,7 @@ cam_source_t *cam_source_create(const char *backend)
     return src;
 }
 
-void cam_source_destroy(cam_source_t *src)
+extern "C" void cam_source_destroy_mf(cam_source_t *src)
 {
     if (!src)
         return;

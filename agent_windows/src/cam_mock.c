@@ -121,9 +121,11 @@ static void mock_destroy(cam_source_t *self)
     free(m);
 }
 
-cam_source_t *cam_source_create(const char *backend)
+/* 前向声明：destroy 定义在后面，而 create 需要把它的地址写进结构体 */
+void cam_source_destroy_mock(cam_source_t *src);
+
+cam_source_t *cam_source_create_mock(void)
 {
-    (void)backend;   /* mock 后端忽略参数差异，统一返回虚拟源 */
     mock_source_t *m = (mock_source_t *)calloc(1, sizeof(*m));
     if (!m) return NULL;
 
@@ -132,6 +134,7 @@ cam_source_t *cam_source_create(const char *backend)
     m->api.close            = mock_close;
     m->api.enumerate        = mock_enumerate;
     m->api.check_permission = mock_check_permission;
+    m->api.destroy          = cam_source_destroy_mock;
     m->api.priv             = m;
     m->opened               = false;
     m->seq                  = 0;
@@ -140,10 +143,10 @@ cam_source_t *cam_source_create(const char *backend)
     return &m->api;
 }
 
-void cam_source_destroy(cam_source_t *src)
+void cam_source_destroy_mock(cam_source_t *src)
 {
     if (!src) return;
-    src->close(src);
+    if (src->close) src->close(src);
     mock_destroy(src);
 }
 

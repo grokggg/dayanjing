@@ -266,9 +266,26 @@ int main(void)
         cam_source_t *s = cam_source_create("mock");
         CHECK(s != NULL, "cam_source_create(\"mock\") 返回非空");
 
+        /* backend 语义变更（引入 cam_factory.c 之后）：
+         *
+         * 旧行为：Linux 链只链 cam_mock.o，它忽略 backend 参数，传 "mf"
+         *         同样返回 mock。那是"链接期选择后端"的副作用，不是设计。
+         *        危害很具体：部署方把 Windows 的配置照抄到 Linux 上
+         *        （backend="mf"），会静默拿到 mock 合成帧，一直以为在采
+         *        真机画面。假帧 + 无人察觉，是采集场景最坏的失效形态。
+         *
+         * 新行为：按名字分发。后端未链入本链即返回 NULL，配置错误立刻可见。
+         * 真机降级不在这里做——V4L2 后端内部已处理（无 /dev/video* 时自动
+         * 走合成帧），外层再降一次只会把两个层级的降级叠成不可诊断的行为。 */
         cam_source_t *mf = cam_source_create("mf");
-        CHECK(mf != NULL, "Linux 下 backend=\"mf\" 也返回可用源（自动降级 mock）");
-        cam_source_destroy(mf);
+        CHECK(mf == NULL, "Linux 下 backend=\"mf\" 返回 NULL（MF 未链入，不冒充 mock）");
+
+        cam_source_t *v4 = cam_source_create("v4l2");
+        CHECK(v4 != NULL, "Linux 下 backend=\"v4l2\" 返回可用源");
+        cam_source_destroy(v4);
+
+        cam_source_t *bogus = cam_source_create("bogus");
+        CHECK(bogus == NULL, "未知 backend 返回 NULL（不静默回落为假帧）");
 
         cam_config_t cfg = { 320, 240, 10, 1000, 0, false };
         CHECK(s->open(s, &cfg) == CAM_OK, "open 成功");

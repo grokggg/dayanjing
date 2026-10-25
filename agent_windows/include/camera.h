@@ -97,6 +97,15 @@ struct cam_source {
     /* 判断当前进程是否有摄像头权限 */
     bool      (*check_permission)(void);
 
+    /* 后端析构。由各后端在构造时设置，cam_source_destroy 在 cam_factory.c
+     * 中统一实现并转调它。
+     *
+     * 此前各后端各自导出一份 cam_source_destroy，与 cam_source_create 是
+     * 同一个问题：同一条链接里只能存在一个后端，否则重复符号。析构逻辑
+     * 本身各后端并不同（mock 用 free、MF 用 CoTaskMemFree + delete），无法
+     * 简单合并，故改为函数指针由后端自带。 */
+    void      (*destroy)(cam_source_t *self);
+
     void *priv;  /* 后端私有数据 */
 };
 
