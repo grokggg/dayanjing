@@ -20,14 +20,26 @@ import shutil
 import subprocess
 import sys
 
+
+def _default_name(tpl):
+    m = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"',
+                  open(tpl, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("[FATAL] 无法从模板解析默认 NAME——"
+                         "守卫会按旧名找落点，失配方向是假阴性（恒绿）")
+    return m.group(1)
+
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD = os.path.dirname(HERE)
 REPO = os.path.dirname(MOD)
 TEMPLATE = os.path.join(MOD, "onekey.sh")
+DEFN = _default_name(TEMPLATE)
 GEN = os.path.join(MOD, "make_onekey.py")
 CAMD = os.path.join(REPO, "agent_windows", "build", "linux", "camd")
 CA = os.path.join(REPO, "25_tls", "tests", "data", "ca.pem")
-CONF = "/etc/camd/camd.conf"
+CONF = "/etc/%s/%s.conf" % (DEFN, DEFN)
 
 PASS = 0
 FAIL = 0
@@ -102,7 +114,7 @@ def main():
     check('CAMD_EXTRA="--front-host' in conf,
           "④ CAMD_EXTRA 带引号（防 source 时被当成命令执行）",
           "实测缺陷：无引号时参数静默丢失")
-    check(os.path.exists("/etc/camd/ca.pem"), "⑤ CA 已投递到目标机")
+    check(os.path.exists("/etc/%s/ca.pem" % DEFN), "⑤ CA 已投递到目标机")
 
     print("=== 正向：tcp 模式回归（不得被 front 改动破坏） ===")
     cleanup()

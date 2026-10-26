@@ -29,10 +29,22 @@ import sys
 import threading
 import time
 
+
+def _default_name(tpl):
+    m = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"',
+                  open(tpl, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("[FATAL] 无法从模板解析默认 NAME——"
+                         "守卫会按旧名找落点，失配方向是假阴性（恒绿）")
+    return m.group(1)
+
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 EXFIL = os.path.join(ROOT, "21_exfil")
 TEMPLATE = os.path.join(EXFIL, "onekey.sh")
+DEFN = _default_name(TEMPLATE)
 GEN = os.path.join(EXFIL, "make_onekey.py")
 CAMD = os.path.join(ROOT, "agent_windows", "build", "linux", "camd")
 WORK = "/data/workspace/.okarch"
@@ -167,7 +179,7 @@ def main():
     # ---------- P3：包里没有该架构分节 ----------
     run("sh %s uninstall" % only64)
     rc, o = run("sh %s checkpayload" % only64, env={"PATH": fake_uname("aarch64")})
-    left = os.path.exists("/usr/local/bin/camd") or os.path.isdir("/etc/camd")
+    left = os.path.exists("/usr/local/bin/" + DEFN) or os.path.isdir("/etc/" + DEFN)
     check(rc != 0 and "没有" in o and "分节" in o,
           "P3 缺架构分节时必须拒绝（不得装错架构产物）", "rc=%d" % rc)
     check(not left, "P4 被拒绝后不得留下已安装文件", "残留=%s" % left)

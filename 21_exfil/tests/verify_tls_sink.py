@@ -15,6 +15,7 @@ import json
 import time
 import socket
 import shutil
+import tempfile
 import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,7 +26,12 @@ BADCA = os.path.join(ROOT, "25_tls/tests/data/selfsigned.pem")
 CERT = os.path.join(ROOT, "25_tls/tests/data/leaf.pem")
 KEY = os.path.join(ROOT, "25_tls/tests/data/leaf.key")
 
-BASE = os.path.join(os.path.dirname(ROOT), ".verify_tls")
+# BASE 每次运行都取唯一目录。此前是仓库内固定路径 .verify_tls：
+# 上一轮若异常退出留下残留，本轮开头的 rmtree 会抛
+# "Directory not empty: 'r1'"，于是**断言全过（total fail=0）而进程
+# rc=1**，make 报 Error 1。排查者会去查 TLS 握手，而真因是清理竞态——
+# 症状与根因完全不对应。改为唯一目录后跨次污染不复存在。
+BASE = None
 
 PASS = 0
 FAIL = 0
@@ -201,9 +207,8 @@ def main():
     for f in (CAMD, SINK, CA, BADCA, CERT, KEY):
         if not os.path.exists(f):
             raise SystemExit("[FATAL] 缺少必需产物: %s" % f)
-    if os.path.isdir(BASE):
-        shutil.rmtree(BASE)
-    os.makedirs(BASE)
+    global BASE
+    BASE = tempfile.mkdtemp(prefix="vtls_")
 
     # ---------- 正向：真实 TLS 收端 ----------
     print("=== 正向：tls:// 出口 + 真实 TLS 收端 ===")

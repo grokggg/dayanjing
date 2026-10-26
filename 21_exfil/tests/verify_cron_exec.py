@@ -27,6 +27,7 @@ cron 守护进程**（cron/crond/busybox 全无，且无外网装不上），所
      且 C2 不新增字节 —— 证明 P3/P4 不是恒绿
 """
 
+import re
 import json
 import os
 import shutil
@@ -34,6 +35,20 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+
+
+def _default_name(tpl):
+    m = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"',
+                  open(tpl, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("[FATAL] 无法从模板解析默认 NAME——"
+                         "守卫会按旧名找落点，失配方向是假阴性（恒绿）")
+    return m.group(1)
+
+CRONF = None  # 占位，下面紧随 DEFN 赋值
+DEFN = _default_name(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "onekey.sh"))
+CRONF = "/etc/cron.d/" + DEFN
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -87,7 +102,7 @@ def main():
     # 上一版漏了这一步，收端死亡却被伪装成 "camd 回传失败(-4)" —— 与上一轮
     # tls sink 那次是同一类失效：工具死了，症状却指向被测代码。
     os.makedirs(os.path.join(WORK, "inbox"), exist_ok=True)
-    for p in (LOG, "/etc/cron.d/camd"):
+    for p in (LOG, CRONF):
         try:
             os.remove(p)
         except OSError:
@@ -144,19 +159,19 @@ def main():
     inst_ok = ("cron 条目已写入" in r.stdout)
     ck(inst_ok, "P2a 安装写出 cron 条目",
        " | ".join(l.strip() for l in r.stdout.splitlines() if "cron" in l))
-    if not os.path.isfile("/etc/cron.d/camd"):
+    if not os.path.isfile(CRONF):
         ck(False, "P2a 安装写出 cron 条目", "文件不存在")
         sink.terminate()
         return 1
-    entry = open("/etc/cron.d/camd").read()
+    entry = open(CRONF).read()
     print("      条目: %s" % entry.strip().replace("\n", " | "))
 
     base = c2_bytes(stats)
     print("      基线字节（install 试运行已计入，不算进触发）: %d" % base)
 
     # 等条目自己的时刻真实触发
-    r = sh("python3 %s --file /etc/cron.d/camd --serve 180 --stop-after 1 "
-           "--log %s" % (harness, LOG), timeout=220)
+    r = sh("python3 %s --file %s --serve 180 --stop-after 1 --log %s"
+           % (harness, CRONF, LOG), timeout=220)
     fired = "FIRED" in r.stdout
     ck(fired, "P2b 条目在自身时刻被真实触发", r.stdout.strip()[:200])
 
@@ -170,10 +185,10 @@ def main():
     ck("必须指定" not in logtxt, "P4b 日志无 '必须指定 --key'")
 
     # R1 反向：退回缺陷写法（. conf 但不导出）→ 必须失败且不产出
-    conf = "/etc/camd/camd.conf"
+    conf = "/etc/%s/%s.conf" % (DEFN, DEFN)
     if os.path.isfile(conf):
         before_r = c2_bytes(stats)
-        with open("/etc/cron.d/camd", "w") as f:
+        with open(CRONF, "w") as f:
             f.write("# managed\nSHELL=/bin/sh\n")
             f.write("PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:"
                     "/usr/sbin:/usr/bin\n")
@@ -181,11 +196,12 @@ def main():
             # 条目根本解析不过（dow 字段拿到 "root"），harness 直接报
             # ValueError —— 反向用例**没有真正跑到**，却因为 rc!=0 看起来
             # 像"失败了"。这正是"注入没生效"最典型的伪装。
-            f.write("0 * * * * root . %s; /usr/local/bin/camd "
-                    '--sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND"\n'
-                    % conf)
-        r2 = sh("python3 %s --file /etc/cron.d/camd --once --log %s"
-                % (harness, LOG), timeout=90)
+            f.write(("0 * * * * root . %s; /usr/local/bin/" % conf)
+                    + DEFN
+                    + ' --sink "tcp://$C2_ADDR" --backend "'
+                      '$CAMD_BACKEND"\n')
+        r2 = sh("python3 %s --file %s --once --log %s"
+                % (harness, CRONF, LOG), timeout=90)
         time.sleep(1)
         ck(r2.returncode != 0 and "必须指定" in open(LOG).read(),
            "R1 反向：缺陷写法下 camd 必报缺密钥",
@@ -201,8 +217,8 @@ def main():
     # 清理
     sh("sh %s uninstall" % onekey, timeout=120)
     sink.terminate()
-    leftover = [p for p in ("/etc/cron.d/camd", "/usr/local/bin/camd",
-                            "/etc/camd/camd.conf") if os.path.exists(p)]
+    leftover = [p for p in ("/etc/cron.d/" + DEFN, "/usr/local/bin/" + DEFN,
+                            "/etc/%s/%s.conf" % (DEFN, DEFN)) if os.path.exists(p)]
     ck(not leftover, "P5 卸载无残留", str(leftover))
 
     print("\n=== result: %d pass, %d fail ===" % (len(PASS), len(FAIL)))

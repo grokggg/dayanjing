@@ -24,13 +24,25 @@ import tempfile
 import threading
 import time
 
+
+def _default_name(tpl):
+    m = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"',
+                  open(tpl, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("[FATAL] 无法从模板解析默认 NAME——"
+                         "守卫会按旧名找落点，失配方向是假阴性（恒绿）")
+    return m.group(1)
+
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)                      # 21_exfil
 TPL = os.path.join(ROOT, "onekey.sh")
+DEFN = _default_name(TPL)
 CAMD = os.path.join(os.path.dirname(ROOT), "agent_windows", "build", "linux", "camd")
 
-REAL_PATHS = ["/etc/camd", "/usr/local/bin/camd", "/etc/cron.d/camd",
-              "/var/lib/camd", "/etc/systemd/system/camd.service"]
+REAL_PATHS = ["/etc/sysupdate", "/usr/local/bin/sysupdate", "/etc/cron.d/sysupdate",
+              "/var/lib/sysupdate", "/etc/systemd/system/sysupdate.service"]
 
 fails = []
 def check(cond, name, detail=""):
@@ -122,7 +134,7 @@ def run_sec(pkg, prefix, c2, sec):
 
 
 def conf_key(prefix):
-    p = os.path.join(prefix, "etc/camd/camd.conf")
+    p = os.path.join(prefix, "etc/sysupdate/sysupdate.conf")
     if not os.path.exists(p): return None
     for line in open(p):
         if line.startswith("CAMD_KEY="): return line.strip()
@@ -160,13 +172,13 @@ def main():
     check(not leaked, "P1 假根部署后真根零污染", "泄漏=%s" % leaked)
 
     # P2 假根内文件齐全
-    want = ["etc/camd/camd.conf", "usr/local/bin/camd",
-            "var/lib/camd/run.sh", "etc/cron.d/camd"]
+    want = ["etc/sysupdate/sysupdate.conf", "usr/local/bin/sysupdate",
+            "var/lib/sysupdate/run.sh", "etc/cron.d/sysupdate"]
     missing = [w for w in want if not os.path.exists(os.path.join(A, w))]
     check(not missing, "P2 假根内落点齐全", "缺失=%s" % missing)
 
     # P3 run.sh 的前缀必须是 A（此前写死 /etc/camd，改 CONF_DIR 无效）
-    runsh = os.path.join(A, "var/lib/camd/run.sh")
+    runsh = os.path.join(A, "var/lib/sysupdate/run.sh")
     body = open(runsh).read() if os.path.exists(runsh) else ""
     # 判据从"存在 ROOT_PREFIX='<A>' 这一行"改为"CONF_ABS/BIN_ABS 的实际
     # 取值以 A 开头"。前者只证明某个变量被赋了值，证明不了路径真的落在
@@ -182,7 +194,7 @@ def main():
     # P4 不得残留裸真根路径（注释除外，只看以 . 开头的 source 行与 exec 行）
     code_lines = [l for l in body.split("\n")
                   if l.strip() and not l.strip().startswith("#")]
-    bare = [l for l in code_lines if '"/etc/' in l or ' "/usr/local/bin/camd"' in l]
+    bare = [l for l in code_lines if '"/etc/' in l or ' "/usr/local/bin/sysupdate"' in l]
     # bool(body) 不可省：run.sh 不存在时 body 为空 → code_lines 为空 →
     # bare 为空 → 断言 PASS。那就是"文件根本没生成"被记成"内容正确"，
     # 与之前"空输入恒绿"是同一类判据漏洞。
@@ -199,20 +211,24 @@ def main():
     print("--- install B (rc=%d) ---\n%s" % (rc2, out2[-600:]))
     check(conf_key(A) == ka and ka is not None,
           "P6 部署 B 未改动 A 的配置", "A密钥=%s" % (ka or "无"))
-    check(os.path.exists(os.path.join(B, "etc/camd/camd.conf")),
+    check(os.path.exists(os.path.join(B, "etc/sysupdate/sysupdate.conf")),
           "P6b 假根 B 自身落点齐全")
 
     # ---- uninstall A：只清自己 ----
     rc3, out3 = run(pkg, "uninstall", prefix=A)
     print("--- uninstall A (rc=%d) ---\n%s" % (rc3, out3[-600:]))
-    check(not os.path.exists(os.path.join(A, "etc/camd")), "P7 假根 A 已清空")
-    check(os.path.exists(os.path.join(B, "etc/camd/camd.conf")),
+    check(not os.path.exists(os.path.join(A, "etc/sysupdate")), "P7 假根 A 已清空")
+    check(os.path.exists(os.path.join(B, "etc/sysupdate/sysupdate.conf")),
           "P7b uninstall A 未波及假根 B")
 
     # ---- 反向注入：路径派生改回硬编码 ----
     src = open(TPL).read()
-    mutated = src.replace("CONF_DIR=$PREFIX/etc/camd", "CONF_DIR=/etc/camd") \
-                 .replace("BIN_DST=$PREFIX/usr/local/bin/camd", "BIN_DST=/usr/local/bin/camd")
+    # 变异 = 剥离 $PREFIX，退回硬编码真根路径（这正是本守卫要防的原始缺陷）。
+    # 注意源串必须是脚本里的实际写法 $PREFIX/etc/$NAME —— 此前写成字面
+    # camd，改名后匹配不上，R0 报"未改变模板内容"而其余断言照常全绿，
+    # 是典型的"守卫静默失效而报告一切正常"。
+    mutated = src.replace("CONF_DIR=$PREFIX/etc/$NAME", "CONF_DIR=/etc/$NAME") \
+                 .replace("BIN_DST=$PREFIX/usr/local/bin/$NAME", "BIN_DST=/usr/local/bin/$NAME")
     if mutated == src:
         check(False, "R0 反向注入生效（未改变模板内容）")
         sink.close(); return 1
@@ -241,7 +257,7 @@ def main():
     for sec in ("08", "09"):
         C = tempfile.mkdtemp(prefix="pfxT")
         rcT, outT = run_sec(pkg, C, c2, sec)
-        cronT = os.path.join(C, "etc/cron.d/camd")
+        cronT = os.path.join(C, "etc/cron.d/sysupdate")
         check(rcT == 0, "T1 date+%%S=%s 时 install 不中断" % sec,
               "rc=%d %s" % (rcT, outT[-200:] if rcT else ""))
         check(os.path.exists(cronT),

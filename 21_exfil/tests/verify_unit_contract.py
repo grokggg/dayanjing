@@ -33,10 +33,22 @@ import shutil
 import subprocess
 import sys
 
+
+def _default_name(tpl):
+    m = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"',
+                  open(tpl, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("[FATAL] 无法从模板解析默认 NAME——"
+                         "守卫会按旧名找落点，失配方向是假阴性（恒绿）")
+    return m.group(1)
+
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD = os.path.dirname(HERE)
 REPO = os.path.dirname(MOD)
 TEMPLATE = os.path.join(MOD, "onekey.sh")
+DEFN = _default_name(TEMPLATE)
 GEN = os.path.join(MOD, "make_onekey.py")
 CAMD = os.path.join(REPO, "agent_windows", "build", "linux", "camd")
 
@@ -81,8 +93,8 @@ def mutate(kind):
         # 未定义变量会直接让 cat 失败、install 中断——那验到的是"脚本崩了"
         # 而不是"路径不同源"，两者症状都是 install rc=1，排查方向完全不同。
         "paths": ('CONF_ABS="$CONF_FILE"\nBIN_ABS="$BIN_DST"\n',
-                  'CONF_ABS="/etc/camd/camd.conf"\n'
-                  'BIN_ABS="/usr/local/bin/camd"\n'),
+                  'CONF_ABS="/etc/sysupdate/sysupdate.conf"\n'
+                  'BIN_ABS="/usr/local/bin/sysupdate"\n'),
     }
     old, new = pairs[kind]
     n = s.count(old)
@@ -121,8 +133,8 @@ def build_case(tag, c2="127.0.0.1:1"):
     r2 = subprocess.run(["sh", "/tmp/.uc_%s.sh" % tag, "renderunit",
                          "--prefix", pfx],
                         capture_output=True, text=True, cwd=MOD)
-    unit = os.path.join(pfx, "etc/systemd/system/camd.service")
-    runner = os.path.join(pfx, "var/lib/camd/run.sh")
+    unit = os.path.join(pfx, "etc/systemd/system/sysupdate.service")
+    runner = os.path.join(pfx, "var/lib/sysupdate/run.sh")
     return {
         "pfx": pfx,
         "unit": unit,
@@ -130,8 +142,8 @@ def build_case(tag, c2="127.0.0.1:1"):
         "runner_txt": open(runner, encoding="utf-8").read() if os.path.exists(runner) else "",
         "render_rc": r2.returncode,
         "render_out": r2.stdout + r2.stderr,
-        "conf": os.path.join(pfx, "etc/camd/camd.conf"),
-        "bin": os.path.join(pfx, "usr/local/bin/camd"),
+        "conf": os.path.join(pfx, "etc/sysupdate/sysupdate.conf"),
+        "bin": os.path.join(pfx, "usr/local/bin/sysupdate"),
     }, None
 
 

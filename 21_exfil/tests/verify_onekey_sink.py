@@ -10,10 +10,23 @@
 R1 的存在意义：若没有它，仅凭"C2 收到字节"这个正向断言，在 sink 被误写成
 文件路径时同样可能凑巧成立（例如 cwd 恰好可写）——那时守卫会假绿。
 """
+import re
 import os, re, socket, subprocess, sys, time, threading, hashlib, glob
 
+
+def _default_name(tpl):
+    m = re.search(r'^NAME="\$\{NAME:-([^}]+)\}"',
+                  open(tpl, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("[FATAL] 无法从模板解析默认 NAME——"
+                         "守卫会按旧名找落点，失配方向是假阴性（恒绿）")
+    return m.group(1)
+
+
+
 CAMD_SRC = "/data/workspace/dayanjing/agent_windows/build/linux/camd"
-CAMD = "/usr/local/bin/camd"
+DEFN = _default_name(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "onekey.sh"))
+CAMD = "/usr/local/bin/" + DEFN
 TEMPLATE = "/data/workspace/dayanjing/21_exfil/onekey.sh"
 
 received = {"n": 0, "buf": b"", "conn": 0}
