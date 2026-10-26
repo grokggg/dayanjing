@@ -593,6 +593,23 @@ do_uninstall() {
     require_root
     HAVE_SYSTEMD=0
     probe_systemd
+
+    # 痕迹探测（不可省）：此前无论装没装，uninstall 一律报"systemd/文件/进程
+    # 已清理"三项 OK。于是部署中途失败留下的半截状态、或根本没装过的机器，
+    # 跑 uninstall 都会显示"成功 3 失败 0"——运维据此认为已清干净，而实际
+    # 什么都没做（或半截残留仍在）。区分"清理了"与"本就没有"是诊断的前提。
+    _tr=0
+    [ -f "$CONF_FILE" ] && _tr=1
+    [ -x "$BIN_DST" ]  && _tr=1
+    [ -f "$CRON" ]     && _tr=1
+    [ -f "$UNIT" ]     && _tr=1
+    [ -d "$LIB_DIR" ]  && _tr=1
+    [ -d "$CONF_DIR" ] && _tr=1
+    if [ "$_tr" = 0 ] && [ "$FAKE_ROOT" = 0 ]; then
+        OK "未检测到安装痕迹——本就未安装，无需清理"
+        return 0
+    fi
+
     # 顺序：先 disable --now 再删单元。只 stop 的话 Restart=always 会被拉起。
     if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
         systemctl disable --now camd.service >/dev/null 2>&1

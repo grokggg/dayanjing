@@ -80,7 +80,11 @@ def push_commit(parent_sha, base_tree, local_commit):
             status = parts[0][0]
             path = parts[-1]
             if status == "D":
-                entries.append({"path": path, "sha": None, "type": "blob"})
+                # 删除：sha 置 null，但 mode 仍须为有效值——实测缺 mode 时
+                # API 返回 422 "Must supply a valid tree.mode"，而报错不指向
+                # 具体条目，排查会把人引向 blob 而非删除项。
+                entries.append({"path": path, "mode": "100644",
+                                "sha": None, "type": "blob"})
                 print(f"      D {path}")
                 continue
             mode = get_mode(local_commit, path)
