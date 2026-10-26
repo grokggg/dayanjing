@@ -137,6 +137,26 @@ def r3_tls_rejects_plain():
         shutil.rmtree(T, ignore_errors=True)
         return
 
+    # 【flaky 修复】start 返回 0 **不代表收端已 accept**。make test 串行跑完
+    # 十几个守卫后系统负载高，收端起来得慢，明文客户端 connect 直接失败，
+    # 日志里自然没有"TLS 握手失败"——于是"压根没连上"被记成"没挡住明文"，
+    # 守卫偶发红（单独重跑又绿）。flaky 守卫比没有守卫更糟：它会淹没真正
+    # 的失败，最后被人加 || true 关掉。故显式等到端口可连接再发。
+    ready = False
+    for _ in range(100):
+        try:
+            c = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+            c.close()
+            ready = True
+            break
+        except OSError:
+            time.sleep(0.1)
+    if not ready:
+        check(False, "前置：TLS 收端应已监听（start rc=0 不代表已 accept）")
+        subprocess.run(["sh", SETUP, "stop"], capture_output=True, timeout=30, env=env)
+        shutil.rmtree(T, ignore_errors=True)
+        return
+
     # 明文客户端：送一段随机字节，服务端做 TLS 握手必然失败，
     # 因此收端必须**一个字节都没记进账**。
     try:
@@ -145,7 +165,8 @@ def r3_tls_rejects_plain():
         time.sleep(0.6)
         s.close()
     except Exception as e:
-        print("明文连接异常: %r" % e)
+        # 不再静默：连不上必须报出来，否则"没验证"会伪装成"没挡住"。
+        check(False, "明文客户端应能建立 TCP 连接（连不上则本条未验证）: %r" % e)
 
     lg = os.path.join(inbox, "c2.log")
     logged = ""

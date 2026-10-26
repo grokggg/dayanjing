@@ -4,12 +4,13 @@
 正向(F1/F2)：camd 用 tcp:// 前缀的 sink，C2 真实收到字节、线上不含明文。
 反向(R1)：   去掉 tcp:// 前缀（缺陷形态），C2 收 0 字节、且本地生成
              名为"地址:端口"的文件 —— 证明该前缀是回传能否成立的唯一分界。
-静态(S1)：   onekey.sh 模板里三处 sink 必须显式带 tcp:// 前缀。
+静态(S1)：   onekey.sh 里 sink 必须是"单一产地"——所有使用点取 conf 的
+            CAMD_SINK，不得各自拼装；定义处必须带 tcp:// 或 front:// 前缀。
 
 R1 的存在意义：若没有它，仅凭"C2 收到字节"这个正向断言，在 sink 被误写成
 文件路径时同样可能凑巧成立（例如 cwd 恰好可写）——那时守卫会假绿。
 """
-import os, socket, subprocess, sys, time, threading, hashlib, glob
+import os, re, socket, subprocess, sys, time, threading, hashlib, glob
 
 CAMD_SRC = "/data/workspace/dayanjing/agent_windows/build/linux/camd"
 CAMD = "/usr/local/bin/camd"
@@ -123,11 +124,29 @@ def main():
 
     # ---------- S1: 模板静态守卫 ----------
     s = open(TEMPLATE).read()
-    # 注意：# PAYLOAD_BEGIN 在注释里也被提及过，按它切分会把正文切掉。
-    # 直接对全文计数：注释中出现的写法是 `--sink $C2_ADDR`（tcp://）`，
-    # 不含 "--sink tcp://" 或 '--sink "tcp://' 连续串，不会误计。
-    n_pref = s.count('--sink tcp://') + s.count('--sink "tcp://')
-    check(n_pref >= 3, "S1 模板三处 sink 均显式带 tcp:// 前缀", f"计数={n_pref}")
+    #
+    # 判据随重构更新：sink 已从"三处各自拼装"改为**单一产地**（conf 里的
+    # CAMD_SINK，由 sink_lines 唯一生成，run.sh 与 verify_run 都消费它）。
+    # 旧判据要求"三处 sink 均显式带 tcp:// 前缀"—— 重构后只剩定义处一处
+    # 带前缀，旧判据必然失败。但**不能**把代码退回三处重复：当年 tcp://
+    # 前缀缺陷正是"三处里漏掉两处"造成的，重复就是缺陷的温床。
+    # 新判据改为守住真正的不变量：使用点不得自行拼装，定义点必须带 scheme。
+    code = [l for l in s.split("\n") if l.strip() and not l.strip().startswith("#")]
+    uses = [l for l in code if "--sink" in l]
+    bad = []
+    for l in uses:
+        m = re.search(r'--sink\s+("?)([^"\s]+)\1', l)
+        # 实参必须是 CAMD_SIND 变量本身；写死 tcp://$C2_ADDR 之类即失守。
+        if not m or "CAMD_SINK" not in m.group(2):
+            bad.append(l.strip()[:70])
+    check(bool(uses) and not bad,
+          "S1 所有 sink 使用点均取自 CAMD_SINK（单一产地，不得各自拼装）",
+          f"使用点={len(uses)} 异常={bad}")
+    # 只取 printf 行：verify_run 里还有一句 `CAMD_SINK=""`（读 conf 前的
+    # 清空初始化），它不含 scheme 且本就不该含——算进来会让判据恒红。
+    defs = [l for l in code if "CAMD_SINK=" in l and "printf" in l]
+    check(bool(defs) and all(("tcp://" in d or "front://" in d) for d in defs),
+          "S1b CAMD_SINK 定义处带 scheme 前缀", f"定义={[d.strip()[:60] for d in defs]}")
     # 必须查"调用点"而非"定义存在"：只删调用行时函数定义仍在，
     # 若判据是 `"validate_c2" in s` 会继续绿 —— 校验形同虚设却无人察觉。
     check("\n    validate_c2\n" in s,

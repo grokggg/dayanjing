@@ -137,7 +137,12 @@ def main():
     # 只扫非注释行：注释里大量引用历史缺陷的形态（含硬编码地址），
     # 那是说明文字，不是会被执行的代码。
     code = "\n".join(l for l in src.split("\n") if not l.lstrip().startswith("#"))
-    args = re.findall(r'--sink\s+"?([^"\\s]+)', code)
+    # run.sh 由**双引号 heredoc**生成，模板里必须写 \$CAMD_SINK 才能让它
+    # 在运行期展开。判据看的是"生成后的语义"，故先把 \$ 归一化为 $ ——
+    # 否则 run.sh 这个消费点会因首个字符是反斜杠而被下面的字符类排除，
+    # 实测漏计成 1 处，S2 恒红（模板其实是对的）。
+    norm = code.replace("\\$", "$")
+    args = re.findall(r'--sink\s+"?([^"\\s]+)', norm)
     bad = [a for a in args if a != "$CAMD_SINK"]
     check(not bad,
           "S1 所有 --sink 实参均为 $CAMD_SINK（不得硬编码任一 scheme）",
