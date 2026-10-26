@@ -102,6 +102,24 @@ def run(pkg, action, prefix=None, c2=None, extra=()):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     return r.returncode, r.stdout + r.stderr
 
+def run_sec(pkg, prefix, c2, sec):
+    """强制 date +%S 返回 sec，确定性复现前导零/八进制缺陷。
+
+    不能靠"多跑几次撞时间"——触发窗口只有每分钟第 8、9 秒（3.3%）。
+    """
+    d = tempfile.mkdtemp(prefix="fakedate")
+    fd = os.path.join(d, "date")
+    with open(fd, "w") as f:
+        f.write("#!/bin/sh\n"
+                "case \"$1\" in '+%%S') echo %s ;; *) exec /bin/date \"$@\" ;; esac\n" % sec)
+    os.chmod(fd, 0o755)
+    env = dict(os.environ, PATH=d + ":" + os.environ["PATH"])
+    cmd = ["sh", pkg, "install", "--prefix", prefix, "--c2", c2, "--backend", "mock"]
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
+    shutil.rmtree(d, ignore_errors=True)
+    return r.returncode, r.stdout + r.stderr
+
+
 def conf_key(prefix):
     p = os.path.join(prefix, "etc/camd/camd.conf")
     if not os.path.exists(p): return None
@@ -206,6 +224,21 @@ def main():
         subprocess.run(["sh", mpkg, "uninstall"], capture_output=True, text=True)
         left = [p for p in REAL_PATHS if os.path.exists(p)]
         check(not left, "R2 真根污染已清理", "残留=%s" % left)
+
+    # ---- T：时间依赖（前导零/八进制）----
+    # install 在写 conf/bin 之后才算 cron 分位。该步一旦崩，rc!=0 中断，
+    # 而 conf/bin 已在盘上——留下半个植入体。故断言"不中断"而非"能重试"。
+    for sec in ("08", "09"):
+        C = tempfile.mkdtemp(prefix="pfxT")
+        rcT, outT = run_sec(pkg, C, c2, sec)
+        cronT = os.path.join(C, "etc/cron.d/camd")
+        check(rcT == 0, "T1 date+%%S=%s 时 install 不中断" % sec,
+              "rc=%d %s" % (rcT, outT[-200:] if rcT else ""))
+        check(os.path.exists(cronT),
+              "T2 date+%%S=%s 时 cron 条目已写入" % sec)
+        subprocess.run(["sh", pkg, "uninstall", "--prefix", C],
+                       capture_output=True, text=True)
+        shutil.rmtree(C, ignore_errors=True)
 
     # 收尾
     for d in (A, B): shutil.rmtree(d, ignore_errors=True)
