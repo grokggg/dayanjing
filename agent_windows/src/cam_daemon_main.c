@@ -52,7 +52,8 @@ static void usage(const char *argv0)
         "\n"
         "必需:\n"
         "  --sink PATH         信元落点：fd://N / tcp://host:port /\n"
-        "                      tls://host:port / 文件路径\n"
+        "                      tls://host:port / front://前置域:port /\n"
+        "                      文件路径\n"
         "  --key HEX64         32 字节主密钥的 64 个十六进制字符\n"
         "                      前 16 字节 = k_send，后 16 字节 = k_recv\n"
         "\n"
@@ -156,6 +157,8 @@ int main(int argc, char **argv)
             have_pfx = 1; i++; continue;
         }
         if (!strcmp(a, "--backend") && nx)     { cfg.backend = nx; i++; continue; }
+        if (!strcmp(a, "--front-host") && nx)  { cfg.front_host = nx; i++; continue; }
+        if (!strcmp(a, "--front-path") && nx)  { cfg.front_path = nx; i++; continue; }
         if (!strcmp(a, "--pid") && nx)         { cfg.pid_path = nx; i++; continue; }
         if (!strcmp(a, "--root") && nx)        { cfg.root_prefix = nx; i++; continue; }
         if (!strcmp(a, "--width") && nx)       { cfg.width = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }

