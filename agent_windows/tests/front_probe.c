@@ -192,6 +192,29 @@ int main(int argc, char **argv)
 
     (void)tls_server_write(s, (const uint8_t *)RESP, strlen(RESP));
     (void)tls_server_close(s);
+    /* 收完请求后再读一次，观测对端**如何结束**这场会话。
+     *
+     * 这是 C2 侧唯一的关闭语义来源：缺 close_notify 时，这里拿到的是
+     * 传输层错误（连接被关但没有任何告警记录），而字节其实已经全收到了。
+     * 那种情形下 C2 无法区分"采完一批正常收尾"与"链路中途被掐断"——
+     * 正是本观测器要消灭的歧义。 */
+    {
+        uint8_t  tail[4];
+        size_t   tn = 0;
+        uint8_t  lv = 0, ds = 0;
+        tls_err  e2 = tls_server_read(s, tail, sizeof tail, &tn);
+        tls_server_last_alert(s, &lv, &ds);
+        /* close_notify 是 (warning=1, desc=0)。只看返回码分不出它和致命
+           告警——两者都返回 TLS_ERR_ALERT，故按字节判。 */
+        int got_cn = (e2 == TLS_ERR_ALERT && lv == 1 && ds == 0);
+        int got_fatal = (e2 == TLS_ERR_ALERT && lv == 2);
+        printf("CLOSE_NOTIFY=%d\n", got_cn);
+        printf("CLOSE_FATAL=%d\n", got_fatal);
+        printf("CLOSE_RC=%d\n", (int)e2);
+        printf("CLOSE_ALERT=%d,%d\n", (int)lv, (int)ds);
+        fflush(stdout);
+    }
+
     tls_server_free(s);
     rsa_privkey_clear(&key);
     x509_store_free(&st);

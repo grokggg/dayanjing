@@ -37,6 +37,7 @@ CAMD = os.path.join(ROOT, "build", "linux", "camd")
 PROBE = os.path.join(ROOT, "build", "linux", "front_probe")
 TLSDATA = os.path.join(REPO, "25_tls", "tests", "data")
 SRC = os.path.join(ROOT, "src", "cam_daemon.c")
+FRONTSRC = os.path.join(ROOT, "..", "24_front", "src", "front.c")
 
 FRONT = "front.test"
 REAL = "c2.real.example"
@@ -133,6 +134,19 @@ def main():
     check(kv.get("WIRE_N", "0").isdigit() and int(kv["WIRE_N"]) > 0,
           "④'' 取证缓冲确实记录到线路字节（%s 字节）" % kv.get("WIRE_N"))
 
+    # ---- 关闭语义 ----
+    # 缺 close_notify 时 BODY 照收、camd rc 照为 0，唯一的变化只在服务端
+    # 侧：它看到的是"连接被关掉"而不是"收到告警"。因此必须站在服务端判。
+    check(kv.get("CLOSE_NOTIFY") == "1",
+          "⑤ 服务端收到 close_notify（实得 %s）——正常收尾可与被掐断区分"
+          % kv.get("CLOSE_NOTIFY"))
+    check(kv.get("CLOSE_FATAL") == "0",
+          "⑤' 不是致命告警（level,desc=%s）——close_notify 与报错退出不得混淆"
+          % kv.get("CLOSE_ALERT"))
+    check(kv.get("CLOSE_ALERT") == "1,0",
+          "⑤'' 告警字节确为 (warning=1, close_notify=0)（实得 %s）"
+          % kv.get("CLOSE_ALERT"))
+
     print("=== 静态守卫（防运行时断言被绕过） ===")
     try:
         src = open(SRC).read()
@@ -142,6 +156,16 @@ def main():
           "S1 SNI 取自前置域（不得取自 front_host）")
     check("strcmp(s->front_host, s->host) == 0" in src,
           "S2 存在两域名不得相同的守卫（front_host 与前置域相同即拒绝）")
+    # front_free 内部有兜底 close，因此"调用方忘调 front_close"在运行时
+    # 表现不出来——CLOSE_NOTIFY 照样为 1。显式调用只能靠静态守卫保证。
+    check("front_close(s->front)" in src,
+          "S3 camd 显式调用 front_close（不能只依赖 front_free 兜底）")
+    try:
+        fsrc = open(FRONTSRC).read()
+    except OSError:
+        fsrc = ""
+    check("c->connected && !c->closed" in fsrc,
+          "S4 front_free 有兜底 close（调用方漏调时仍发 close_notify）")
 
     print("=== 结果: %d pass, %d fail ===" % (passed, failed))
     return 1 if failed else 0

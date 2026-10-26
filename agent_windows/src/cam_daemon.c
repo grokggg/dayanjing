@@ -684,12 +684,13 @@ static void cd_sink_close(cd_sink_t *s)
      * 判为异常结束——握手、应用数据全对，整段会话仍被记为错误。
      * c2_sink.py 侧表现为该连接被记成读异常，而字节其实都收到了。 */
     if (s->front) {
-        /* front 内部持有自己的 tls_ctx，必须先释放它再关 fd。
+        /* front 内部持有自己的 tls_ctx，必须先发 close_notify 再释放。
          *
-         * 已知缺口：front_free 只做 tls_free，不发 close_notify（24_front
-         * 未暴露 close 接口）。因此 front:// 出口下正常退出时，C2 侧会把
-         * 连接记成 unexpected eof——字节都收到了，但被判为异常结束。
-         * 与下面 tls:// 分支的处理不对称，见本轮限制。 */
+         * 此前这里直接 front_free，24_front 未暴露 close 接口，于是
+         * front:// 出口下正常退出时 C2 侧把连接记成 unexpected eof——
+         * 字节都收到，却被判为异常结束，与下面 tls:// 分支不对称。
+         * 现在 front_close 已存在，两条出口行为一致。 */
+        (void)front_close(s->front);
         front_free(s->front);
         s->front = NULL;
     }

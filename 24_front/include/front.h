@@ -49,6 +49,19 @@ front_err front_init(front_ctx **out, const front_config *cfg,
 void      front_free(front_ctx *c);
 
 front_err front_connect(front_ctx *c);
+
+/* 优雅收尾：发出 close_notify，让对端能区分"我正常结束了"与"连接被掐断"。
+ *
+ * 为什么必须显式发：不发的话对端只看到 TCP 关闭。实测 OpenSSL 3.0.2 会报
+ * "unexpected eof while reading" 并把整场会话判为异常退出——握手、验链、
+ * 应用数据都对，C2 仍然记为失败。更要紧的是语义：缺了 close_notify，
+ * "一批画面采完正常退出" 与 "链路中途被人掐断" 在对端看来完全一样，
+ * 运维会把前者误判成受干扰，进而触发无谓的重传与排查。
+ *
+ * 幂等：重复调用返回 FRONT_OK。未连接（或尚未握手）时返回 FRONT_OK 而非
+ * 错误——调用方在配置守卫拒绝的路径上也会走清理，那时没有会话可关，
+ * 返回错误会让"守卫正确拒绝"被误报成"收尾失败"。 */
+front_err front_close(front_ctx *c);
 front_err front_send(front_ctx *c, const uint8_t *frame, size_t len);
 front_err front_recv(front_ctx *c, uint8_t *buf, size_t cap, size_t *out_len);
 

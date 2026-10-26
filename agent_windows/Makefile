@@ -151,7 +151,13 @@ AUDIT_GOALS := winshim-build
 
 .PHONY: all test clean win dirs
 
-all: $(TEST_BINS) $(CAMDBIN)
+# front_probe 必须进 all，但不能进 TEST_BINS：
+#   —— 不进 all：改了 tests/front_probe.c 不重编，而 verify_front_sink.py
+#      守卫依赖 build/linux/front_probe，于是守卫一直跑陈旧二进制，
+#      新增断言永远测不到（make 还报 RC=0，看起来一切正常）。
+#   —— 不进 TEST_BINS：test 目标是逐个执行 $(TEST_BINS)，而 probe 是观测器，
+#      需要 port/host/dir 参数，被当测试执行只会报参数错误。
+all: $(TEST_BINS) $(CAMDBIN) $(FRONT_PROBE)
 
 dirs:
 	@mkdir -p $(BUILD)

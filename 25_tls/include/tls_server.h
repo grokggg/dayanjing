@@ -52,6 +52,17 @@ tls_err tls_server_write(tls_server_ctx *c, const uint8_t *data, size_t len);
  * 全对，但对端仍把这次会话判为异常结束。幂等。 */
 tls_err tls_server_close(tls_server_ctx *c);
 
+/* 最近一次收到的告警记录内容（level, description）。
+ *
+ * 为什么必须暴露字节而不只返回 TLS_ERR_ALERT：
+ *   close_notify 是 (warning=1, close_notify=0)，致命告警是 (fatal=2, *)。
+ *   两者在 tls_server_read 上都返回 TLS_ERR_ALERT，只看返回码无法区分。
+ *   而对端的语义完全不同：close_notify 是"我正常收尾了"，致命告警是
+ *   "我出错了/我拒绝你"。若把两者混为一谈，C2 侧会把植入体的报错退出
+ *   记成正常批量结束——正是要消除的那种歧义。
+ * 未收到过任何告警时 *level = *desc = 0。 */
+void tls_server_last_alert(const tls_server_ctx *c, uint8_t *level, uint8_t *desc);
+
 /* ---- 取证接口 ----
  * SNI 是握手中唯一以明文出现的主机名。域前置的全部意义就在于：
  * 链路上看得到的是前置域，真实目标只在加密内层。要断言这一点，

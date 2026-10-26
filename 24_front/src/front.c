@@ -16,6 +16,7 @@ struct front_ctx {
     uint8_t      resp[FRONT_MAX_RESP];
     size_t       resp_len;
     int          connected;
+    int          closed;
     char         front_store[256];
     char         real_store[256];
     char         prefix_store[128];
@@ -140,8 +141,28 @@ front_err front_init(front_ctx **out, const front_config *cfg,
     return FRONT_OK;
 }
 
+front_err front_close(front_ctx *c) {
+    if (!c) return FRONT_ERR_ARG;
+    if (!c->tls) return FRONT_OK;        /* 未初始化：没有会话可关 */
+    if (!c->connected) return FRONT_OK;  /* 未握手：同上，不是错误 */
+    if (c->closed) return FRONT_OK;      /* 幂等 */
+    c->closed = 1;
+    return (tls_close(c->tls) == TLS_OK) ? FRONT_OK : FRONT_ERR_TLS;
+}
+
 void front_free(front_ctx *c) {
     if (!c) return;
+    /* 兜底：调用方若忘记 front_close，这里补发一次 close_notify。
+     *
+     * 让 free 产生"写网络"的副作用是反常的，但这里的取舍很清楚：漏发
+     * close_notify 的后果是 C2 把一次正常批量结束判成链路被掐断（实测
+     * OpenSSL 报 unexpected eof），进而触发无谓重传；而在"即将释放"的
+     * 语境下多发一个告警记录没有额外代价。显式 front_close 优先，
+     * 这里只兜住忘记调用的情形，且因 closed 标记不会重复发送。 */
+    if (c->tls && c->connected && !c->closed) {
+        c->closed = 1;
+        (void)tls_close(c->tls);
+    }
     if (c->tls) tls_free(c->tls);
     free(c);
 }
