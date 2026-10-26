@@ -31,6 +31,7 @@
 
 #include "cam_daemon.h"
 #include "camera.h"
+#include "crypto_gcm.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -215,7 +216,13 @@ int main(int argc, char **argv)
      *
      * 之所以值得单独拦：形如 "0123456789abcdef" 重复两遍的 key 是人工编造
      * 密钥时最常见的形态，出错概率并不低，而症状又最难定位。 */
-    if (memcmp(key, key + 16, 16) == 0) {
+    /* 用常时比较而非 memcmp。
+     *
+     * 全仓守卫（scripts/check_secret_cmp.py）会拦截未分类的 memcmp 调用点。
+     * 此处两个操作数都是密钥材料，虽然结论"相等即拒绝"只在实现错误时出现、
+     * 攻击者无从观测（与 02_c2/src/c2.c 那处先例同类），但改用常时比较是零
+     * 成本的：既不改变语义，也不必在放行清单里留一条需要人工复核的豁免。 */
+    if (crypto_constant_time_eq(key, key + 16, 16) != 0) {
         fprintf(stderr,
                 "[FATAL] --key 的前 16 字节与后 16 字节相同。\n"
                 "        前 16 字节是 k_send，后 16 字节是 k_recv，二者必须不同\n"

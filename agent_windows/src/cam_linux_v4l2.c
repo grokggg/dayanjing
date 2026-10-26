@@ -149,6 +149,46 @@ static int ensure_buf(v4l2_priv_t *p, size_t need)
 /* V4L2 真设备操作（仅在 USE_V4L2=1 时编译）                          */
 /* ------------------------------------------------------------------ */
 #if USE_V4L2
+
+/* 设备能力判定 —— 全文件唯一真源，枚举与打开必须共用。
+ *
+ * V4L2 规范：device_caps 仅当 capabilities 带 V4L2_CAP_DEVICE_CAPS 时才有效。
+ * 不带该标志的驱动（部分老驱动、早期 v4l2loopback）device_caps 恒为 0。
+ * 无条件读 device_caps 会把这类设备判成"非采集设备"，于是静默降级为合成帧：
+ * 摄像头明明在，画面却是棋盘格，且全程零报错。这是本文件最坏的一类失效。
+ * 因此必须先看 V4L2_CAP_DEVICE_CAPS 再决定读哪个字段。 */
+static uint32_t v4l2_eff_caps(const struct v4l2_capability *cap)
+{
+    return (cap->capabilities & V4L2_CAP_DEVICE_CAPS) ? cap->device_caps
+                                                      : cap->capabilities;
+}
+
+static int v4l2_caps_ok(const struct v4l2_capability *cap)
+{
+    uint32_t c = v4l2_eff_caps(cap);
+    return (c & V4L2_CAP_VIDEO_CAPTURE) && (c & V4L2_CAP_STREAMING);
+}
+
+/* 探测 dev 是否真是可用的采集设备。
+ *
+ * 只做 stat + open + QUERYCAP + 能力位判定，不做格式协商、不做 REQBUFS：
+ * 枚举阶段不得点亮摄像头指示灯，也不得占用设备（否则与正在用摄像头的程序
+ * 冲突）。返回 0 = 可用采集设备；-1 = 不是（不存在 / 非字符设备 / 打不开 /
+ * 不支持 V4L2 / 非采集设备 / 非流式 IO）。 */
+static int v4l2_probe_capture_dev(const char *dev, struct v4l2_capability *out)
+{
+    struct stat st;
+    if (stat(dev, &st) != 0 || !S_ISCHR(st.st_mode)) return -1;
+    int fd = open(dev, O_RDWR | O_NONBLOCK, 0);
+    if (fd < 0) return -1;
+    struct v4l2_capability cap;
+    memset(&cap, 0, sizeof(cap));
+    int ok = (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) && v4l2_caps_ok(&cap);
+    close(fd);
+    if (ok && out) *out = cap;
+    return ok ? 0 : -1;
+}
+
 static int v4l2_try_open(v4l2_priv_t *p, const char *dev, const cam_config_t *cfg)
 {
     struct stat st;
@@ -159,8 +199,7 @@ static int v4l2_try_open(v4l2_priv_t *p, const char *dev, const cam_config_t *cf
     struct v4l2_capability cap;
     memset(&cap, 0, sizeof(cap));
     if (ioctl(fd, VIDIOC_QUERYCAP, &cap) != 0) { close(fd); return -1; }
-    if (!(cap.device_caps & V4L2_CAP_VIDEO_CAPTURE)) { close(fd); return -1; }
-    if (!(cap.device_caps & V4L2_CAP_STREAMING))     { close(fd); return -1; }
+    if (!v4l2_caps_ok(&cap)) { close(fd); return -1; }
 
     /* 格式协商：MJPEG 优先，其次 YUYV422，其次 YUV420 */
     struct v4l2_format fmt;
@@ -341,15 +380,27 @@ static int v4l2_enumerate(cam_device_info_t *info, int count)
     for (int i = 0; i < 8 && n < count; i++) {
         char dev[16];
         snprintf(dev, sizeof(dev), "/dev/video%d", i);
-        struct stat st;
-        if (stat(dev, &st) == 0 && S_ISCHR(st.st_mode)) {
-            memset(&info[n], 0, sizeof(info[n]));
-            snprintf(info[n].device_id,   sizeof(info[n].device_id),   "v4l2:/dev/video%d", i);
-            snprintf(info[n].friendly_name,sizeof(info[n].friendly_name),
-                     "V4L2 Video%d", i);
-            info[n].has_permission = 1;   /* 节点存在即认为可读，真实权限由 open 确认 */
-            n++;
+        struct v4l2_capability cap;
+        /* 必须真的探测，不能只 stat。
+         *
+         * 只凭 stat + S_ISCHR 会把这些情况全报成"有摄像头"：
+         *   - Intel IPU 等驱动暴露的 metadata 节点（能 open，但不是采集设备）
+         *   - 陈旧/失效的设备节点
+         *   - 驱动未加载只剩节点的情况
+         * 后果：上层看到 "V4L2 Video0 / 权限正常"，以为在收真实画面，
+         * 实际 open() 走的是合成帧降级路径，收到的是棋盘格，且零报错。
+         * 这与 Linux 上传 "mf" 静默返回 mock 是同一类失效，必须堵死。 */
+        if (v4l2_probe_capture_dev(dev, &cap) != 0) continue;
+        memset(&info[n], 0, sizeof(info[n]));
+        snprintf(info[n].device_id,   sizeof(info[n].device_id),   "v4l2:/dev/video%d", i);
+        /* 用驱动报告的 card 名，运维能直接认出是哪颗摄像头 */
+        if (cap.card[0]) {
+            snprintf(info[n].friendly_name, sizeof(info[n].friendly_name), "%s", cap.card);
+        } else {
+            snprintf(info[n].friendly_name, sizeof(info[n].friendly_name), "V4L2 Video%d", i);
         }
+        info[n].has_permission = 1;   /* 已 open 成功，权限是真的 */
+        n++;
     }
 #endif
     if (n == 0 && count > 0) {
@@ -365,12 +416,13 @@ static int v4l2_enumerate(cam_device_info_t *info, int count)
 
 static bool v4l2_check_permission(void)
 {
-#if USE_V4L2
-    struct stat st;
-    /* 有权限的充分条件：video0 存在且可读 */
-    if (stat("/dev/video0", &st) == 0 && (st.st_mode & S_IRUSR)) return 1;
-#endif
-    return 1;  /* 无设备时合成源无需权限，始终可用 */
+    /* 语义澄清：本函数回答"采集能否进行"，不回答"有没有真摄像头"。
+     *
+     * 旧实现用 stat("/dev/video0") + S_IRUSR 判定，那是把"节点存在"当成
+     * "有权限"，而节点存在完全不代表能 open、更不代表是采集设备。既然
+     * 无论如何都会回落到合成源、采集总能进行，这个 stat 除了制造误导没有
+     * 任何作用——真正要回答"有没有真摄像头"的是 enumerate()。已移除。 */
+    return 1;  /* 无真设备时合成源无需权限，采集始终可进行 */
 }
 
 /* ------------------------------------------------------------------ */
