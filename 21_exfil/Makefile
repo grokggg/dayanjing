@@ -245,7 +245,15 @@ verify-tls-sink:
 verify-onekey-sink:
 	@python3 tests/verify_onekey_sink.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+# cron 驻留"真的会执行"：此前本环境无任何 cron 守护进程（cron/crond/busybox
+# 全无且装不上），条目写了却从未被执行过一次。本目标用 tests/crond_harness.py
+# 按真实 cron.d 语义解析并真实 sh -c 执行，等到条目自己的时刻触发，
+# 断言 C2 新增字节；R1 反向注入"点了 conf 但不导出"的缺陷写法，
+# 证明正向断言不是恒绿。
+verify-cron-exec:
+	@python3 tests/verify_cron_exec.py
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-cron-exec $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -269,4 +277,4 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-cron-exec

