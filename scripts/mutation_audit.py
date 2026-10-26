@@ -624,6 +624,24 @@ def blob_hash(path):
 
 def build(mod, target=None):
     d = os.path.join(ROOT, mod)
+
+    # 变异后必须先删掉目标产物，再 make。
+    #
+    # 教训（本轮实测，代价是一次假阴性）：注入后直接 make，make 有可能
+    # 因为时间戳判断而"什么都不做"，于是跑的是变异前的旧二进制 —— 有效
+    # 守卫被报成 SURVIVED。这个方向比"守卫恒绿"更隐蔽：恒绿至少让人去查，
+    # 假阴性会让人去补一个本来正确的守卫，甚至据此改写正确的产品代码。
+    #
+    # 删产物是最廉价且确定触发重建的办法；不用 make clean（全量重编会让
+    # 审计超时，那是旧版的直接教训）。
+    if target:
+        tp = os.path.join(d, target)
+        if os.path.isfile(tp):
+            try:
+                os.remove(tp)
+            except OSError:
+                pass
+
     # 不 clean：变异只改一个 .c，增量重建即可。
     # 旧版每次 make clean 是全量重编，是上一轮审计超时的直接原因。
     cmd = "make -s %s 2>&1 | tail -8" % target if target else "make -s 2>&1 | tail -8"
