@@ -246,6 +246,38 @@ validate_c2() {
     return 0
 }
 
+# ---- base64 解码（多级 fallback，去掉对单一命令的硬依赖）--------------------
+# 【为什么不能只写 `| base64 -d`】
+# "任何目标机"意味着极简容器 / 老旧发行版 / 嵌入式可能根本没有 base64。
+# 实测该场景：base64 不存在 → 管道静默产出空文件 → 被 [ -s ] 拦下并报
+# "内嵌产物为空或解码失败"。排查者会去查包是否损坏、base64 数据是否完整，
+# 而真实成因是目标机缺一个命令。症状与成因完全对不上。
+# 所以按可用性逐级退：base64 → openssl → perl → python3 → 明确 DIE 点名。
+#
+# 不用 awk 实现：awk 的 printf "%c" 对 NUL 字节在多个实现上会截断输出，
+# 用它解二进制会得到静默损坏的产物——比直接报错更坏。
+b64_decode() {
+    if command -v base64 >/dev/null 2>&1; then
+        base64 -d 2>/dev/null && return 0
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl base64 -d 2>/dev/null && return 0
+    fi
+    if command -v perl >/dev/null 2>&1; then
+        perl -MMIME::Base64 -ne 'print decode_base64($_)' 2>/dev/null && return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys,base64;sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# 运行前置依赖：缺哪个就点名哪个，不给含糊的"失败"。
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || \
+        DIE "目标机缺少必需命令: $1（$2）。极简容器/BusyBox 环境常见，请先安装或改用完整镜像。"
+}
+
 # ---- 内嵌产物 --------------------------------------------------------------
 # PAYLOAD_BEGIN / PAYLOAD_END 之间由 make_onekey.py 填充 base64。
 # 运行时解码到临时文件，校验 ELF 魔数后才允许安装。
@@ -267,12 +299,23 @@ extract_bin() {
             /^# PAYLOAD_BEGIN/ { f = ($3 == want); next }
             /^# PAYLOAD_END/   { f = 0; next }
             f { print }
-        ' "$0" | base64 -d > "$TMPB" 2>/dev/null
+        ' "$0" | b64_decode > "$TMPB" 2>/dev/null
+        # 解码失败且产物为空：区分"目标机没有解码器"与"包坏了"。
+        # 这两种成因的症状完全一致（空文件），但处置方式完全不同。
+        if [ ! -s "$TMPB" ]; then
+            if ! command -v base64 >/dev/null 2>&1 \
+               && ! command -v openssl >/dev/null 2>&1 \
+               && ! command -v perl >/dev/null 2>&1 \
+               && ! command -v python3 >/dev/null 2>&1; then
+                DIE "目标机缺少 base64/openssl/perl/python3 任一，无法解码内嵌产物。\
+请先安装其中之一，或改用编译进产物分节的静态包。"
+            fi
+        fi
     elif grep -q "^# PAYLOAD_BEGIN\$" "$0" 2>/dev/null; then
         # 单架构包（旧格式，裸标记）。仍做 e_machine 校验，
         # 否则旧包在错架构机器上一样全绿。
         awk '/^# PAYLOAD_BEGIN$/{f=1;next} /^# PAYLOAD_END$/{f=0} f' "$0" \
-            | base64 -d > "$TMPB" 2>/dev/null
+            | b64_decode > "$TMPB" 2>/dev/null
     else
         DIE "本包没有 $ARCH 架构的产物分节（当前架构: $ARCH / $ARCH_KEY）"
     fi

