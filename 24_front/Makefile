@@ -26,6 +26,10 @@ TLS_FIXTURES := ../25_tls/tests/data/leaf.pem ../25_tls/tests/data/ca.pem \
 $(TLS_FIXTURES):
 	$(MAKE) -C ../25_tls testdata
 
+# 默认目标必须是 all。此前文件里第一个非点目标是证书夹具规则，
+# GNU make 于是把它当默认目标——裸 make 只生成夹具，一个测试都不构建，退出码还是 0。
+# 与 agent_windows(upstream-deps) 同类，是该类问题的延续。
+.DEFAULT_GOAL := all
 all: $(TLS_FIXTURES) $(BUILD)/test_front $(BUILD)/test_h2 $(BUILD)/test_front_h2 \
      $(BUILD)/test_huffman $(BUILD)/dump_hpack $(BUILD)/test_front_real
 

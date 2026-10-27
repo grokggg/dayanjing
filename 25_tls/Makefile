@@ -45,6 +45,10 @@ FIXTURES := tests/data/ca.pem tests/data/ca.key \
 $(FIXTURES) &: scripts/gen_testdata.sh
 	sh scripts/gen_testdata.sh
 
+# 默认目标必须是 all。此前文件里第一个非点目标是证书夹具规则，
+# GNU make 于是把它当默认目标——裸 make 只生成夹具，一个测试都不构建，退出码还是 0。
+# 与 agent_windows(upstream-deps) 同类，是该类问题的延续。
+.DEFAULT_GOAL := all
 all: $(TESTS) $(TOOLS)
 
 $(BUILD):
