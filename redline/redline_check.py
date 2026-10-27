@@ -15,11 +15,17 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(ROOT)
 EV = os.path.join(ROOT, "evidence")
 
 
 def run(cmd):
     try:
+        # 历史 bug：此处曾写 r["probe"] —— r 是未定义变量，抛 NameError 被
+        # 下面的 except 吞掉并返回 -1，于是**所有红线恒判 BLOCKED**：
+        # PENDING 永远 0，"环境具备却未验证必须报警"这个防伪造机制从未工作。
+        # 参数名就是 cmd，直接用它。
+        cmd = cmd.replace("{REPO}", REPO)
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
         return p.returncode, (p.stdout + p.stderr).strip()
     except Exception as e:
@@ -63,6 +69,21 @@ REDLINES = [
         "probe": "pgrep -x cron >/dev/null || pgrep -x crond >/dev/null",
         "verify": "对齐到 cron 分位后等待触发，断言 C2 收到新字节",
         "ev": "R3.evidence",
+    },
+    {
+        "id": "R3a",
+        "name": "cron.d 加载期契约（真 cron 静默不执行的已知原因）",
+        "why": "真 cron 守护不可得（apt 无 cron 包、无 busybox），但它在加载 "
+               "/etc/cron.d/* 时的硬行为可静态真验：文件名含点、漏 user 字段、"
+               "group/other 可写、非 root 属主、缺 PATH、末行无换行、命令不存在"
+               "——违反任意一条都会导致整个文件被跳过且无任何可见症状",
+        # probe 用 {REPO} 占位符：subprocess 走 shell=True，cwd 不固定，
+        # 相对路径会在不同调用位置得到不同结果，必须展开成绝对路径。
+        "probe": "test -f {REPO}/21_exfil/onekey.sh && "
+                 "test -f {REPO}/21_exfil/tests/verify_cron_contract.py && "
+                 "command -v unshare >/dev/null",
+        "verify": "install 到假根后断言 7 条契约，并对每条做反向注入证明非恒绿",
+        "ev": "R3a.evidence",
     },
     {
         "id": "R4",
