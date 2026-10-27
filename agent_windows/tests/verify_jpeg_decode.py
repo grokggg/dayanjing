@@ -161,6 +161,36 @@ def main():
           prof[0] < prof[len(prof) // 2] < prof[-1],
           "x0=%.1f xmid=%.1f xend=%.1f" % (prof[0], prof[len(prof) // 2], prof[-1]))
 
+    # C4：平坦帧**色度**必须等于已知输入值。
+    #
+    # 这是抓 DCT 缺陷的决定性判据。此前那份 AAN 流图实现输出排列与符号
+    # 映射都是错的，但亮度只偏 1.4（138.6 vs 140）——C2 的 ±3 容差放过了它；
+    # 而色度偏到 Cb=100.5（输入 64）、Cr=154.6（输入 200），差 36/45。
+    # 也就是说：**只看亮度判据，一个根本错误的 DCT 可以全绿通过**。
+    Uin = np.repeat(np.frombuffer(
+        open(os.path.join(outdir, "frame_flat.yuyv"), "rb").read(),
+        dtype=np.uint8).reshape(H, W * 2)[:, 1::4].astype(float), 2, axis=1)
+    Vin = np.repeat(np.frombuffer(
+        open(os.path.join(outdir, "frame_flat.yuyv"), "rb").read(),
+        dtype=np.uint8).reshape(H, W * 2)[:, 3::4].astype(float), 2, axis=1)
+    Uo = -0.169 * R - 0.331 * G + 0.5 * B + 128
+    Vo = 0.5 * R - 0.419 * G - 0.081 * B + 128
+    check("C/4 平坦帧色度等于输入值 Cb=64 Cr=200（±3）",
+          abs(Uo.mean() - Uin.mean()) <= 3.0 and abs(Vo.mean() - Vin.mean()) <= 3.0,
+          "decoded Cb=%.1f Cr=%.1f / 输入 Cb=%.1f Cr=%.1f"
+          % (Uo.mean(), Vo.mean(), Uin.mean(), Vin.mean()))
+
+    # C5：整体保真度——渐变帧解码亮度与原 YUYV 的亮度分量平均绝对误差。
+    # 阈值 5：正确的 DCT 实测 2.01；错误的 DCT 实测 50.24，量级差 25 倍。
+    Yin = np.frombuffer(open(os.path.join(outdir, "frame_gradient.yuyv"),
+                             "rb").read(),
+                        dtype=np.uint8).reshape(H, W * 2)[:, 0::2].astype(float)
+    gg = np.asarray(Image.open(os.path.join(outdir, "frame_gradient.jpg"))
+                    .convert("RGB")).astype(float)
+    Yg = 0.299 * gg[..., 0] + 0.587 * gg[..., 1] + 0.114 * gg[..., 2]
+    mae = float(np.abs(Yg - Yin).mean())
+    check("C/5 渐变帧亮度保真度 MAE <= 5", mae <= 5.0, "MAE=%.2f" % mae)
+
     nfail = sum(1 for _, ok, _ in results if not ok)
     print("\n共 %d 项，失败 %d" % (len(results), nfail))
     return 1 if nfail else 0

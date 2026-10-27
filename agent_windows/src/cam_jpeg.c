@@ -275,120 +275,53 @@ static void rgb24_to_ycbcr(const uint8_t *rgb, uint8_t *ycbcr,
  * 二维 DCT（8x8 点），固定点整数实现（左移 9 位避免溢出）。
  * 系数取自标准 DCT 公式，缩放 1/sqrt(2) 已并入矩阵。
  * ==================================================================== */
+/*
+ * 8x8 前向 DCT（JPEG 正交归一化，ITU-T T.81 A.3.1）：
+ *   F(u,v) = (1/4) C(u)C(v) sum_x sum_y f(x,y) cos((2x+1)u*pi/16) cos((2y+1)v*pi/16)
+ *   C(0) = 1/sqrt(2)，C(k) = 1
+ * 可分离实现：先逐行做 1D，再逐列做 1D，每步自带 (1/2)C(u) 因子（并入 DCT_M）。
+ *
+ * 常数块 f == v 时，F(0,0) = 8v、其余 63 项为 0 —— 这是自检判据。
+ *
+ * 这里原先是一份 AAN 流图实现，但**输出排列与符号映射是错的**：
+ * 常数行 [12]*8 得到 [96,0,0,0,96,0,0,0]（第 4 项必须为 0），与参考正交
+ * DCT 逐项比对完全不吻合。后果不是"画质略差"，而是整幅画面变成无意义的
+ * 噪点图案；而码流结构完全合法、魔数检查照过、解码器也不报错，既有测试
+ * 因此一路全绿。改用可分离定点 DCT，判据是"与参考 DCT 对拍"。
+ */
+static const int16_t DCT_M[8][8] = {
+    { 11585,  11585,  11585,  11585,  11585,  11585,  11585,  11585},
+    { 16069,  13623,   9102,   3196,  -3196,  -9102, -13623, -16069},
+    { 15137,   6270,  -6270, -15137, -15137,  -6270,   6270,  15137},
+    { 13623,  -3196, -16069,  -9102,   9102,  16069,   3196, -13623},
+    { 11585, -11585, -11585,  11585,  11585, -11585, -11585,  11585},
+    {  9102, -16069,   3196,  13623, -13623,  -3196,  16069,  -9102},
+    {  6270, -15137,  15137,  -6270,  -6270,  15137, -15137,   6270},
+    {  3196,  -9102,  13623, -16069,  16069, -13623,   9102,  -3196},
+};
+
 static void fdct_8x8(const int16_t blk[64], int16_t out[64])
 {
-    /* 行 DCT */
-    int16_t row[8][8];
+    int32_t tmp[64];
+
+    /* 行变换 */
     for (int y = 0; y < 8; y++) {
-        int s0 = blk[y * 8 + 0], s1 = blk[y * 8 + 1], s2 = blk[y * 8 + 2], s3 = blk[y * 8 + 3];
-        int s4 = blk[y * 8 + 4], s5 = blk[y * 8 + 5], s6 = blk[y * 8 + 6], s7 = blk[y * 8 + 7];
-
-        /* 1D DCT type-II，AAN 风格 8 点 */
-        int t0 = s0 + s7, t1 = s1 + s6, t2 = s2 + s5, t3 = s3 + s4;
-        int t4 = s3 - s4, t5 = s2 - s5, t6 = s1 - s6, t7 = s0 - s7;
-
-        int c0 = t0 + t3, c1 = t1 + t2, c2 = t0 - t3, c3 = t1 - t2;
-        int c4 = t4 + t5, c5 = t6 + t7, c6 = t4 - t5, c7 = t6 - t7;
-
-        /* 常量：乘以 sqrt(2)*cos(k*pi/16) 的整数量化值（左移 12 位） */
-        /* a1=0.5411961, a2=1.30656296, a3=0.27589938, a4=1.84775907,
-         * a5=0.89997622, a6=2.56291544, a7=0.76536686            */
-        int a1 = (int)(0.5411961 * 4096 + 0.5);
-        int a2 = (int)(1.3065630 * 4096 + 0.5);
-        int a3 = (int)(0.2758994 * 4096 + 0.5);
-        int a5 = (int)(0.8999762 * 4096 + 0.5);
-        int a6 = (int)(2.5629154 * 4096 + 0.5);
-        int a7 = (int)(0.7653669 * 4096 + 0.5);
-
-        int b0 = c6;
-        int b1 = c7;
-        int b2 = c5 - c6;
-        int b3 = c4 - c7;
-
-        int g0 = (a1 * c2) >> 12;
-        int g1 = (a2 * c3) >> 12;
-        int g2 = (a3 * b2) >> 12;
-        int g3 = (a5 * b3) >> 12;
-        int g4 = (a6 * c4) >> 12;
-        int g5 = (a7 * c7) >> 12;
-
-        int d0 = g0 + g1;
-        int d1 = g0 - g1;
-        int d2 = g3 + g2;
-        int d3 = g3 - g2;
-
-        int e0 = c0 + c1;
-        int e1 = c0 - c1;
-        int e2 = d0 + d3;
-        int e3 = d1 + d2;
-        int e4 = d1 - d2;
-        int e5 = d0 - d3;
-        int e6 = b0 + g4 + g5;
-        int e7 = b1 + g4 - g5;
-
-        row[y][0] = (int16_t)((e0 + e6) >> 0);
-        row[y][1] = (int16_t)((e1 + e7) >> 0);
-        row[y][2] = (int16_t)((e2 + e5) >> 0);
-        row[y][3] = (int16_t)((e3 + e4) >> 0);
-        row[y][4] = (int16_t)((e0 - e6) >> 0);
-        row[y][5] = (int16_t)((e4 - e3) >> 0);
-        row[y][6] = (int16_t)((e5 - e2) >> 0);
-        row[y][7] = (int16_t)((e7 - e1) >> 0);
+        for (int u = 0; u < 8; u++) {
+            int32_t s = 0;
+            for (int x = 0; x < 8; x++)
+                s += (int32_t)blk[y * 8 + x] * (int32_t)DCT_M[u][x];
+            tmp[y * 8 + u] = (s + 16384) >> 15;
+        }
     }
 
-    /* 列 DCT */
-    for (int x = 0; x < 8; x++) {
-        int s0 = row[0][x], s1 = row[1][x], s2 = row[2][x], s3 = row[3][x];
-        int s4 = row[4][x], s5 = row[5][x], s6 = row[6][x], s7 = row[7][x];
-
-        int t0 = s0 + s7, t1 = s1 + s6, t2 = s2 + s5, t3 = s3 + s4;
-        int t4 = s3 - s4, t5 = s2 - s5, t6 = s1 - s6, t7 = s0 - s7;
-
-        int c0 = t0 + t3, c1 = t1 + t2, c2 = t0 - t3, c3 = t1 - t2;
-        int c4 = t4 + t5, c5 = t6 + t7, c6 = t4 - t5, c7 = t6 - t7;
-
-        int a1 = (int)(0.5411961 * 4096 + 0.5);
-        int a2 = (int)(1.3065630 * 4096 + 0.5);
-        int a3 = (int)(0.2758994 * 4096 + 0.5);
-        int a5 = (int)(0.8999762 * 4096 + 0.5);
-        int a6 = (int)(2.5629154 * 4096 + 0.5);
-        int a7 = (int)(0.7653669 * 4096 + 0.5);
-
-        int b0 = c6;
-        int b1 = c7;
-        int b2 = c5 - c6;
-        int b3 = c4 - c7;
-
-        int g0 = (a1 * c2) >> 12;
-        int g1 = (a2 * c3) >> 12;
-        int g2 = (a3 * b2) >> 12;
-        int g3 = (a5 * b3) >> 12;
-        int g4 = (a6 * c4) >> 12;
-        int g5 = (a7 * c7) >> 12;
-
-        int d0 = g0 + g1;
-        int d1 = g0 - g1;
-        int d2 = g3 + g2;
-        int d3 = g3 - g2;
-
-        int e0 = c0 + c1;
-        int e1 = c0 - c1;
-        int e2 = d0 + d3;
-        int e3 = d1 + d2;
-        int e4 = d1 - d2;
-        int e5 = d0 - d3;
-        int e6 = b0 + g4 + g5;
-        int e7 = b1 + g4 - g5;
-
-        /* 输出做归一化缩放（AAN 的 1/(2*sqrt(2)) 因子） */
-        out[0 * 8 + x] = (int16_t)((e0 + e6) >> 3);
-        out[1 * 8 + x] = (int16_t)((e1 + e7) >> 3);
-        out[2 * 8 + x] = (int16_t)((e2 + e5) >> 3);
-        out[3 * 8 + x] = (int16_t)((e3 + e4) >> 3);
-        out[4 * 8 + x] = (int16_t)((e0 - e6) >> 3);
-        out[5 * 8 + x] = (int16_t)((e4 - e3) >> 3);
-        out[6 * 8 + x] = (int16_t)((e5 - e2) >> 3);
-        out[7 * 8 + x] = (int16_t)((e7 - e1) >> 3);
+    /* 列变换：out[v*8 + u]，v 为垂直频率（行），u 为水平频率（列） */
+    for (int u = 0; u < 8; u++) {
+        for (int v = 0; v < 8; v++) {
+            int32_t s = 0;
+            for (int y = 0; y < 8; y++)
+                s += tmp[y * 8 + u] * (int32_t)DCT_M[v][y];
+            out[v * 8 + u] = (int16_t)((s + 16384) >> 15);
+        }
     }
 }
 
@@ -551,7 +484,18 @@ static int encode_block(bitstream_t *bs, const int16_t *block,
     if (dc_tab[cat].len == 0) return 0;   /* 非法类别 */
     if (!bs_put_bits(bs, dc_tab[cat].code, dc_tab[cat].len)) return 0;
     if (cat > 0) {
-        uint32_t ssss = (uint32_t)diff & ((uint32_t)(1 << cat) - 1);
+        /*
+         * 幅度位（JPEG 基线 F.1.2.1）：负数必须写 (diff - 1) 的低 cat 位，
+         * 即 diff + 2^cat - 1；正数写 diff 本身。
+         *
+         * 原实现写 (uint32_t)diff & ((1<<cat)-1) —— 对负数拿到的是二进制
+         * 补码的低位，比正确值**恒偏 +1**。解码器按 "读 size 位，若小于
+         * 2^(size-1) 则减 2^size-1" 还原，于是每个负 DC 都被还原成
+         * |值| 小 1 的负数。DC 又是全块链式预测，误差沿整幅画面累积。
+         * 表现为"能打开、结构合法、但画面偏色/发闷"，任何魔数检查都照过。
+         */
+        uint32_t ssss = (diff < 0) ? (uint32_t)(diff + (1 << cat) - 1)
+                                   : (uint32_t)diff;
         if (!bs_put_bits(bs, ssss, cat)) return 0;
     }
 
@@ -576,7 +520,9 @@ static int encode_block(bitstream_t *bs, const int16_t *block,
         if (rs == 0) return 0;   /* 不应发生 */
         if (ac_tab[rs].len == 0) return 0;
         if (!bs_put_bits(bs, ac_tab[rs].code, ac_tab[rs].len)) return 0;
-        uint32_t ssss = (uint32_t)val & ((uint32_t)(1 << size) - 1);
+        /* 同 DC：负数写 val + 2^size - 1，正数写 val。 */
+        uint32_t ssss = (val < 0) ? (uint32_t)(val + (1 << size) - 1)
+                                  : (uint32_t)val;
         if (!bs_put_bits(bs, ssss, size)) return 0;
         run = 0;
     }
@@ -819,6 +765,24 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
     free(cb_down);
     free(cr_down);
 
+
+    /*
+     * 扫描结束的位填充（JPEG 基线 B.1.1.2 / F.1.2.3）：把位累加器里残余的
+     * 1~7 位用 **1** 补齐到字节边界，然后才能写 EOI。
+     *
+     * 原实现直接写 EOI，残余位被**静默丢弃**。后果不是"少几比特"而是
+     * **末尾若干部件的码字整体截断**：解码器在末尾附近读到错位的 Huffman
+     * 码流，ffmpeg 报 "error count: N" 并给出首个出错 MCU 坐标（实跑为
+     * error y=14 x=19，即右下角），画面右下区域损坏。
+     *
+     * 为什么只有高熵帧会暴露：平坦/斜坡/纯灰帧末尾块多是非零系数极少的
+     * 块，丢几位仍在 EOB 的容错范围内；随机帧末尾块高频系数密集，丢位即
+     * 失步。所以这个缺陷只在你最像真实画面的数据上出现。
+     */
+    if (bs.acc_bits > 0) {
+        int pad = 8 - bs.acc_bits;
+        if (!bs_put_bits(&bs, (uint32_t)((1u << pad) - 1u), pad)) return 0;
+    }
 
     /* 记录扫描数据实际写入位置 */
     size_t scan_written = bs.pos;
