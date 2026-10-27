@@ -157,7 +157,7 @@ AUDIT_GOALS := winshim-build
 #      新增断言永远测不到（make 还报 RC=0，看起来一切正常）。
 #   —— 不进 TEST_BINS：test 目标是逐个执行 $(TEST_BINS)，而 probe 是观测器，
 #      需要 port/host/dir 参数，被当测试执行只会报参数错误。
-all: $(TEST_BINS) $(CAMDBIN) $(FRONT_PROBE)
+all: $(TEST_BINS) $(CAMDBIN) $(FRONT_PROBE) $(V4L2_PROBE)
 
 dirs:
 	@mkdir -p $(BUILD)
@@ -234,6 +234,25 @@ $(BUILD)/test_v4l2_caps: tests/test_v4l2_caps.c src/cam_linux_v4l2.c \
                          $(BUILD)/synth_pe.o | dirs
 	$(CC) $(CFLAGS) -Wno-unused-function $< $(CAPS_OBJS) $(DEP_OBJS) \
 	      $(BUILD)/synth_pe.o -o $@ $(LDLIBS)
+
+# v4l2_realpath_probe：在 V4L2 ABI 模拟器下驱动**真实的** cam_linux_v4l2.c。
+#
+# 背景：cam_linux_v4l2.c 里的 ioctl/mmap 路径此前从未执行过一次 —— 沙盒没有
+# /dev/video*，代码恒走合成帧降级分支，"V4L2 后端"实际上只是一段编译通过而已。
+# 真硬件的价值在于它会按 V4L2 ABI 回应 ioctl，而这可以在用户态精确复刻
+# （见 tests/v4l2sim_shim.c）。本 probe 是普通调用方，只调工厂接口，
+# 与真机调用路径完全一致，因此被验证的是产品代码而非模拟器。
+#
+# 必须进 all：不进的话改了 probe 不重编，守卫跑陈旧二进制，新增断言永远
+# 测不到而 make 仍报 RC=0（本仓库反复出现的静默陈旧缺陷）。
+V4L2_PROBE := $(BUILD)/v4l2_realpath_probe
+
+$(V4L2_PROBE): tests/v4l2_realpath_probe.c $(PORT_OBJS) $(DEP_OBJS) | dirs
+	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) -o $@ $(LDLIBS)
+
+.PHONY: verify-v4l2-realpath
+verify-v4l2-realpath: $(V4L2_PROBE)
+	@python3 tests/verify_v4l2_realpath.py
 
 # cam_daemon 测试：显式规则，覆盖上面的通用模式规则。
 # 额外链入驻留 / 回传 / 信元三个上游模块，把「采集—驻留—回传」真正串起来。

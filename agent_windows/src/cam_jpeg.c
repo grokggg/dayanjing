@@ -470,19 +470,43 @@ typedef struct {
 static void build_huff_codes(const uint8_t *bits, const uint8_t *vals, int nvals,
                              huff_code_t *out)
 {
-    (void)vals;
+    /*
+     * out 是按**符号值**索引的：编码侧用 dc_tab[cat] / ac_tab[rs] 直接以
+     * 类别值、 (run<<4)|size 组合值下标查表。
+     *
+     * 原实现写的是 out[si]（si = 符号在 vals 里的出现顺序），并把 vals 整体
+     * 丢弃 (void)vals。后果有两层：
+     *   1) 符号值 > nvals 的码（AC 表里 0xd1=209、0xf0=240、0xfa=250 等）从未
+     *      被赋值，len 恒为 0 —— 编码到这些组合时 encode_block 直接 return 0，
+     *      整帧转码失败，调用方只拿到 CAM_ERR_TRANSFORM，看不出原因。
+     *      渐变画面（大量零游程 + 小系数）必然命中 0xd1，而平坦画面命中不到，
+     *      于是缺陷只在"真实感画面"上暴露 —— 合成随机帧永远测不出来。
+     *   2) 即便符号值 <= nvals，填进去的码字也是**按出现顺序**算的，与
+     *      vals[si] 的真实符号不对应，码流整体错位。
+     * 故必须按 vals[si] 落位。
+     */
     uint16_t code = 0;
     int      si   = 0;
     for (int l = 1; l <= 16; l++) {
         for (int i = 0; i < bits[l - 1]; i++) {
-            out[si].code = code << (16 - l);
-            out[si].len  = (uint8_t)l;
+            if (si >= nvals) return;          /* 表与码长不匹配，宁可不填也不越界 */
+            /*
+             * 码字**右对齐**存放。
+             *
+             * 原实现存的是左对齐码 (code << (16 - l))，而 bs_put_bits 取的是
+             * code & ((1<<n)-1)，即**低 n 位**。左对齐码的有效位在高 n 位，
+             * 取低位得到的是全 0 或错位值 —— 写进码流的 Huffman 码字是错的。
+             * 表现：ffmpeg 报 "huffman table decode error"，PIL 报 "broken
+             * data stream"。而本仓库既有测试只校验 FFD8/FFD9 与段结构，
+             * 从不真正解码，所以这个缺陷一直测不出来。
+             */
+            out[vals[si]].code = code;
+            out[vals[si]].len  = (uint8_t)l;
             si++;
             code++;
         }
         code <<= 1;
     }
-    (void)nvals;
 }
 
 /* 编码一个 8x8 块的一个分量 */
@@ -694,8 +718,10 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
                 }
                 prev_dc[0] = (block[0] / 1);   /* 重新取量化后 DC */
                 /* 修正：prev_dc 应为量化后的 DC 系数 */
-                int qdc = (block[0] + (qy[0] >> 1)) / qy[0];
-                prev_dc[0] = qdc;
+                /* DC 预测必须取**量化后的 DC 系数** dct[0]，不能取 block[0]
+                 * （那是块内第一个像素减 128 的值）。两者相差约 8 倍（DCT 的
+                 * 归一化因子），用错会让差分值始终偏大，白白多耗编码位数。 */
+                prev_dc[0] = (dct[0] + (qy[0] >> 1)) / qy[0];
             }
 
             /* 色度下采样（2x2 平均）。采样点落在 stride 网格 (bx+xx*2, by+yy*2) 处。 */
@@ -740,8 +766,7 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
                     free(cb_down); free(cr_down);
                     return 0;
                 }
-                int qdc = (block[0] + (qc[0] >> 1)) / qc[0];
-                prev_dc[1] = qdc;
+                prev_dc[1] = (dct[0] + (qc[0] >> 1)) / qc[0];
             }
 
             /* Cr 块 */
@@ -762,8 +787,7 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
                     free(cb_down); free(cr_down);
                     return 0;
                 }
-                int qdc = (block[0] + (qc[0] >> 1)) / qc[0];
-                prev_dc[2] = qdc;
+                prev_dc[2] = (dct[0] + (qc[0] >> 1)) / qc[0];
             }
         }
     }
