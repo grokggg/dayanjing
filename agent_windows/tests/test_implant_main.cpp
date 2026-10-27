@@ -315,8 +315,12 @@ static int rr_call_never(void *ud, uint64_t va, uint64_t a1, uint64_t a2,
 
 static int rr_resolve_never(const char *dll, const char *func, uint16_t ord,
                             int by_ord, void *ud, uint64_t *out)
-{ (void)dll; (void)func; (void)ord; (void)by_ord; (void)ud;
-  if (out) *out = 0x1000u; g_rr_calls++; return LD_OK; }
+{
+    (void)dll; (void)func; (void)ord; (void)by_ord; (void)ud;
+    if (out) { *out = 0x1000u; }
+    g_rr_calls++;
+    return LD_OK;
+}
 
 /*
  * 反射落地必须同样受对抗自检闸门约束：装载会在目标机上产生权限切换与

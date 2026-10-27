@@ -766,17 +766,27 @@ do_uninstall() {
     fi
 
     # 顺序：先 disable --now 再删单元。只 stop 的话 Restart=always 会被拉起。
+    # systemctl 操作需要 systemd 在跑；删单元文件不需要。
+    #
+    # 此前两者绑在一起：HAVE_SYSTEMD=0 时整个分支被跳过，而 install 阶段
+    # 单元文件是照写不误的（渲染 + 静态校验后落盘，与 systemd 是否运行无关）。
+    # 于是卸载后 /etc/systemd/system/<name>.service 永久残留，却报
+    # "systemd 不可用，跳过"——看起来是成功。卸载的目的就是清除痕迹，而
+    # 单元文件恰是最显眼的一条：0644，含服务名与 ExecStart 绝对路径。
     if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
         systemctl disable --now $UNIT_NAME >/dev/null 2>&1
-        rm -f "$UNIT"
         systemctl daemon-reload >/dev/null 2>&1
         systemctl reset-failed >/dev/null 2>&1
-        OK "systemd 驻留已清理"
+        OK "systemd 驻留已清理（服务已停用）"
     elif [ "$FAKE_ROOT" = 1 ]; then
         OK "假根模式：跳过 systemctl（不改动真实系统状态）"
     else
-        OK "systemd 不可用，跳过"
+        OK "systemd 不可用，跳过 systemctl（单元文件仍会删除）"
     fi
+    # 单元文件的删除与上面分支解耦：无条件删。
+    # 假根下 $UNIT 由 $PREFIX 派生，删的是假根内的文件，不影响真实系统；
+    # 且假根守卫本就要断言"卸载后无残留"，这里不删反而让它永远测不到。
+    rm -f "$UNIT"
     rm -f "$CRON" "$BIN_DST" "$LOCK"
     rm -rf "$CONF_DIR" "$LIB_DIR"
     OK "文件与二进制已清理"
