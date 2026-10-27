@@ -786,10 +786,23 @@ do_uninstall() {
     # 单元文件的删除与上面分支解耦：无条件删。
     # 假根下 $UNIT 由 $PREFIX 派生，删的是假根内的文件，不影响真实系统；
     # 且假根守卫本就要断言"卸载后无残留"，这里不删反而让它永远测不到。
-    rm -f "$UNIT"
-    rm -f "$CRON" "$BIN_DST" "$LOCK"
-    rm -rf "$CONF_DIR" "$LIB_DIR"
-    OK "文件与二进制已清理"
+    rm -f "$UNIT" 2>/dev/null
+    rm -f "$CRON" "$BIN_DST" "$LOCK" 2>/dev/null
+    rm -rf "$CONF_DIR" "$LIB_DIR" 2>/dev/null
+    # 不可省：此前无论 rm 真的删没删掉，这里一律 OK。rm 失败只往 stderr 吐一行，
+    # 计数不走 fail，于是卸载报"成功 3 失败 0"而最敏感的 $CONF_DIR（含密钥与
+    # C2 地址）留在盘上。真实成因：目录是挂载点（Device or resource busy）、
+    # 被进程占用、或只读——恰恰都发生在最需要清痕的时刻。
+    _left=""
+    for _p in "$UNIT" "$CRON" "$BIN_DST" "$LOCK" "$CONF_DIR" "$LIB_DIR"; do
+        [ -e "$_p" ] && _left="$_left $_p"
+    done
+    if [ -n "$_left" ]; then
+        log FAIL "文件清理未完成，残留:$_left"
+        fail=$((fail+1))
+    else
+        OK "文件与二进制已清理"
+    fi
     # 按 PID 精确杀，避免 pkill -f 自匹配。
     # 假根下**不杀**：comm 匹配区分不了"这个 camd 属于哪个根"，杀会误伤
     # 真实部署的常驻进程——那正是假根要隔离的东西。假根部署在守卫里用

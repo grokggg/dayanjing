@@ -75,7 +75,7 @@ static void usage(const char *argv0)
         "  --persist-recheck N 每完成 N 批自检一次驻留是否仍在，缺失则重装\n"
         "                      （缺省 1；0 = 关闭自检，回到只在启动前装一次）\n"
         "                      关闭后：管理员删掉驻留而进程未重启时永不自愈，\n"
-        "                      表现为进程在跑、画面在回传，机器重启后消失\n"
+        "                      表现为进程在跑、也有数据产出，机器重启后消失\n"
         "  -D                  双 fork + setsid 后台化\n"
         "  --no-persist        不执行驻留（仅调试；部署时禁止）\n"
         "  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）\n"

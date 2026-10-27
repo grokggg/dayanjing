@@ -44,7 +44,14 @@ REDLINES = [
         "id": "R2",
         "name": "systemd 运行时驻留",
         "why": "生产环境主路径；enable/restart/is-active/MainPID/Restart=always 从未真跑",
-        "probe": "test \"$(cat /proc/1/comm)\" = systemd && systemctl is-system-running",
+        # 探测口径修正：原判据要求宿主 PID 1 就是 systemd，会永远 BLOCKED。
+        # 但 PID/mount namespace 里可以起真正的 systemd 作真正的 PID 1（实测可行：
+        # /proc/1/comm=systemd、systemctl daemon-reload rc=0、journald/logind 拉起）。
+        # 那是真 systemd 路径，不是模拟。故探测改为"能否造出该环境"。
+        # 注意不能用 systemctl is-system-running：ns 内它返回 starting，rc=1。
+        "probe": "command -v unshare >/dev/null && "
+                  "(test -x /lib/systemd/systemd || test -x /usr/lib/systemd/systemd) && "
+                  "unshare --fork --pid --mount-proc --mount --propagation private /bin/true",
         "verify": "onekey install 后断言 is-active=active 且 MainPID!=0，"
                   "kill -9 后观察 Restart 拉起且 C2 继续收到字节",
         "ev": "R2.evidence",

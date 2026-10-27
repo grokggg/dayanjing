@@ -307,6 +307,9 @@ verify-cmdline-stealth:
 verify-uninstall-unit:
 	@python3 tests/verify_uninstall_unit.py
 
+verify-uninstall-busy:
+	@python3 tests/verify_uninstall_busy.py
+
 verify-daemon-resilience:
 	@python3 tests/verify_daemon_resilience.py
 
@@ -327,7 +330,7 @@ verify-redline:
 verify-redline-guard:
 	@python3 ../redline/redline_guard.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-persist-selfheal verify-redline verify-redline-guard $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit

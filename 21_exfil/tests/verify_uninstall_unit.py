@@ -147,7 +147,10 @@ def main():
             fatal("反向注入失败：找不到 do_uninstall 函数")
         removed = 0
         for j in range(start, len(lines)):
-            if lines[j].strip() == 'rm -f "$UNIT"':
+            # 判据放宽为前缀匹配：该行加了 2>/dev/null 后缀（卸载失败静默的修复）。
+            # 若仍按全等匹配，反向注入永远命中不到，守卫会退化成恒绿——
+            # 这正是"工具静默失效而报告一切正常"的典型形态。
+            if lines[j].strip().startswith('rm -f "$UNIT"'):
                 lines[j] = None
                 removed += 1
                 break
