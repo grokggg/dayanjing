@@ -14,10 +14,22 @@ CRYPTO  = ../00_crypto/src/crypto_gcm.c ../00_crypto/src/crypto_hash.c \
 
 SRCS    = src/front.c src/h2.c $(TLS) $(CRYPTO)
 
-.PHONY: all clean test inspect
+.PHONY: all clean test inspect testdata
 
-all: $(BUILD)/test_front $(BUILD)/test_h2 $(BUILD)/test_front_h2 $(BUILD)/test_huffman \
-     $(BUILD)/dump_hpack $(BUILD)/test_front_real
+# 本模块复用 25_tls 的测试夹具（FRONT_TLS_DATA 指向 ../25_tls/tests/data），
+# 而该目录被 .gitignore 忽略、不入库。只构建/测试本模块时若夹具缺失，
+# 症状是"证书校验失败"，排查会被引向本模块代码，而非"上游夹具没生成"。
+# 故显式声明依赖，缺失即委托 25_tls 的生成器产出。
+TLS_FIXTURES := ../25_tls/tests/data/leaf.pem ../25_tls/tests/data/ca.pem \
+                ../25_tls/tests/data/leaf.key
+
+$(TLS_FIXTURES):
+	$(MAKE) -C ../25_tls testdata
+
+all: $(TLS_FIXTURES) $(BUILD)/test_front $(BUILD)/test_h2 $(BUILD)/test_front_h2 \
+     $(BUILD)/test_huffman $(BUILD)/dump_hpack $(BUILD)/test_front_real
+
+testdata: $(TLS_FIXTURES)
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -40,7 +52,7 @@ $(BUILD)/test_huffman: tests/test_huffman.c $(SRCS) | $(BUILD)
 $(BUILD)/test_front_real: tests/test_front_real.c $(SRCS) | $(BUILD)
 	$(CC) $(CFLAGS) $< $(SRCS) -o $@ $(LDFLAGS)
 
-test: $(BUILD)/test_front $(BUILD)/test_h2 $(BUILD)/test_front_h2 \
+test: $(TLS_FIXTURES) $(BUILD)/test_front $(BUILD)/test_h2 $(BUILD)/test_front_h2 \
       $(BUILD)/test_huffman $(BUILD)/test_front_real
 	@timeout 300 $(BUILD)/test_front
 	@timeout 120 $(BUILD)/test_h2

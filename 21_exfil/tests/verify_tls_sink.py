@@ -208,7 +208,14 @@ def main():
         if not os.path.exists(f):
             raise SystemExit("[FATAL] 缺少必需产物: %s" % f)
     global BASE
-    BASE = tempfile.mkdtemp(prefix="vtls_")
+    # 工作目录必须落在持久位置：收端的 --out/--stats/--log 与 camd 的 --root
+    # 都挂在这里。默认 tempfile 落在 /tmp，而本沙盒已多次实测 /tmp 被整体
+    # 清空（502 之后），目录中途消失会让收端写入失败、camd 建根失败，
+    # 症状却长成 "TLS 握手 transport error" —— 排查被引向发送回调契约
+    # （那是上一轮刚修好、本来正确的代码）。
+    # 优先 /data（沙盒持久工作区），不可用时退回默认临时目录。
+    _base_dir = "/data" if (os.path.isdir("/data") and os.access("/data", os.W_OK)) else None
+    BASE = tempfile.mkdtemp(prefix="vtls_", dir=_base_dir)
 
     # ---------- 正向：真实 TLS 收端 ----------
     print("=== 正向：tls:// 出口 + 真实 TLS 收端 ===")
