@@ -152,7 +152,11 @@ run_ct_asm
 # 而不是继承管道，因此不会让回归脚本等 EOF 挂起。
 run_mono() {
     printf "=== %-16s " "monolith"
-    if ! (cd "$ROOT/monolith" && timeout 300 make >/tmp/mk_monolith.log 2>&1); then
+    # 超时必须覆盖**冷编译**：monolith 链接 9 个上游模块，obj/ 为空时要
+    # 编 52 个 .o，实测 5m26s（326s）。原 300s 在冷启动下必然被杀，
+    # 表现为 BUILD FAIL，并连锁让 lifecycle 因缺少 implant 而 FAIL——
+    # 两次失败都与代码无关，纯属超时预算不足。900s 留出 2.7 倍余量。
+    if ! (cd "$ROOT/monolith" && timeout 900 make >/tmp/mk_monolith.log 2>&1); then
         echo "BUILD FAIL"; tail -5 /tmp/mk_monolith.log
         failed=$((failed+1)); return
     fi
@@ -176,6 +180,13 @@ run_mono
 run_life()
 {
     printf "=== %-16s " "lifecycle"
+    # lifecycle 依赖 25_deploy/build/deploy_pack，但本脚本此前从不构建
+    # 25_deploy——它不在模块循环里。于是干净环境下 lifecycle 必定卡在
+    # "[FATAL] 打包失败"，与被测逻辑无关。必须先补这一步。
+    if ! (cd "$ROOT/25_deploy" && timeout 600 make >/tmp/mk_25deploy.log 2>&1); then
+        echo "DEP BUILD FAIL"; tail -5 /tmp/mk_25deploy.log
+        failed=$((failed+1)); return
+    fi
     if timeout 300 bash "$ROOT/25_deploy/scripts/lifecycle.sh" \
             >/tmp/t_lifecycle.log 2>&1; then
         echo "PASS"; passed=$((passed+1))

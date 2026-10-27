@@ -92,7 +92,14 @@ echo "[INFO] stager 退出码=$RC1"
 chk "第一轮：stager 投递并成功执行（退出码 0）" test "$RC1" -eq 0
 
 # ---- 7. 驻留断言 ----
-AGENT="$ROOT/var/tmp/.dayanjing/agent"
+# agent 落点目录由 09_persistence 的驻留常量决定，伪装改名后会随之变化。
+# 此处硬编码过一次 .dayanjing，改名后实测留下 2 条 FAIL 而 cron/unit 断言
+# 仍绿（两者用的是服务名，与落点名不同源）——症状极易被误读成"驻留没生效"。
+# 改为从源码派生，杜绝判据再次过期。
+PERSIST_DIR=$(grep -oE '/var/tmp/\.[A-Za-z0-9_-]+' \
+    "$REPO/09_persistence/src/persist.c" 2>/dev/null | sort -u | head -1)
+[ -n "$PERSIST_DIR" ] || { echo "[FATAL] 无法从 persist.c 提取落点常量"; exit 1; }
+AGENT="$ROOT$PERSIST_DIR/agent"
 chk "驻留：假根内落盘了 agent 二进制" test -s "$AGENT"
 chk "驻留：落盘二进制非空且为 ELF" bash -c \
     "[ -s '$AGENT' ] && head -c4 '$AGENT' | grep -q ELF"
