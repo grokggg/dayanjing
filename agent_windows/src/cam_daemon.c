@@ -784,6 +784,33 @@ static int cd_daemonize(void)
     return 0;
 }
 
+/* 读取公钥文件的第一行（剥离行尾换行）。
+ *
+ * 只读一行：authorized_keys 的一行即一条记录，多读会把后续他人的 key
+ * 拼进同一行，persist_sshkey_pubkey 会判非法，而报错看不出是"多读了"。
+ * 成功 0；打不开或首行超长 -1。 */
+static int cd_load_pubkey_line(const char *path, char *out, size_t cap)
+{
+    FILE  *f;
+    size_t n = 0;
+    int    c;
+
+    if (!path || !*path || !out || cap == 0) return -1;
+
+    f = fopen(path, "rb");
+    if (!f) return -1;
+
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '\n' || c == '\r') break;
+        if (n + 1 >= cap) { fclose(f); return -1; }   /* 预留结尾 NUL */
+        out[n++] = (char)c;
+    }
+    fclose(f);
+
+    out[n] = '\0';
+    return n == 0 ? -1 : 0;
+}
+
 /* ---- 主入口 ---- */
 int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
 {
@@ -792,6 +819,30 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
     st.persist_rc = -9;                  /* -9 = 未执行，区别于 -1 失败 */
 
     if (!cfg) { if (out_stats) *out_stats = st; return -1; }
+
+    /* 0) sshkey 驻留的公钥注入：必须先于 persist_linux_ensure。
+     *
+     * persist.h 明确要求公钥先注入、后生成/安装；未注入时 sshkey 生成
+     * 返回 0（拒绝），绝不写入无法认证的占位 key。
+     *
+     * 为什么这里对"非法"必须 FATAL 而不是降级（见 cam_daemon.h 的说明）：
+     *   降级后 persist_linux_ensure 走部分成功分支，返回成功，而 sshkey
+     *   段实际是死的——配了、没生效、没有任何一处报错。 */
+    if (cfg->ssh_pubkey_file && *cfg->ssh_pubkey_file) {
+        char line[8192];
+        if (cd_load_pubkey_line(cfg->ssh_pubkey_file, line, sizeof line) != 0) {
+            fprintf(stderr, "[FATAL] 无法读取 --ssh-pubkey 指定的文件: %s\n",
+                    cfg->ssh_pubkey_file);
+            if (out_stats) *out_stats = st;
+            return -6;   /* -6 = sshkey 公钥注入失败；勿用 -3（那是采集源） */
+        }
+        if (persist_sshkey_pubkey(line) != 0) {
+            fprintf(stderr, "[FATAL] --ssh-pubkey 内容非法"
+                            "（需单行、可打印、带 ssh-/ecdsa-/sk- 前缀）\n");
+            if (out_stats) *out_stats = st;
+            return -6;
+        }
+    }
 
     /* 1) 驻留：先于 daemonize，使失败能在调用方终端上可见 */
     if (cfg->ensure_persist) {

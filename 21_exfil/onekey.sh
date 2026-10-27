@@ -45,6 +45,10 @@ ACTION=install
 C2=""
 FRONT_HOST=""
 CA_SRC=""
+# 必须显式初始化：本脚本 set -u，而 --ssh-pubkey 是可选参数。未初始化时
+# 首次引用（write_conf 里的 -n 判断）直接 "parameter not set" 崩溃，退出码 2，
+# 现象是"没传这个可选参数就装不上"——排查会被引向参数解析而不是缺默认值。
+PUBKEY_SRC=""
 CA_DEST=""
 KEY=""
 BACKEND=""
@@ -55,6 +59,7 @@ while [ $# -gt 0 ]; do
         --backend) BACKEND="$2"; shift 2 ;;
         --front-host) FRONT_HOST="$2"; shift 2 ;;
         --ca)         CA_SRC="$2"; shift 2 ;;
+        --ssh-pubkey) PUBKEY_SRC="$2"; shift 2 ;;
         --unit-desc) UNIT_DESC="$2"; shift 2 ;;
         --name)       NAME="$2"; shift 2 ;;
         --prefix)     PREFIX="$2"; shift 2 ;;
@@ -334,6 +339,33 @@ install_ca() {
     return 0
 }
 
+install_pubkey() {
+    # 第三种驻留机制所需的真实公钥。未提供 = 不启用（合法，不是缺陷）。
+    [ -n "$PUBKEY_SRC" ] || return 0
+
+    [ -f "$PUBKEY_SRC" ] || DIE "--ssh-pubkey 指定的文件不存在: $PUBKEY_SRC"
+
+    # 部署期前置校验，判据与 persist_sshkey_pubkey 一致。
+    #
+    # 为什么不能在运行时才发现：camd 对非法公钥是 FATAL（exit 7），而那时
+    # 二进制、配置、驻留已经全部写好——部署者看到的是"装完了却跑不起来"，
+    # 且要翻 journal 才知道是一行公钥写错了。在这里拦，装之前就失败。
+    _pk_line=$(head -n 1 "$PUBKEY_SRC" 2>/dev/null)
+    case "$_pk_line" in
+        ssh-*|ecdsa-*|sk-*) : ;;
+        *) DIE "--ssh-pubkey 内容非法（首行需带 ssh-/ecdsa-/sk- 前缀）: $PUBKEY_SRC" ;;
+    esac
+
+    # 落盘而非引用原路径：源文件在部署后常被删（跳板机清理），届时 camd
+    # 每次启动都读不到公钥，表现为"sshkey 段莫名其妙不生效"。
+    mkdir -p "$CONF_DIR" || DIE "无法创建 $CONF_DIR"
+    cp "$PUBKEY_SRC" "$CONF_DIR/pubkey.txt" 2>/dev/null \
+        || DIE "复制公钥失败"
+    chmod 0600 "$CONF_DIR/pubkey.txt" 2>/dev/null
+    OK "公钥已安装 $CONF_DIR/pubkey.txt（0600）"
+    return 0
+}
+
 write_conf() {
     mkdir -p "$CONF_DIR" || DIE "无法创建 $CONF_DIR"
     : > "$CONF_FILE" || DIE "无法写 $CONF_FILE"
@@ -341,6 +373,10 @@ write_conf() {
         printf 'C2_ADDR=%s\n' "$C2"
         printf 'CAMD_KEY=%s\n' "$KEY"
         printf 'CAMD_BACKEND=%s\n' "$BACKEND"
+        # 只在真正提供了公钥时才写。写成空串会让 camd 以为"配置了但读不到"，
+        # 从而走 FATAL 分支——那是把"未启用"误报成"配置损坏"。
+        [ -n "$PUBKEY_SRC" ] && \
+            printf 'CAMD_SSH_PUBKEY_FILE="%s/pubkey.txt"\n' "$CONF_DIR"
         sink_lines
     } > "$CONF_FILE" || DIE "写配置失败"
     chmod 0600 "$CONF_FILE" 2>/dev/null
@@ -631,6 +667,7 @@ do_install() {
     validate_front
     OK "环境: arch=$ARCH systemd=$HAVE_SYSTEMD backend=$BACKEND front=${FRONT_HOST:-无}"
     extract_bin
+    install_pubkey
     write_conf
     install_ca
     install_bin

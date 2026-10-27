@@ -267,6 +267,15 @@ verify-onekey-arch:
 verify-onekey-front:
 	@python3 tests/verify_onekey_front.py
 
+# 第三种驻留机制（sshkey）的端到端接线。此前整条是断的：camd 从未调用
+# persist_sshkey_pubkey，而公钥未注入时该项生成返回 0（拒绝），于是部署侧
+# 看到 persist_linux_ensure 成功、sshkey 段却是死的——配了、没生效、
+# 没有任何一处报错。本目标断言有效公钥真写入 authorized_keys、标记不含
+# 项目名、无公钥是合法形态、非法公钥在装之前被拦，并用反向注入证明
+# "部署期拦截"不是恒绿（去掉校验后失败会推迟到运行期）。
+verify-sshkey-persist:
+	@python3 tests/verify_sshkey_persist.py
+
 verify-prefix:
 	@python3 tests/verify_prefix_isolation.py
 
@@ -298,7 +307,7 @@ verify-unit-contract-reverse:
 	@python3 tests/verify_unit_contract.py restart
 	@python3 tests/verify_unit_contract.py paths
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -322,5 +331,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience
 

