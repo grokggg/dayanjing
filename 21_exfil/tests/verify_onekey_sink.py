@@ -152,9 +152,15 @@ def main():
         # 实参必须是 CAMD_SIND 变量本身；写死 tcp://$C2_ADDR 之类即失守。
         if not m or "CAMD_SINK" not in m.group(2):
             bad.append(l.strip()[:70])
-    check(bool(uses) and not bad,
-          "S1 所有 sink 使用点均取自 CAMD_SINK（单一产地，不得各自拼装）",
-          f"使用点={len(uses)} 异常={bad}")
+    # 判据第三次更新：sink 已**完全退出命令行**——/proc/<pid>/cmdline 是
+    # 0444 世界可读，任何本地用户 ps 一下即得 C2 地址。现在由 sink_lines
+    # 写入 conf，run.sh 用 `set -a` 导出，camd 从 environ(0400) 读取。
+    # 旧判据要求 uses 非空（"使用点必须取自 CAMD_SINK"），重构后 uses=0，
+    # 旧判据必然失败——这是判据过期，不是产品缺陷，故不得退回三处拼装。
+    # 新不变量更强也更可证伪：命令行出现任何 --sink 即失守。
+    check(not uses,
+          "S1 sink 不得出现在命令行（改由 CAMD_SINK 环境注入；cmdline 0444 世界可读）",
+          f"使用点={len(uses)} 异常={[u.strip()[:70] for u in uses]}")
     # 只取 printf 行：verify_run 里还有一句 `CAMD_SINK=""`（读 conf 前的
     # 清空初始化），它不含 scheme 且本就不该含——算进来会让判据恒红。
     defs = [l for l in code if "CAMD_SINK=" in l and "printf" in l]

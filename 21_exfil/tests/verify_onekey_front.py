@@ -104,15 +104,19 @@ def main():
                        "--front-host", "c2.real.example",
                        "--ca", CA, "--backend", "mock"])
     conf = read_conf()
-    check("CAMD_SINK=front://front.test:443" in conf,
+    # conf 里 sink_lines 用 printf 'CAMD_SINK="front://%s"' 写成**带引号**的
+    # 标量，断言必须含引号——按无引号匹配会假失败（实测踩到：行为是对的）。
+    check('CAMD_SINK="front://front.test:443"' in conf,
           "① front 模式产出 front:// sink（真实目标不在线路上）",
           "conf=" + repr(conf[:200]))
-    check("--front-host c2.real.example" in conf,
-          "② 真实目标写进 CAMD_EXTRA（内层 Host）")
-    check("--ca" in conf and "ca.pem" in conf,
-          "③ 信任库路径写进 CAMD_EXTRA（否则退化成不校验）")
-    check('CAMD_EXTRA="--front-host' in conf,
-          "④ CAMD_EXTRA 带引号（防 source 时被当成命令执行）",
+    # CAMD_EXTRA 已废弃：多词拼接会被 conf 的 `. ` source 解析成"临时环境
+    # 变量 + 执行命令"，参数静默丢失。改成分立标量 CAMD_FRONT_HOST / CAMD_CA。
+    check('CAMD_FRONT_HOST="c2.real.example"' in conf,
+          "② 真实目标写进 CAMD_FRONT_HOST（内层 Host）")
+    check('CAMD_CA="' in conf and "ca.pem" in conf,
+          "③ 信任库路径写进 CAMD_CA（否则退化成不校验）")
+    check('CAMD_FRONT_HOST="' in conf and 'CAMD_CA="' in conf,
+          "④ 落点参数为带引号标量（防 source 时被当成命令执行）",
           "实测缺陷：无引号时参数静默丢失")
     check(os.path.exists("/etc/%s/ca.pem" % DEFN), "⑤ CA 已投递到目标机")
 
@@ -120,10 +124,11 @@ def main():
     cleanup()
     rc, out = install(["--c2", "127.0.0.1:19999", "--backend", "mock"])
     conf = read_conf()
-    check("CAMD_SINK=tcp://127.0.0.1:19999" in conf,
+    check('CAMD_SINK="tcp://127.0.0.1:19999"' in conf,
           "⑥ tcp 模式仍产出 tcp:// sink")
-    check(re.search(r"^CAMD_EXTRA=\s*$", conf, re.M) is not None,
-          "⑦ tcp 模式 CAMD_EXTRA 为空（不残留 front 参数）")
+    check(re.search(r"^CAMD_FRONT_HOST=\s*$", conf, re.M) is not None
+          and re.search(r"^CAMD_CA=\s*$", conf, re.M) is not None,
+          "⑦ tcp 模式 CAMD_FRONT_HOST/CAMD_CA 为空（不残留 front 参数）")
 
     print("=== 反向：两条守卫必须拒绝 ===")
     cleanup()
@@ -156,12 +161,15 @@ def main():
     norm = code.replace("\\$", "$")
     args = re.findall(r'--sink\s+"?([^"\\s]+)', norm)
     bad = [a for a in args if a != "$CAMD_SINK"]
-    check(not bad,
-          "S1 所有 --sink 实参均为 $CAMD_SINK（不得硬编码任一 scheme）",
-          "越界实参: " + repr(bad))
-    check(len(args) >= 2,
-          "S2 至少存在 run.sh 与试运行两处消费点",
-          "实测=" + str(len(args)))
+    # sink 已退出命令行（/proc/<pid>/cmdline 0444 世界可读），故 args 必须为 0。
+    # 旧判据要求"至少两处消费点"，重构后必然失败——判据过期，不是产品缺陷；
+    # 不得为了凑数把 --sink 写回命令行。
+    check(not args,
+          "S1 sink 不得出现在命令行（改由 CAMD_SINK 环境注入）",
+          "越界实参: " + repr(args))
+    check(code.count("set -a") >= 2,
+          "S2 落点参数经环境注入（run.sh 与试运行均 set -a 源 conf）",
+          "实测 set -a=%d" % code.count("set -a"))
     check("sink_lines()" in src and src.count("sink_lines") >= 2,
           "S3 sink_lines 被定义且被调用（单一产地）")
 
