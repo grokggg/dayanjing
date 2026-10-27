@@ -157,7 +157,7 @@ AUDIT_GOALS := winshim-build
 #      新增断言永远测不到（make 还报 RC=0，看起来一切正常）。
 #   —— 不进 TEST_BINS：test 目标是逐个执行 $(TEST_BINS)，而 probe 是观测器，
 #      需要 port/host/dir 参数，被当测试执行只会报参数错误。
-all: $(TEST_BINS) $(CAMDBIN) $(FRONT_PROBE) $(V4L2_PROBE)
+all: $(TEST_BINS) $(CAMDBIN) $(FRONT_PROBE) $(V4L2_PROBE) $(JPEG_PROBE)
 
 dirs:
 	@mkdir -p $(BUILD)
@@ -250,6 +250,18 @@ V4L2_PROBE := $(BUILD)/v4l2_realpath_probe
 $(V4L2_PROBE): tests/v4l2_realpath_probe.c $(PORT_OBJS) $(DEP_OBJS) | dirs
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DEP_OBJS) -o $@ $(LDLIBS)
 
+# JPEG 真解码守卫。
+# 必须进 all：不进的话改了 cam_jpeg.c 不重编 probe，守卫跑陈旧二进制，
+# 新增断言永远测不到而 make 仍报 RC=0。
+JPEG_PROBE := $(BUILD)/jpeg_dump_probe
+
+$(JPEG_PROBE): tests/jpeg_dump_probe.c $(BUILD)/cam_jpeg.o | dirs
+	$(CC) $(CFLAGS) $< $(BUILD)/cam_jpeg.o -o $@ $(LDLIBS)
+
+.PHONY: verify-jpeg-decode
+verify-jpeg-decode: $(JPEG_PROBE)
+	@python3 tests/verify_jpeg_decode.py
+
 .PHONY: verify-v4l2-realpath
 verify-v4l2-realpath: $(V4L2_PROBE)
 	@python3 tests/verify_v4l2_realpath.py
@@ -283,6 +295,10 @@ test: $(TEST_BINS)
 	done; \
 	echo "=== verify-front（域前置出口） ==="; \
 	python3 tests/verify_front_sink.py || fail=1; \
+	echo "=== verify-jpeg-decode（转码产物真解码） ==="; \
+	$(MAKE) verify-jpeg-decode || fail=1; \
+	echo "=== verify-v4l2-realpath（V4L2 真设备 ABI） ==="; \
+	$(MAKE) verify-v4l2-realpath || fail=1; \
 	exit $$fail
 
 # Windows 后端：仅在检测到 MinGW 交叉工具链时真正编译

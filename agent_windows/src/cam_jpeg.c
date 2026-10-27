@@ -510,9 +510,20 @@ static void build_huff_codes(const uint8_t *bits, const uint8_t *vals, int nvals
 }
 
 /* 编码一个 8x8 块的一个分量 */
+/* out_dc：回填**本块量化后的 DC 系数**，供调用方做下一块的 DC 预测。
+ *
+ * 必须由这里回填，不能由调用方自行重算。DC 预测是全块链式的：
+ * 编码器算 diff = zz[0] - prev_dc，解码器用自己累积的 pred 还原
+ * DC = pred + diff。只要编码器手里的 prev_dc 与解码器累积值**差 1**，
+ * 误差就沿每个块线性累积——320x240 有约 1200 个 Y 块，累到百级即
+ * 整幅画面失真，而码流结构完全合法、所有魔数检查照过。
+ *
+ * 此前调用方写的是 (dct[0] + (q >> 1)) / q，而下面是按符号分路取整
+ * （负数走 (v - (q>>1))/q）。负数时两者相差 1，正是上面那条累积链。 */
 static int encode_block(bitstream_t *bs, const int16_t *block,
                         int prev_dc, const huff_code_t *dc_tab,
-                        const huff_code_t *ac_tab, const uint8_t *qtable)
+                        const huff_code_t *ac_tab, const uint8_t *qtable,
+                        int *out_dc)
 {
     /* 量化 */
     int zz[64];
@@ -526,6 +537,8 @@ static int encode_block(bitstream_t *bs, const int16_t *block,
         if (qv >  2047) qv =  2047;
         zz[i] = qv;
     }
+
+    if (out_dc) *out_dc = zz[0];
 
     /* DC：差分 + 类别编码 */
     int diff = zz[0] - prev_dc;
@@ -655,8 +668,18 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
         if (p + 2 + dht_len > end) return 0;
         *p++ = 0xFF; *p++ = M_DHT;
         w16(&p, (uint16_t)dht_len);
-        /* 表类型：bit7=1 AC, bit6-4=0, bit3-0=表号 */
-        uint8_t class_id = (uint8_t)((t << 4) | (t >> 1));
+        /* 表标识字节 = (Tc << 4) | Th。
+         *   Tc（表类）只能是 0=DC / 1=AC —— JPEG T.81 规定 2..15 为保留值，
+         *     解码器一律按非法表拒绝，且报错是"huffman table decode error"
+         *     这类与"色度下采样""码流错位"都分不清的笼统信息。
+         *   Th（表号）0=亮度，1=色度。
+         *
+         * 此前写成 ((t << 4) | (t >> 1))：t=2/3 时得到 0x21/0x31，即 Tc=2/3，
+         * 属非法值。于是四个 DHT 里两个非法，整幅图任何解码器都打不开，
+         * 而既有测试只校验 SOI/EOI 魔数与段结构，一路全绿。
+         *
+         * 正确映射 t=0..3 -> DC0/AC0/DC1/AC1，故 Tc = t & 1、Th = t >> 1。 */
+        uint8_t class_id = (uint8_t)(((t & 1) << 4) | (t >> 1));
         *p++ = class_id;
         memcpy(p, bits, 16); p += 16;
         memcpy(p, vals, n);  p += n;
@@ -712,16 +735,13 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
                 }
                 int16_t dct[64];
                 fdct_8x8(block, dct);
-                if (!encode_block(&bs, dct, prev_dc[0], dc_codes, ac_codes, qy)) {
+                int qdc = 0;
+                if (!encode_block(&bs, dct, prev_dc[0], dc_codes, ac_codes, qy,
+                                  &qdc)) {
                     free(cb_down); free(cr_down);
                     return 0;
                 }
-                prev_dc[0] = (block[0] / 1);   /* 重新取量化后 DC */
-                /* 修正：prev_dc 应为量化后的 DC 系数 */
-                /* DC 预测必须取**量化后的 DC 系数** dct[0]，不能取 block[0]
-                 * （那是块内第一个像素减 128 的值）。两者相差约 8 倍（DCT 的
-                 * 归一化因子），用错会让差分值始终偏大，白白多耗编码位数。 */
-                prev_dc[0] = (dct[0] + (qy[0] >> 1)) / qy[0];
+                prev_dc[0] = qdc;   /* 与解码器同源，见 encode_block 说明 */
             }
 
             /* 色度下采样（2x2 平均）。采样点落在 stride 网格 (bx+xx*2, by+yy*2) 处。 */
@@ -762,11 +782,13 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
             {
                 int16_t dct[64];
                 fdct_8x8(block, dct);
-                if (!encode_block(&bs, dct, prev_dc[1], dc_codes, ac_codes, qc)) {
+                int qdc1 = 0;
+                if (!encode_block(&bs, dct, prev_dc[1], dc_codes, ac_codes, qc,
+                                  &qdc1)) {
                     free(cb_down); free(cr_down);
                     return 0;
                 }
-                prev_dc[1] = (dct[0] + (qc[0] >> 1)) / qc[0];
+                prev_dc[1] = qdc1;
             }
 
             /* Cr 块 */
@@ -783,11 +805,13 @@ static size_t encode_color_jpeg_raw(const uint8_t *ycbcr, uint32_t width, uint32
             {
                 int16_t dct[64];
                 fdct_8x8(block, dct);
-                if (!encode_block(&bs, dct, prev_dc[2], dc_codes, ac_codes, qc)) {
+                int qdc2 = 0;
+                if (!encode_block(&bs, dct, prev_dc[2], dc_codes, ac_codes, qc,
+                                  &qdc2)) {
                     free(cb_down); free(cr_down);
                     return 0;
                 }
-                prev_dc[2] = (dct[0] + (qc[0] >> 1)) / qc[0];
+                prev_dc[2] = qdc2;
             }
         }
     }
