@@ -1,0 +1,22 @@
+=== F1-F12 正向：V4L2 内核 ABI 全序列 ===
+  [OK] F1  open() 成功  0
+  [OK] F2  VIDIOC_QUERYCAP 成功（命令号与结构体大小被内核接受）  qcap_structsz=104
+  [OK] F3  capabilities 带 V4L2_CAP_DEVICE_CAPS  caps=0x84000001
+  [OK] F4  能力判据通过（device_caps 含 CAPTURE|STREAMING）  effcaps=0x4000001
+  [OK] F5  S_FMT(MJPEG) 被拒 —— 触发后端回退分支  errno=22
+  [OK] F6  S_FMT(YUYV) 成功且尺寸回显一致  640x480
+  [OK] F7  sizeimage 与 YUYV422 一致  614400 == 614400
+  [OK] F8  REQBUFS 成功
+  [OK] F9  QUERYBUF 长度正确
+  [OK] F10 QUERYBUF m.offset 页对齐（mmap 前提）
+  [OK] F11 mmap 成功 —— 后端取帧所依赖的通路真实可用
+  [OK] F12 DQBUF 返回真实帧长度  bytesused=614400
+  [OK] F13 mmap 区域是真图案（两处像素不同，非单色/全零填充）  PIX0=eb80eb80eb80eb80 PIX100000=d380d380d380d380
+  [OK] F14 帧内不同字节值种类 >= 8（真像素而非填充）  variety=19
+  [OK] F15 设备确实推进了帧（frame_no>=2）  frame_no=2
+  [OK] S1  后端源码含 DEVICE_CAPS 条件判据（与探针镜像同源，防脱钩）
+=== R1/R2 反向：证明 F11 与 F4 不是恒绿 ===
+  [OK] R1  m.offset 非页对齐时 mmap 必失败 —— F11 有鉴别力  MMAP=-1
+  [OK] R2  老驱动形态（无 DEVICE_CAPS、无采集能力）判据应失败 —— F4 有鉴别力  CAPS_OK=0 effcaps=16777216
+
+共 18 项，通过 18，失败 0

@@ -98,3 +98,38 @@
 
 本轮修为 `cmd = cmd.replace(...)`。修复后 R2 / R3a 由 BLOCKED 翻为 VERIFIED，
 R1 / R3 / R4 经重新探测确认仍为真 BLOCKED（不是被这个 bug 压下去的）。
+
+---
+
+## R1b — V4L2 内核 ABI（ioctl 序列 + mmap 取帧）  ✅ VERIFIED
+
+**此前状态**：真设备分支（`USE_V4L2=1`）的 `open → QUERYCAP → S_FMT → REQBUFS →
+QUERYBUF → mmap → QBUF → STREAMON → DQBUF` 从未被执行过一次。几十轮跑的一直是
+"找不到设备就降级合成帧"那条路。ioctl 命令号、结构体布局与大小、mmap 取帧语义
+若与内核不一致，真机上就是 ENOTTY / EINVAL / 段错误，而此前没有任何东西验过。
+
+**如何打通**：用 FUSE 造用户态设备（`21_exfil/tests/v4l2_simdev.c`），提供
+ioctl 转发与 mmap（走 FUSE page cache），再用 `v4l2_abi_probe.c` 按后端相同
+序列走一遍。守卫 `verify_v4l2_abi.py` **18/18**（15 正向 + 2 反向 + 1 静态），
+已接入 `make test`。反向：`--bad-offset` → mmap 必失败；`--no-devcaps` →
+能力判据必失败。证明 F11/F4 不是恒绿。
+
+### R1 仍然 BLOCKED —— 三条路均已实证堵死（不是没试够）
+
+1. **内核模块**：无 `/lib/modules`、无 `modprobe`，装不了 `v4l2loopback` / `vivid`
+2. **CUSE**：无 libfuse3 开发头（`/usr/include/fuse3/cuse.h` 不存在、无 pkg-config），
+   无法编译；且内核 `fs/fuse/cuse.c` 的 `cuse_dev_operations` **没有 `.mmap`**，
+   而后端必走 mmap 模式（`read()` 在现代 UVC 上返回 EINVAL）
+3. **FUSE**：`fuse_init_inode()` 对 `S_IFCHR` 走 `init_special_inode()`，
+   `i_fop` 被换成 `def_chr_fops`，`open()` 走 `chrdev_open` 而非 FUSE。
+   实测：mode=S_IFCHR 时 `open: Permission denied` 且**服务端零请求**；
+   同一份服务端改 S_IFREG 后 `open/ioctl/mmap` 全部正常
+
+### 附带发现：/dev/video0 存在但无驱动（判据陷阱）
+
+本轮巡检发现 `/dev/video0` **存在**，是主设备号 81（video4linux）的字符设备节点，
+但 `open()` 返回 **ENXIO**（驱动不在）。R1 的旧判据 `ls /dev/video*` 会据此把环境
+判成"具备"→ 假 PENDING。已修为**必须能 open**。
+
+这与 `/sys/class/video4linux` 空目录那次是同一类错误：**存在 ≠ 可用**。
+该类错误已犯两次，判据一律改为"能实际打开并使用"。

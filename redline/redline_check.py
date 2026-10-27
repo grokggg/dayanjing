@@ -37,14 +37,38 @@ REDLINES = [
     {
         "id": "R1",
         "name": "V4L2 真设备采集",
-        "why": "整条链唯一没有流过真实像素的环节；全程 mock 合成帧",
+        "why": "整条链唯一没有流过真实像素的环节；全程 mock 合成帧。"
+               "\n      【已实证：本环境造不出可用字符设备，三条路全堵】"
+               "\n      (1) 内核模块：无 /lib/modules、无 modprobe，装不了 v4l2loopback/vivid"
+               "\n      (2) CUSE：无 libfuse3 开发头无法编译；且内核 fs/fuse/cuse.c 的"
+               "\n          cuse_dev_operations 没有 .mmap，而后端必走 mmap"
+               "\n      (3) FUSE：fuse_init_inode 对 S_IFCHR 走 init_special_inode()，"
+               "\n          i_fop 被换成 def_chr_fops，open 走 chrdev_open 而非 FUSE，"
+               "\n          表现为 Permission denied 且服务端零请求（实测对照："
+               "\n          同一份服务端改 S_IFREG 后 open/ioctl/mmap 全部正常）",
         # 注意：/sys/class/video4linux 目录可能"存在但为空"，ls 空目录返回 0，
         # 会误判成环境具备。必须用 grep -q . 要求有实际条目。
-        "probe": "ls /dev/video* >/dev/null 2>&1 || "
-                 "(test -d /sys/class/video4linux && ls /sys/class/video4linux 2>/dev/null | grep -q .)",
+        # 判据必须是"能打开"，不是"存在"。实测本环境 /dev/video0 存在且
+        # 是主设备号 81 的字符设备节点，但无驱动：open 返回 ENXIO。
+        # 用 ls 判存在会把"节点在、驱动不在"误判成环境具备 —— 与
+        # /sys/class/video4linux 空目录那次是同一类"存在≠可用"的错误。
+        "probe": "for d in /dev/video*; do test -c \"$d\" || continue; "
+                 "python3 -c \"import os,sys;os.open(sys.argv[1],os.O_RDWR|os.O_NONBLOCK)\" \"$d\" "
+                 ">/dev/null 2>&1 && exit 0; done; exit 1",
         "verify": "camd --backend v4l2 --sink file:///tmp/rl1.bin --batches 1 "
                   "后断言输出帧分辨率与真实设备能力一致，而非 1x1 合成",
         "ev": "R1.evidence",
+    },
+    {
+        "id": "R1b",
+        "name": "V4L2 内核 ABI（ioctl 序列 + mmap 取帧）",
+        "why": "真设备分支依赖的全部内核 ABI：ioctl 命令号、结构体布局与大小、"
+               "mmap 取帧、DQBUF 语义。这些错了真机上就是 ENOTTY/EINVAL/段错误，"
+               "而本沙盒没有摄像头，此前从未有任何东西验过。",
+        # 用 FUSE 造用户态设备即可验证，不需要真摄像头。
+        "probe": "test -c /dev/fuse && test -w /dev/fuse && command -v gcc >/dev/null",
+        "verify": "python3 {REPO}/21_exfil/tests/verify_v4l2_abi.py",
+        "ev": "R1b.evidence",
     },
     {
         "id": "R2",
