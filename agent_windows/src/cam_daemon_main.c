@@ -31,6 +31,7 @@
 
 #include "cam_daemon.h"
 #include "camera.h"
+#include "persist.h"
 #include "crypto_gcm.h"
 
 #include <signal.h>
@@ -209,6 +210,27 @@ int main(int argc, char **argv)
     if (!cfg.sink_path || !*cfg.sink_path) {
         fprintf(stderr, "[FATAL] 必须指定 --sink。无落点的部署不产出任何结果。\n");
         return 6;
+    }
+
+    /* 驻留服务名可来自环境（CAMD_SVC_NAME），与 CAMD_KEY 同一注入通路：
+     * 不得写进命令行——/proc/<pid>/cmdline 世界可读，名字本身就是意图。
+     *
+     * 【为何必须由部署侧决定】驻留段此前硬编码项目名，而部署侧已把落点
+     * 伪装成中性名。两者不一致在真机上是三重合失效：伪装失效（systemctl
+     * status 直接读出项目名）、双重驻留（两套 unit 同时拉起，两个采集进程
+     * 抢同一摄像头）、卸载残留（uninstall 只清一套，另一套仍在跑）。
+     * 名字只能有一个产地，就是部署脚本的 NAME。
+     *
+     * 设置失败必须中断：persist_set_service_name 会因路径穿越字符
+     * （'/'、'.' 等）拒绝。忽略返回值等于接受一个带 '/' 的名字去拼
+     * ".../etc/systemd/system/<name>.service"，即任意路径可写。 */
+    {
+        const char *sn = getenv("CAMD_SVC_NAME");
+        if (sn && *sn && persist_set_service_name(sn) != 0) {
+            fprintf(stderr, "[FATAL] CAMD_SVC_NAME 非法（仅 [A-Za-z0-9_-]，"
+                            "首字符非 '-'，长度 1..63）: %s\n", sn);
+            return 2;
+        }
     }
 
     /* 密钥可来自环境，供 systemd 的 EnvironmentFile 注入。

