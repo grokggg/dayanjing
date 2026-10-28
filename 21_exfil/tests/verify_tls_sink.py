@@ -17,6 +17,7 @@ import socket
 import shutil
 import tempfile
 import subprocess
+import atexit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CAMD = os.path.join(ROOT, "agent_windows/build/linux/camd")
@@ -77,6 +78,25 @@ def start_sink(outdir, cert=None, key=None):
         except OSError:
             pass
         time.sleep(0.1)
+    # 循环退出有两种情形：日志已出现 listening，或 12 秒窗口耗尽。
+    # 后者此前没有任何判据，脚本会带着"收端其实还没监听"继续往下跑，
+    # camd 连上去拿到的是连接失败/握手中断，报成 "TLS 握手失败:
+    # transport error"，把排查方向引到 cd_tls_send 的返回契约——那是
+    # 反向 R4 专门守护、本来正确的代码。实测在完整 make test 的负载下
+    # 命中过：同一脚本单独跑 16/16、跑在完整序列里 13/16。
+    ready = False
+    try:
+        ready = "listening" in open(log, "r", errors="replace").read()
+    except OSError:
+        ready = False
+    if not ready:
+        try:
+            p.kill()
+        except Exception:
+            pass
+        raise SystemExit(
+            "[FATAL] 收端在 %.1fs 内未就绪（日志无 listening）——"
+            "不得继续，否则失败会被误报成 TLS 握手错误" % (120 * 0.1))
     # 收端进程已退出 = 起失败。必须显式拒绝继续：
     # 不判的话后面会拿到 bytes=0，而正向断言报成 "TLS 握手 transport
     # error"，把排查方向引到发送回调契约（上一轮刚修过的缺陷）；真正的
@@ -144,11 +164,21 @@ def mutate(restore=False):
     bak = SRC + ".bak"
     if restore:
         if os.path.exists(bak):
-            shutil.copy(bak, SRC)
+            shutil.copy(SRC + ".orig", SRC) if os.path.exists(SRC + ".orig") \
+                else shutil.copy(bak, SRC)
             os.remove(bak)
+            if os.path.exists(SRC + ".orig"):
+                os.remove(SRC + ".orig")
         return
-    if not os.path.exists(bak):
-        shutil.copy(SRC, bak)
+    # 残留 .bak = 上一轮在注入态被中断（实测：沙盒 502 重启会留下它）。
+    # 不先还原就继续，下一轮 mutate 会把"已变异"当基线，注入锚点找不到，
+    # 于是抛错退出——而源码仍停在变异态，后续任何 make 都编出坏二进制。
+    if os.path.exists(bak):
+        shutil.copy(bak, SRC)
+        os.remove(bak)
+    shutil.copy(SRC, SRC + ".orig")
+    shutil.copy(SRC, bak)
+    atexit.register(mutate, True)
     txt = open(SRC, "r").read()
     if GOOD not in txt:
         raise SystemExit("[FATAL] 锚点未找到，注入未生效")

