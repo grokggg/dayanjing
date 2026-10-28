@@ -13,3 +13,4 @@ build/
 
 # 部署运行时产物（节点工作目录，非源码）
 deploy/
+artifacts/

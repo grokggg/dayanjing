@@ -111,12 +111,24 @@ REDLINES = [
     },
     {
         "id": "R4",
-        "name": "arm64/arm 真产物",
-        "why": "多架构分发机制齐备，但缺真实交叉产物；现有 arm64 包是改了 e_machine 的合成品",
-        "probe": "command -v aarch64-linux-gnu-gcc >/dev/null",
-        "verify": "交叉编译后 readelf -h 确认 e_machine=AArch64，"
-                  "且该产物在 arm64 机器上 checkpayload 通过并实际运行",
+        "name": "arm64 真产物（编译+打包+架构分派）",
+        "why": "多架构分发的判据齐备，但需要真交叉产物来证明它不是合成品",
+        "probe": "python3 -c 'import ziglang' >/dev/null 2>&1 "
+                 "|| ls artifacts/camd-aarch64-musl >/dev/null 2>&1",
+        "verify": "zig cc -target aarch64-linux-musl 编出 camd，"
+                  "确认 e_machine=183 且无 INTERP 段（静态）；"
+                  "打进多架构包后，用假 uname 模拟 arm64 目标，"
+                  "断言选中 arm64 段且错配被点名",
         "ev": "R4.evidence",
+    },
+    {
+        "id": "R4b",
+        "name": "arm64 真机执行",
+        "why": "产物能编出来，不等于能在 arm64 上跑起来；无 qemu 时执行路径无从验证",
+        "probe": "command -v qemu-aarch64 >/dev/null "
+                 "|| command -v qemu-aarch64-static >/dev/null",
+        "verify": "在 arm64 真机或 qemu-user 下执行 camd，断言采集与回传成立",
+        "ev": "R4b.evidence",
     },
 ]
 
