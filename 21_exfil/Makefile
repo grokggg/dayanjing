@@ -64,7 +64,7 @@ $(AGOBJS): FORCE
 
 FORCE:
 
-.PHONY: FORCE verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-user-deploy
+.PHONY: FORCE verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-user-deploy
 
 $(BUILD)/exfil.o: src/exfil.c include/exfil.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -350,7 +350,12 @@ verify-redline-guard:
 verify-user-deploy:
 	@python3 tests/verify_user_deploy.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
+# 回归上下文自动假根：部署测试忘了 PREFIX 时自动切假根，避免写真实 /etc。
+# 此前只能事后点名（check_realroot_pollution.py）——污染已经发生。
+verify-autoroot:
+	@python3 tests/verify_autoroot.py
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -374,5 +379,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity
+.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot
 

@@ -104,6 +104,32 @@ validate_name() {
 }
 validate_name
 
+# ---- 回归上下文自动切假根（前置拦截，替代事后点名）--------------------------
+# 真实根污染此前只能事后点名（scripts/check_realroot_pollution.py）：污染已经
+# 发生，报警救不回已经写进真实 /etc 的那一次。这里做前置拦截。
+#
+# 触发条件刻意收窄，三条必须全部成立：
+#   1) 未显式指定 PREFIX（--prefix 与环境 PREFIX 均为空）
+#   2) 以 root 运行（非 root 走 USER_MODE，落点在 $HOME，本来就不碰真实 /etc）
+#   3) 显式回归标记 DAYNANJING_REGRESSION 非空（由 run_all_tests.sh 设置）
+# 收窄的理由：verify_user_deploy 故意以 uid=65534 且不带 PREFIX 运行，用来验证
+# 非 root 降级；若把 MAKELEVEL/CI 也当触发条件，或在非 root 下也切，会把这个
+# 守卫自己的正向用例改成假根路径 —— 表现为"用户级驻留"断言全红，而脚本全绿，
+# 比污染更难发现。
+#
+# 假根路径固定（不随机）：install 与 uninstall 是两次独立进程，随机目录会让
+# 卸载找不到安装时的落点，留下一个装了东西却没人清理的临时目录。
+AUTO_FAKE_ROOT=0
+if [ -z "$PREFIX" ]; then
+    _euid=$(id -u 2>/dev/null || echo 1)
+    if [ "$_euid" = "0" ] && [ -n "${DAYNANJING_REGRESSION:-}" ]; then
+        PREFIX="${TMPDIR:-/tmp}/ok_autoroot_$NAME"
+        mkdir -p "$PREFIX" 2>/dev/null || DIE "无法创建自动假根 $PREFIX"
+        AUTO_FAKE_ROOT=1
+        WARN "回归上下文（DAYNANJING_REGRESSION）且未指定 --prefix：自动切假根 $PREFIX"
+    fi
+fi
+
 # ---- 路径派生 --------------------------------------------------------------
 # 全部由 $PREFIX 与 $NAME 派生，脚本其余部分一律只用这些变量、不得再写
 # 绝对路径或字面服务名。此前是硬编码 /etc/camd 等，结果是：守卫每跑一次

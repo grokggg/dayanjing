@@ -8,6 +8,11 @@ failed=0
 passed=0
 skipped=0
 
+# 回归上下文标记：onekey.sh 在"未显式指定 PREFIX 且以 root 运行"时据此自动切
+# 假根，避免部署测试写真实 /etc。非 root 场景（verify_user_deploy 用 uid=65534
+# 验证用户级降级）不受影响——它落点在 $HOME，本来就不碰真实 /etc。
+export DAYNANJING_REGRESSION=1
+
 # 回归一律从"未被变异污染"的树开始。
 # 变异审计被强杀时会留下 .mutbak 与注入后的源码；若不先自愈，本次回归
 # 的每一个"通过"都是在带缺陷的二进制上得到的，报告全绿却毫无意义。
