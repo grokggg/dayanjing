@@ -1,6 +1,1 @@
-make -C 21_exfil test 退出码: 0
-取码方式: bash -c "make ... ; echo $? > rc"，非从日志推断
-行数: 1273
-make *** 错误: 0
-=== result 行: 11（全部 0 fail）
-[FAIL] 行: 2（verify-upload 的 HTTP 500/000 预期反向场景）
+0

@@ -8,6 +8,27 @@ failed=0
 passed=0
 skipped=0
 
+# 单实例锁：回归入口之间的干扰极难归因，必须前置排除。
+# 实测后果（两个实例并发）：两个 make 同时写同一 build 产物 -> "Text file busy"
+# 使 winshim 直接 Error 127；节点端口被对方占用 -> deploy_4node 端到端实收空
+# 字节而其它断言全绿；若两者再重定向到同一日志文件，输出交错成
+# "=== resPASS === result" 这种不可读的碎片。
+# 三类症状没有一个指向"并发"，排查方向会被带向被干扰模块自身。
+# 用 flock 而非 pidfile：pidfile 在进程被强杀后残留，会把后续所有回归
+# 永久判成"已有实例在跑"。
+REG_LOCK=/tmp/dayanjing_regression.lock
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$REG_LOCK"
+    if ! flock -n 9; then
+        echo "[FATAL] 已有回归实例在运行（锁 $REG_LOCK）"
+        echo "        并发实例会互相破坏 build 产物与端口，结果不可信。"
+        echo "        确认无实例后再跑；若确认是残留锁，删除 $REG_LOCK。"
+        exit 2
+    fi
+else
+    echo "[WARN] 无 flock，无法施加单实例锁；请勿并发运行本脚本"
+fi
+
 # 回归上下文标记：onekey.sh 在"未显式指定 PREFIX 且以 root 运行"时据此自动切
 # 假根，避免部署测试写真实 /etc。非 root 场景（verify_user_deploy 用 uid=65534
 # 验证用户级降级）不受影响——它落点在 $HOME，本来就不碰真实 /etc。
