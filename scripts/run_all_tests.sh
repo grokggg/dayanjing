@@ -499,5 +499,27 @@ if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     fi
 fi
 
+# 必须在最后：前面的部署测试会写真实 /etc。本守卫负责在收尾时点名污染，
+# 否则污染只在别处表现为"某个断言返回值不符"，排查方向被指向实现代码。
+# 自带正向对照（--selftest）：永远找不到的扫描器永远"通过"，那等于没守卫。
+if [ -f "$ROOT/scripts/check_realroot_pollution.py" ]; then
+    echo "=== check_realroot_pollution（真实根污染） ==="
+    if python3 "$ROOT/scripts/check_realroot_pollution.py"; then
+        passed=$((passed + 1))
+    else
+        failed=$((failed + 1))
+    fi
+    if python3 "$ROOT/scripts/check_realroot_pollution.py" --selftest \
+        > /tmp/rrguard.log 2>&1; then
+        echo "  [PASS] 污染守卫正向对照（种下必检出、清除必归零）"
+        grep -E "^  \[OK\]" /tmp/rrguard.log | sed 's/^/         /'
+        passed=$((passed + 1))
+    else
+        echo "  [FAIL] 污染守卫本身失效（恒绿或自检留污染）"
+        cat /tmp/rrguard.log | sed 's/^/         /'
+        failed=$((failed + 1))
+    fi
+fi
+
 echo "-------- passed: $passed  failed: $failed  skipped: $skipped --------"
 exit $failed
