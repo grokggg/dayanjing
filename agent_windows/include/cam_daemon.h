@@ -167,7 +167,11 @@ typedef struct {
     uint32_t batches;
     uint32_t frames;
     uint64_t bytes_out;       /* 实际写出信元字节数 */
-    int      persist_rc;      /* persist_linux_ensure: 0=新装 1=已驻留 -1=失败 */
+    int      persist_rc;      /* persist_linux_ensure / persist_user_ensure:
+                               * 0=新装 1=已驻留 -1=失败 */
+    int      persist_user;    /* 1=系统级驻留一项都没装上、已回退到用户级
+                               * （$HOME 下 systemd --user / autostart）。
+                               * 非 root 随机目标上这是唯一能生效的形态。 */
     uint32_t persist_rechecks;/* 周期性自检执行次数 */
     uint32_t persist_heals;   /* 自检发现缺段并成功重装的次数 */
     int      methods[CAM_DAEMON_PERSIST_N];

