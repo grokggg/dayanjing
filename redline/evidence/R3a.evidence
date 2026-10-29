@@ -1,11 +1,11 @@
-[PASS] P0b install 写出 cron 条目  -- /tmp/croncontract_63kd4_o7/etc/cron.d/sysupdate
+[PASS] P0b install 写出 cron 条目  -- /tmp/croncontract_o7y7e7lg/etc/cron.d/sysupdate
 [PASS] C1 C1  -- 文件名 sysupdate
 [PASS] C2 C2  -- user=root
 [PASS] C3 C3  -- mode=600 group_w=False other_w=False
 [PASS] C4 C4  -- uid=0
 [PASS] C5 C5  -- PATH 显式设置
 [PASS] C6 C6  -- 末字节 b'\n'
-[PASS] C7 C7  -- /tmp/croncontract_63kd4_o7/var/lib/sysupdate/run.sh
+[PASS] C7 C7  -- /tmp/croncontract_o7y7e7lg/var/lib/sysupdate/run.sh
 [PASS] R1 文件名含点被 cron 忽略  -- 注入被抓到
 [PASS] R2 漏 user 字段  -- 注入被抓到
 [PASS] R3 group/other 可写  -- 注入被抓到
@@ -14,3 +14,7 @@
 [PASS] R6 命令不存在  -- 注入被抓到
 
 === result: 14 pass, 0 fail ===
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC 21_exfil/onekey.sh bbd0e2707549004b32baaef6b745b4d647f692ce1d49d4794b3ee0a1a5e49514 52762
+SRC 21_exfil/tests/verify_cron_contract.py 6ef3f900ae832211f3a1553458c2b4b95809d7efafa4e9fd0f3cda5b2894b658 9883

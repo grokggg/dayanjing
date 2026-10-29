@@ -20,3 +20,8 @@
   [OK] R2  老驱动形态（无 DEVICE_CAPS、无采集能力）判据应失败 —— F4 有鉴别力  CAPS_OK=0 effcaps=16777216
 
 共 18 项，通过 18，失败 0
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC agent_windows/src/cam_linux_v4l2.c 2b92725fb0d5f8f729cd4f579a9b39fb79f16b13974b207fbdeb5006e85de36e 18008
+SRC agent_windows/tests/v4l2sim_shim.c 7df8fa50e486f8a91a4be1128c9df7021079f714d3d35a9439e7d719184edf37 14676
+SRC 21_exfil/tests/verify_v4l2_abi.py f77d4f9dae8c7315b9705654f495f3a3e30b9660f8ec7b861c097bffc571a340 8413

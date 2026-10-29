@@ -97,15 +97,22 @@ Traceback (most recent call last):
   File "/usr/local/lib/python3.10/dist-packages/qiling/os/memory.py", line 610, in map
     raise QlMemoryMappedError('Requested memory is unavailable')
 qiling.exception.QlMemoryMappedError: Requested memory is unavailable
+[91m[x][39m 	Failed to map 0x22000-0x63000
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/qiling/loader/elf.py", line 205, in load_elf_segments
+    self.ql.mem.map(lbound, size, perms, os.path.basename(info))
+  File "/usr/local/lib/python3.10/dist-packages/qiling/os/memory.py", line 610, in map
+    raise QlMemoryMappedError('Requested memory is unavailable')
+qiling.exception.QlMemoryMappedError: Requested memory is unavailable
 [OK]   A0 至少一个跨架构产物存在 3/3
 [OK]   aarch64 A1 ELF 魔数 7f454c46
-[OK]   aarch64 A2 e_machine=183 machine=183 size=2568744
+[OK]   aarch64 A2 e_machine=183 machine=183 size=2568872
 [OK]   aarch64 A3 无 INTERP 段（静态） interp=False
 [OK]   aarch64 B1 该架构字节可执行并退出 0 rc=0
 [OK]   aarch64 B2 采集进程正常退出 rc=0
 [OK]   aarch64 B3 C2 收到连接 conns=1
 [OK]   aarch64 B4 C2 收到字节（回传成立） bytes=512
-[OK]   aarch64 B5 线上无 JPEG 明文 first16=3216b34515e84a56068f895db173302b
+[OK]   aarch64 B5 线上无 JPEG 明文 first16=a5170a7e66d4db94b1cc39be85b00ff0
 [OK]   arm A1 ELF 魔数 7f454c46
 [OK]   arm A2 e_machine=40 machine=40 size=2375636
 [OK]   arm A3 无 INTERP 段（静态） interp=False
@@ -113,13 +120,16 @@ qiling.exception.QlMemoryMappedError: Requested memory is unavailable
 [OK]   i386 A1 ELF 魔数 7f454c46
 [OK]   i386 A2 e_machine=3 machine=3 size=1843972
 [OK]   i386 A3 无 INTERP 段（静态） interp=False
-[BLOCKED] i386 对照实验无法构建（无 zig）—— 归属未定，不计通过
+[BLOCKED] i386 该架构模拟器不支持（同目标 hello world 对照同样失败） —— 不计通过，也不计为产品缺陷
 [OK]   R1 截断产物执行失败/异常 rc=EXC:QlErrorCoreHook
 [OK]   R2 各架构 e_machine 互不相同（A2 有鉴别力） machines=[183, 40, 3]
 
 === 汇总 ===  PASS=18  FAIL=0  BLOCKED=1
   未验证（环境限制，非产品缺陷）: i386 执行
 EXIT=0
-HASH aarch64 652283eb1af9beb09f9754677905c7f017db1d64c444491bc3d283f629042e3a 2568744
+HASH aarch64 e5da1290ea2899e21032b72f246413f18daa8537113ef59030aaf6b2520c45c1 2568872
 HASH arm 6c2ef5f85d1aaf49010867c9627fd769637bfe5cff5616119a367ee3a8241565 2375636
 HASH i386 fa0cb4fb4176f4d396ee0c0f5dacb243eaf8e280c36dd8ca6ac21939826460e5 1843972
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC 21_exfil/tests/verify_arm64_exec.py d6b6666571a8e10152e3eea6372f503a0798d4043192eb00da7b3e111f7dd7ea 10305

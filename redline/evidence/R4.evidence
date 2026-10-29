@@ -1,29 +1,18 @@
-=== R4 arm64 真产物（zig 交叉编译） ===
+=== R4 arm64 真产物（zig 交叉编译）===
 
-工具链获取：
-  ziglang 官方 GitHub release 只有 bootstrap 源码（需自举数小时），不可用；
-  PyPI 有预编译 wheel：pip install ziglang -> 0.17.0（101MB），含全目标 musl 头与静态库。
-  此前多轮"无交叉编译器"是没找对渠道，不是环境不具备。
+-- 重编（本轮，产物已变化，旧证据失效）--
+[OK] /data/workspace/dayanjing/artifacts/camd-aarch64-musl magic=7f454c46 class=ELF64 machine=183 静态 size=2568872
 
-编译（仓库副本 /tmp/armrepo，上游库同目标重编）：
-  CC="zig cc -target aarch64-linux-musl" STATIC=1 make build/linux/camd
-  结果: camd 2568744 字节
-  magic=7f454c46  machine=183(aarch64)  class=2
-  INTERP 段: 无 -> 静态，不挑 libc
-  文本符号 238 个，含 main
-
-上游 11 模块中 9 个全绿；失败两处仅在测试二进制：
-  09_persistence/test_persist.c: setenv 在严格 C99(-Wpedantic) 下未声明
-  20_packer/test_poly_win64.c: #error "本测试需要 x86-64" + rax 内联汇编
-  两处均不影响库产物（libpersist.a / 20_packer 目标已产出）。
-
-打包与架构分派（决定性证据）：
-  make_onekey.py amd64=<原生 e_machine=62> arm64=<arm64 e_machine=183>
+-- 打包与架构分派（决定性证据）--
+  make_onekey.py amd64=<e_machine=62> arm64=<e_machine=183>
   -> [OK] 架构: amd64 arm64
-  假 uname(aarch64) 模拟 arm64 目标 install：
-    [OK] 内嵌产物校验通过（ELF/arm64，e_machine=183，2568744 字节）
-    [FATAL] 二进制无法执行（rc=126）——很可能是架构错配，而非 C2 问题
-  说明：arm64 段被正确选中；本 x86 主机执行不了属预期，
-        且守卫把根因点名为"架构错配"而非误导成"C2 不可达"。
+  假 uname(aarch64) 模拟 arm64 目标 install:
+    [OK] 环境: arch=aarch64
+    [OK] 内嵌产物校验通过（ELF/arm64，e_machine=183，2568872 字节）
+    [FATAL] 二进制无法执行（rc=126）-- 点名架构错配，未误导成 C2 问题
 
-未闭合：R4b arm64 真机执行（无 qemu-aarch64），产物能编不等于能跑。
+  说明：arm64 段被正确选中；本 x86 主机执行不了属预期。
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC scripts/build_cross.sh 79fdcfd3d7ab6f35745b6bf8a4a32b24cc7542885a84ad482b698f228340a865 3815
+SRC 21_exfil/make_onekey.py 8b723f89ced5fc898484cf8a690624baf924c6bb0c68043bd1e81a8530a2667a 5224

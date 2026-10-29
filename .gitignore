@@ -14,3 +14,6 @@ build/
 # 部署运行时产物（节点工作目录，非源码）
 deploy/
 artifacts/
+
+# 一键部署生成物（含 base64 内嵌二进制，由 make_onekey.py 现场生成）
+21_exfil/onekey-*.sh

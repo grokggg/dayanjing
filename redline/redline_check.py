@@ -59,6 +59,9 @@ REDLINES = [
         "verify": "camd --backend v4l2 --sink file:///tmp/rl1.bin --batches 1 "
                   "后断言输出帧分辨率与真实设备能力一致，而非 1x1 合成",
         "ev": "R1.evidence",
+        "sources": [
+            "agent_windows/src/cam_linux_v4l2.c",
+        ],
     },
     {
         "id": "R1b",
@@ -70,6 +73,11 @@ REDLINES = [
         "probe": "test -c /dev/fuse && test -w /dev/fuse && command -v gcc >/dev/null",
         "verify": "python3 {REPO}/21_exfil/tests/verify_v4l2_abi.py",
         "ev": "R1b.evidence",
+        "sources": [
+            "agent_windows/src/cam_linux_v4l2.c",
+            "agent_windows/tests/v4l2sim_shim.c",
+            "21_exfil/tests/verify_v4l2_abi.py",
+        ],
     },
     {
         "id": "R2",
@@ -86,6 +94,9 @@ REDLINES = [
         "verify": "onekey install 后断言 is-active=active 且 MainPID!=0，"
                   "kill -9 后观察 Restart 拉起且 C2 继续收到字节",
         "ev": "R2.evidence",
+        "sources": [
+            "21_exfil/onekey.sh",
+        ],
     },
     {
         "id": "R3",
@@ -94,6 +105,9 @@ REDLINES = [
         "probe": "pgrep -x cron >/dev/null || pgrep -x crond >/dev/null",
         "verify": "对齐到 cron 分位后等待触发，断言 C2 收到新字节",
         "ev": "R3.evidence",
+        "sources": [
+            "21_exfil/onekey.sh",
+        ],
     },
     {
         "id": "R3a",
@@ -109,6 +123,10 @@ REDLINES = [
                  "command -v unshare >/dev/null",
         "verify": "install 到假根后断言 7 条契约，并对每条做反向注入证明非恒绿",
         "ev": "R3a.evidence",
+        "sources": [
+            "21_exfil/onekey.sh",
+            "21_exfil/tests/verify_cron_contract.py",
+        ],
     },
     {
         "id": "R4",
@@ -121,6 +139,10 @@ REDLINES = [
                   "打进多架构包后，用假 uname 模拟 arm64 目标，"
                   "断言选中 arm64 段且错配被点名",
         "ev": "R4.evidence",
+        "sources": [
+            "scripts/build_cross.sh",
+            "21_exfil/make_onekey.py",
+        ],
     },
     {
         "id": "R4b",
@@ -135,6 +157,9 @@ REDLINES = [
                  "&& test -f {REPO}/artifacts/camd-aarch64-musl",
         "verify": "python3 {REPO}/21_exfil/tests/verify_arm64_exec.py",
         "ev": "R4b.evidence",
+        "sources": [
+            "21_exfil/tests/verify_arm64_exec.py",
+        ],
     },
     {
         "id": "R4c",
@@ -150,6 +175,9 @@ REDLINES = [
         "verify": "换支持 x86-32 的模拟器（真 qemu-user-i386）后执行 camd-i386-musl，"
                   "断言采集与回传成立",
         "ev": "R4c.evidence",
+        "sources": [
+            "21_exfil/tests/verify_arm64_exec.py",
+        ],
     },
 ]
 
@@ -165,11 +193,41 @@ ARTIFACT_OF_ARCH = {
 
 
 def check_evidence_fresh(ev_path):
-    """返回 (ok, reason)。证据里若有 HASH 行，必须与当前产物逐位一致。"""
+    """返回 (ok, reason)。
+
+    两层绑定：
+      HASH <arch> <sha> <size>   证据对应哪份编译产物（产物类证据）
+      SRC  <path> <sha>  <size>  证据对应哪份源码文本（日志类证据）
+
+    历史漏洞：只绑产物，日志类证据（R1b/R2/R3a 等）改了源码仍显示
+    VERIFIED —— 即"用旧源码的证据冒充新源码的状态"。
+    更隐蔽的是：证据里没有指纹行时旧实现直接 return True（"无法校验也
+    不降级"），那等于给所有未绑定证据发了免检证，机制形同虚设。
+    故此处改为：该红线定义了 sources 而证据里没有 SRC 行 -> 判失效。
+    """
     try:
         txt = open(ev_path, "r", errors="replace").read()
     except OSError as e:
         return False, "证据不可读: %s" % e
+
+    # ---- 第二层：源码指纹 ----
+    wanted = {l for l in txt.splitlines() if l.startswith("SRC ")}
+    rid = os.path.basename(ev_path).split(".")[0]
+    rl = next((x for x in REDLINES if x["id"] == rid), None)
+    if rl and rl.get("sources"):
+        if not wanted:
+            return False, ("证据未绑定源码指纹（缺 SRC 行）—— 无法证明它对应当前源码，"
+                           "请用 redline/stamp.py 重新生成")
+        for rel in rl["sources"]:
+            fp = os.path.join(REPO, rel)
+            if not os.path.isfile(fp):
+                return False, "绑定源已不存在: %s" % rel
+            raw = open(fp, "rb").read()
+            cur = hashlib.sha256(raw).hexdigest()
+            hit = any(l == "SRC %s %s %d" % (rel, cur, len(raw)) for l in wanted)
+            if not hit:
+                return False, "源码已改动，证据对应的是旧代码: %s" % rel
+
     lines = [l for l in txt.splitlines() if l.startswith("HASH ")]
     if not lines:
         # 该红线的证据不绑定产物（如纯日志类），无法校验也不降级。

