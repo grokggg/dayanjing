@@ -17,3 +17,4 @@ artifacts/
 
 # 一键部署生成物（含 base64 内嵌二进制，由 make_onekey.py 现场生成）
 21_exfil/onekey-*.sh
+21_exfil/*_onekey*.sh
