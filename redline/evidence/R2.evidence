@@ -1,21 +1,21 @@
 === R2 真 systemd 运行时驻留（可重生成）===
 
-[OK]   F0  C2 收端已起  port=33529
-[OK]   F0b 找到 ns init 的宿主 PID  3231
+[OK]   F0  C2 收端已起  port=37527
+[OK]   F0b 找到 ns init 的宿主 PID  1677
 [OK]   F1  真 systemd 作 PID 1 且 daemon-reload 成功  
 [OK]   F2  ns 内 PID 1 是 systemd  systemd
-    ---- 已生成一键脚本 1972923 字节 ----
+    ---- 已生成一键脚本 1981610 字节 ----
     ---- install 输出 ----
     [OK] 环境: arch=x86_64 systemd=1 backend=v4l2 front=无
-    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421704 字节）
     [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
     [OK] 二进制已安装 /usr/local/bin/sysupdate
     [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
     [OK] systemd 单元静态校验通过
-    [OK] systemd 驻留成功（enabled + active, pid=160）
-    [OK] cron 条目已写入（分位 31）
+    [OK] systemd 驻留成功（enabled + active, pid=165）
+    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 35）
     [WARN] 未检测到 cron 守护进程——条目已写但可能不会执行（需上机确认）
-    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:33529）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:37527）
     [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
     [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
     计数: 成功 9  失败 0  警告 2
@@ -23,11 +23,11 @@
 [OK]   F4  ActiveState=active  active
 [OK]   F5  UnitFileState=enabled  enabled
 [OK]   F6  Restart=always  always
-[OK]   F7  MainPID!=0  160
-[OK]   F8  C2 收到信元  17364480 字节 / 1 连接
-[OK]   F9  kill -9 后 Restart 拉起新进程  160 -> 195
+[OK]   F7  MainPID!=0  165
+[OK]   F8  C2 收到信元  17568768 字节 / 1 连接
+[OK]   F9  kill -9 后 Restart 拉起新进程  165 -> 202
 [OK]   F10 NRestarts 已递增  1
-[OK]   F11 重启后继续回传  新增 5107200 字节
+[OK]   F11 重启后继续回传  新增 5720064 字节
 [OK]   F12 驻留进程 cmdline 不含 C2/密钥  /usr/local/bin/sysupdate
 [OK]   F13 卸载后服务停止  inactive
 [OK]   F14 卸载后落点全清  ls: cannot access '/etc/sysupdate': No such file or director
@@ -35,6 +35,7 @@
 === 汇总 ===
 RESULT: pass=16 fail=0
 EXIT=0
+GUARD_RC=0
 
 # ---- 源码指纹（改了下列任一文件，本证据即失效）----
-SRC 21_exfil/onekey.sh bbd0e2707549004b32baaef6b745b4d647f692ce1d49d4794b3ee0a1a5e49514 52762
+SRC 21_exfil/onekey.sh d4484101b65f7bd77bfe00181e6856404e3334b234afb544d8b6e5ebf6fdbaa8 61047
