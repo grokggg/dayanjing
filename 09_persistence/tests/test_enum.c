@@ -19,6 +19,9 @@ int main(void){
     { int rn=persist_enumerate(NULL,cb,NULL); CK(rn>=0, "NULL 根(真实系统)可枚举不崩溃"); }
     CK(persist_enumerate(root,NULL,NULL)==-1, "NULL 回调返回 -1");
 
+    /* 空假根无发行版特征，自动探测会落到 /etc/crontab 回退形态；本文件
+     * 断言的是 cron.d 形态下的枚举语义，故显式指定。 */
+    CK(persist_set_cron_impl(PERSIST_CRON_IMPL_CROND)==0, "指定 cron 形态为 cron.d");
     CK(persist_install(PERSIST_CRON,root,"/opt/a")==0, "安装 cron 成功");
     CK(persist_install(PERSIST_SSHKEY,root,"ssh-rsa AAA")!=0, "未注入公钥时 sshkey 安装被拒");
     CK(persist_sshkey_pubkey("ssh-rsa AAAAB3NzaC1yc2EExampleBlobForEnumTest")==0, "注入测试公钥行");

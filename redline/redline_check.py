@@ -102,11 +102,20 @@ REDLINES = [
         "id": "R3",
         "name": "cron 实际执行",
         "why": "条目已写、分位正确，但守护进程不在，从未真正触发过一次",
-        "probe": "pgrep -x cron >/dev/null || pgrep -x crond >/dev/null",
-        "verify": "对齐到 cron 分位后等待触发，断言 C2 收到新字节",
+        # probe 判据修正：原判据是 `pgrep -x cron || pgrep -x crond`，它问的是
+        # "此刻有没有 cron 在跑"，而环境里跑的是哪个 cron 完全不受控 —— 实测
+        # 就撞上一个 vixie cron：它的 pathnames.h 只有 CRON_DENY、没有
+        # CRON_DIR，根本不扫描 /etc/cron.d，于是条目永远不触发，而 probe
+        # 判定"环境具备"。真正该问的是"能不能起一个会读 /etc/cron.d 的真
+        # cron"，即构建脚本与编译器是否可用。
+        "probe": "test -f {REPO}/scripts/build_cronie.sh && command -v gcc >/dev/null",
+        "verify": "真 cronie 守护进程 + 真 install + 对齐分钟等真实触发，"
+                  "断言 C2 新增字节；反向去掉 user 字段必须不再触发",
         "ev": "R3.evidence",
         "sources": [
             "21_exfil/onekey.sh",
+            "redline/verify_r3_cron.py",
+            "scripts/build_cronie.sh",
         ],
     },
     {

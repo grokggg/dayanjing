@@ -44,6 +44,55 @@ CAMD = os.path.join(os.path.dirname(ROOT), "agent_windows", "build", "linux", "c
 REAL_PATHS = ["/etc/sysupdate", "/usr/local/bin/sysupdate", "/etc/cron.d/sysupdate",
               "/var/lib/sysupdate", "/etc/systemd/system/sysupdate.service"]
 
+# cron 落点有两种形态，由 $PREFIX/etc 下的发行版特征探测决定：
+#   - etc/cron.d/<NAME>   Debian/RHEL 系。该目录并非 Vixie cron 原生特性，
+#                         而是发行版补丁：上游 V4.999 的 pathnames.h 只有
+#                         CRON_DENY、没有 CRON_DIR，BSD/精简系统上把条目
+#                         写在这里**永远不会被触发**（已用真 cron 守护实测：
+#                         cron.d 作业零执行，同内容的 /etc/crontab 作业真触发）。
+#   - etc/crontab         通用回退，所有 cron 实现都读它。
+# 空假根没有任何发行版特征 -> 探测结果为"未知" -> 按通用路径回退，落到
+# /etc/crontab。因此只认 cron.d 的判据在回退形态下恒红，只认 crontab 则
+# 在 Debian 形态下恒红——两种都是"判据过期"，而它们的症状都是断言变红，
+# 与被真正的缺陷打红无法区分，排查方向会被带向"安装坏了"。
+# 故判据改为：两种形态之一存在，且内容确为本次安装写入。
+CRON_RELS = ["etc/cron.d/" + DEFN, "etc/crontab"]
+
+
+def _cron_landed(prefix):
+    """假根内 cron 条目所在的相对路径；未写入则返回 None。"""
+    for rel in CRON_RELS:
+        p = os.path.join(prefix, rel)
+        if not os.path.exists(p):
+            continue
+        try:
+            body = open(p, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        # 必须同时命中项目名与启动器路径：光看文件存在会把系统自带的
+        # /etc/crontab 当成"条目已写入"，那就是恒绿。
+        if DEFN in body and "run.sh" in body:
+            return rel
+    return None
+
+
+def _realroot_leaks():
+    """真根残留：固定落点 + 回退形态写进共享 /etc/crontab 的条目。
+
+    /etc/crontab 是共享文件，多数系统本来就有，判"存在"会在一次都没装过
+    的机器上报警；只有内容命中项目名才算泄漏。漏掉这一条，回退形态污染
+    真根时 P1 会全绿。
+    """
+    leaks = [p for p in REAL_PATHS if os.path.exists(p)]
+    if os.path.exists("/etc/crontab"):
+        try:
+            body = open("/etc/crontab", encoding="utf-8", errors="ignore").read()
+        except OSError:
+            body = ""
+        if DEFN in body and "run.sh" in body:
+            leaks.append("/etc/crontab(含%s条目)" % DEFN)
+    return leaks
+
 fails = []
 def check(cond, name, detail=""):
     print("[%s] %s%s" % ("OK  " if cond else "FAIL", name, ("  -- " + detail) if detail else ""))
@@ -158,7 +207,7 @@ def main():
         sink.close(); return 1
 
     # ---- 真根基线：本轮开始前必须是干净的 ----
-    dirty = [p for p in REAL_PATHS if os.path.exists(p)]
+    dirty = _realroot_leaks()
     if dirty:
         print("[FATAL] 真根已被污染，无法判定本轮是否造成: %s" % dirty)
         sink.close(); return 1
@@ -168,13 +217,16 @@ def main():
     print("--- install A (rc=%d) ---\n%s" % (rc, out[-1200:]))
 
     # P1 核心：真根零污染
-    leaked = [p for p in REAL_PATHS if os.path.exists(p)]
+    leaked = _realroot_leaks()
     check(not leaked, "P1 假根部署后真根零污染", "泄漏=%s" % leaked)
 
     # P2 假根内文件齐全
     want = ["etc/sysupdate/sysupdate.conf", "usr/local/bin/sysupdate",
-            "var/lib/sysupdate/run.sh", "etc/cron.d/sysupdate"]
+            "var/lib/sysupdate/run.sh"]
     missing = [w for w in want if not os.path.exists(os.path.join(A, w))]
+    cron_a = _cron_landed(A)
+    if cron_a is None:
+        missing.append("cron 条目（%s 均未写入）" % " 或 ".join(CRON_RELS))
     check(not missing, "P2 假根内落点齐全", "缺失=%s" % missing)
 
     # P3 run.sh 的前缀必须是 A（此前写死 /etc/camd，改 CONF_DIR 无效）
@@ -241,14 +293,14 @@ def main():
 
     rc5, out5 = run(mpkg, "install", prefix=B, c2=c2, extra=["--backend", "mock"])
     print("--- install 变异包 (rc=%d) ---\n%s" % (rc5, out5[-600:]))
-    leaked2 = [p for p in REAL_PATHS if os.path.exists(p)]
+    leaked2 = _realroot_leaks()
     check(leaked2, "R1 硬编码版必然污染真根（证明 P1 非恒绿）",
           "污染=%s" % (leaked2 or "无——P1 是恒绿的"))
 
     # 清理真根污染（否则后续所有守卫都被带偏）
     if leaked2:
         subprocess.run(["sh", mpkg, "uninstall"], capture_output=True, text=True)
-        left = [p for p in REAL_PATHS if os.path.exists(p)]
+        left = _realroot_leaks()
         check(not left, "R2 真根污染已清理", "残留=%s" % left)
 
     # ---- T：时间依赖（前导零/八进制）----
@@ -257,11 +309,12 @@ def main():
     for sec in ("08", "09"):
         C = tempfile.mkdtemp(prefix="pfxT")
         rcT, outT = run_sec(pkg, C, c2, sec)
-        cronT = os.path.join(C, "etc/cron.d/sysupdate")
+        cronT = _cron_landed(C)
         check(rcT == 0, "T1 date+%%S=%s 时 install 不中断" % sec,
               "rc=%d %s" % (rcT, outT[-200:] if rcT else ""))
-        check(os.path.exists(cronT),
-              "T2 date+%%S=%s 时 cron 条目已写入" % sec)
+        check(cronT is not None,
+              "T2 date+%%S=%s 时 cron 条目已写入" % sec,
+              "落点=%s" % (cronT or "无"))
         subprocess.run(["sh", pkg, "uninstall", "--prefix", C],
                        capture_output=True, text=True)
         shutil.rmtree(C, ignore_errors=True)

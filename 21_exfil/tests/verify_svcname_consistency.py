@@ -154,6 +154,13 @@ def main():
     c2 = C2()
     root = os.path.join(work, 'pfx')
     os.makedirs(root, exist_ok=True)
+    # 假根里造发行版特征：形态探测按 $PREFIX/etc 判定（部署脚本与 camd 内部
+    # persist 同源）。空假根无特征会落到 /etc/crontab 回退形态，cron.d 目录
+    # 根本不会建 —— F3 会拿到空列表，而"空列表不含项目名"是恒绿断言，
+    # 于是只有 F3 变红、F3' 仍绿，看起来像部分通过，实则是两条都失效。
+    os.makedirs(os.path.join(root, 'etc'), exist_ok=True)
+    with open(os.path.join(root, 'etc', 'debian_version'), 'w') as f:
+        f.write('12.4\n')
     pk = os.path.join(work, 'id.pub')
     with open(pk, 'w') as f:
         f.write('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISvcNameGuardKey'

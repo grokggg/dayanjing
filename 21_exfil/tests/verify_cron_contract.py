@@ -195,6 +195,16 @@ def main():
         return 1
 
     prefix = tempfile.mkdtemp(prefix="croncontract_")
+    # 假根里必须造发行版特征文件。
+    #
+    # 形态探测一律按 $PREFIX/etc 判定（部署脚本与 camd 内部 persist 同源，
+    # 不同源就会互相抵消：部署写 cron.d、camd 按自己探测结果删掉并改写
+    # /etc/crontab —— 实测复现过，install 退出 0 而 cron.d 目录为空）。
+    # 空假根没有任何特征文件，按"未知 -> 通用路径"落到 /etc/crontab 回退
+    # 形态，本文件验的是 Debian 系目标上的 cron.d 驻留，故显式造 debian 特征。
+    os.makedirs(os.path.join(prefix, "etc"), exist_ok=True)
+    with open(os.path.join(prefix, "etc", "debian_version"), "w") as f:
+        f.write("12.4\n")
     rc, out = install(onekey, prefix)
     path = find_cron_file(prefix)
     if not path:

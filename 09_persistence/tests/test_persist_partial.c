@@ -50,6 +50,10 @@ int main(void) {
     if (system(rmcmd) != 0) { /* 预期情况：首次运行时目录不存在 */ }
     mkdir(root, 0755);
 
+    /* 同 test_persist.c：本文件断言 cron.d 形态，显式指定形态以免自动探测
+     * 在空假根下落到 /etc/crontab 回退分支。 */
+    ck("set cron impl crond", persist_set_cron_impl(PERSIST_CRON_IMPL_CROND) == 0);
+
     /* 前提：本进程不注入公钥，sshkey 必须生成失败 */
     char buf[4096];
     ck("前提: sshkey 未注入公钥时 generate 拒绝",

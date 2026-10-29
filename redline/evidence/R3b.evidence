@@ -1,0 +1,12 @@
+R3b 真 cron 守护实际执行（Vixie cron V4.999 上游源码构建）
+
+F2 正对照：/etc/crontab 作业被真 cron 实际触发（子进程 status=0000）
+F3 /etc/cron.d 作业（契约全合规、0600）从未执行，cron 日志零提及
+F3b cron 日志中 'cron.d' 出现次数 = 0
+
+结论：/etc/cron.d 不是通用特性，而是 Debian/RHEL 发行版补丁。
+真 Vixie cron（FreeBSD/OpenBSD 及众多精简系统上游）只读 SPOOL_DIR 与 /etc/crontab。
+
+F4  onekey 回退生效（CRON_IMPL=syscrontab）：条目落 /etc/crontab，install rc=0 成功 8
+F4c [FAIL] camd 内部 persist（09_persistence/src/persist.c:237）仍固定写 /etc/cron.d/<name>
+F5  [FAIL] 产品条目被真 cron 触发未验证（分位为每小时第 M 分钟，守卫内等待不足）

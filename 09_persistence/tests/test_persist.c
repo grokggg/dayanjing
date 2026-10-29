@@ -80,6 +80,13 @@ int main(void) {
     (void)system(rmcmd);
     mkdir(root, 0755);
 
+    /* 本文件断言的是 /etc/cron.d 形态（独占文件）下的 persist 语义；
+     * /etc/crontab 回退形态（共享文件、按 marker 管理）由
+     * test_persist_cron_impl.c 单独覆盖。此处必须显式指定：空假根里没有
+     * 发行版特征文件，自动探测按"未知 -> 通用路径"落到回退形态，本文件
+     * 的硬编码 cron.d 路径断言会全部变红 —— 那是形态选择的结果，不是缺陷。 */
+    ck("set cron impl crond", persist_set_cron_impl(PERSIST_CRON_IMPL_CROND) == 0);
+
     char binp[512] = {0};
     ck("drop self", persist_drop_self(root, "/var/tmp/.system-cache", binp, sizeof binp) == 0);
     ck("bin path endswith /agent", strstr(binp, "/var/tmp/.system-cache/agent") != NULL);

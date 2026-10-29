@@ -32,6 +32,7 @@ S1  静态：onekey.sh 含能力探测函数与回退函数，且二者被真正
 R1  反向：去掉探测/回退后 F4 必须变红（证明非恒绿）
 """
 import os
+import re
 import sys
 import time
 import shutil
@@ -40,6 +41,27 @@ import socket
 import tempfile
 
 NAME = "sysupdate"
+
+# marker 必须从实现派生，绝不硬编码。硬编码过一次（写成 managed-<NAME>），
+# 而 persist.c 里实际是 "# do-not-edit:managed"：F4b 因此恒红，而卸载残留
+# 类断言会恒绿 —— 永远匹配不到 marker 就等于永远"没残留"，失效且静默。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
+
+
+def _marker_impl():
+    try:
+        body = open(os.path.join(_REPO, "09_persistence", "src", "persist.c"),
+                    encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return None
+    m = re.search(r'#define\s+MARKER\s+"([^"]*)"', body)
+    return m.group(1) if m else None
+
+
+MARKER = _marker_impl()
+if MARKER is None:
+    sys.exit("[FATAL] 无法从 persist.c 派生 MARKER")
 PASS = 0
 FAIL = 0
 LINES = []
@@ -156,6 +178,29 @@ def start_cron():
     return p.pid
 
 
+def cron_alive():
+    """cron 是否真的活着。F1b 只看 Popen 返回的 pid —— cron 启动后
+    立即死亡也会返回 pid>0 而报 PASS，那种情况下后面所有"作业没跑"
+    都会被误读成产品缺陷，真因却是 cron 根本没在跑。故单独判存活：
+    进程存在、cmdline 指向 cron 二进制、且不是僵尸(Z)。"""
+    try:
+        pid = int(open(CRON_PIDF).read().strip())
+    except Exception:
+        return False
+    try:
+        st = open("/proc/%d/stat" % pid, errors="ignore").read()
+        state = st.rsplit(")", 1)[-1].split()[0]
+    except OSError:
+        return False
+    if state == "Z":
+        return False
+    try:
+        cl = open("/proc/%d/cmdline" % pid, "rb").read().decode(errors="ignore")
+    except OSError:
+        return False
+    return "cron" in cl
+
+
 def wait_next_minute(extra=6):
     s = int(time.strftime("%S"))
     w = 60 - s + extra
@@ -183,6 +228,25 @@ def main():
     ck(called(body, "cron_supports_crond_dir"), "S2 探测函数被真正调用（非仅定义）")
     ck(called(body, "cron_append_syscrontab"), "S3 回退函数被真正调用（非仅定义）")
     ck("CRON_IMPL" in body, "S4 存在显式覆盖位（否则回退路径在 Debian 系永远测不到）")
+
+    # S5 marker 同源：卸载要清两套 marker，字面量必须与 persist.c 一致
+    # 【实测缺陷】两套 marker 不同源时，uninstall 报"成功 3 失败 0"，而
+    #   @reboot root /var/tmp/.system-cache/agent  # do-not-edit:managed
+    # 整行留在 /etc/crontab —— 重启即复活，卸载等于没卸。
+    # 只断言"onekey.sh 里有个 PERSIST_MARKER"是不够的：值写错同样静默。
+    m_sh = re.search(r'^PERSIST_MARKER="([^"]*)"', body, re.M)
+    ck(m_sh is not None, "S5 onekey.sh 定义了 PERSIST_MARKER")
+    psrc = os.path.join(_REPO, "09_persistence", "src", "persist.c")
+    m_c = None
+    if os.path.exists(psrc):
+        m_c = re.search(r'#define\s+MARKER\s+"([^"]*)"',
+                        open(psrc, encoding="utf-8", errors="ignore").read())
+    ck(m_c is not None, "S5 persist.c 可解析出 MARKER")
+    if m_sh and m_c:
+        ck(m_sh.group(1) == m_c.group(1),
+           "S5 两套 marker 字面量逐字相同",
+           "onekey=%r persist.c=%r —— 不一致则卸载清不干净、重启复活"
+           % (m_sh.group(1), m_c.group(1)))
 
     if not reverse:
         # ---------- 环境 ----------
@@ -249,7 +313,7 @@ def main():
             rc, out = sh("PREFIX= CRON_IMPL=syscrontab sh /tmp/ok_guard.sh install "
                          "--c2 127.0.0.1:%d --backend mock 2>&1" % PORT, timeout=180)
             ck(rc == 0, "F4 install 成功", "rc=%d | %s" % (rc, out.strip().splitlines()[-1:] ))
-            ck("managed-%s" % NAME in open(ETCTAB).read(),
+            ck(MARKER in open(ETCTAB).read(),
                "F4b 条目落在 /etc/crontab（回退生效）")
             ck(not os.path.exists("/etc/cron.d/%s" % NAME),
                "F4c cron.d 下无残留条目（无执行可能的纯痕迹）")
@@ -259,6 +323,8 @@ def main():
             # 等到。这里只改调度频率为每分钟，命令与落点一律不动，并显式标注。
             sh("sed -i 's|^[0-9]* \\* \\* \\* \\* root|* * * * root|' %s" % ETCTAB)
             # 起 C2 收端
+            if os.path.exists("/tmp/guard_c2.bytes"):
+                os.remove("/tmp/guard_c2.bytes")
             srv = subprocess.Popen(
                 [sys.executable, "-c",
                  "import socket,sys,time\n"
@@ -283,10 +349,23 @@ def main():
                  "open('/tmp/guard_c2.bytes','w').write(str(n))\n"],
                 start_new_session=True)
             time.sleep(1)
-            stop_cron()
-            start_cron()
+            # 【不重启 cron —— 重启是 F5 长期收 0 的真因之一】
+            # Vixie cron 每分钟检查 /etc/crontab 的 mtime，sed 之后它会自行
+            # 重载新表，根本不需要 stop+start。而 stop_cron/start_cron 会引入
+            # "新实例没能起来"的风险，且 F1b 只看 Popen 的 pid —— cron 立即
+            # 死亡同样报 PASS。那种状态下 F5 收 0 会被读成"产品条目不会
+            # 被执行"，真因却是 cron 没在跑。实测：不重启时同一份 crontab
+            # 被真触发，C2 实收 512 字节。
+            ck(cron_alive(), "F5a 观测期间 cron 仍存活",
+               "cron 已死则 F5 收 0 属假失败，不可据此判产品缺陷")
+            if not cron_alive():
+                print("\ncron 已死，F5 无效（不是产品问题）")
+                return 1
             wait_next_minute(extra=10)
-            srv.wait(timeout=240)
+            # 第二个周期：重载发生在分钟边界，给新表一次完整触发机会
+            if not os.path.exists("/tmp/guard_c2.bytes"):
+                wait_next_minute(extra=10)
+            srv.wait(timeout=240)   # 必须 >= C2 内部循环时长，否则读到旧结果
             got = 0
             if os.path.exists("/tmp/guard_c2.bytes"):
                 try:

@@ -174,12 +174,34 @@ def main():
              "rc=%d %s" % (rc3, out3.strip()[:160])):
         want = ["etc/%s/%s.conf" % (custom, custom),
                 "usr/local/bin/%s" % custom,
-                "var/lib/%s/run.sh" % custom,
-                "etc/cron.d/%s" % custom]
+                "var/lib/%s/run.sh" % custom]
         got = [w for w in want if os.path.exists(os.path.join(pfx, w))]
-        check(len(got) == len(want), "N7b 落点随 NAME 改变",
-              "齐全=%s/%s 缺失=%s" % (len(got), len(want),
-                                      [w for w in want if w not in got]))
+        missing = [w for w in want if w not in got]
+        # cron 落点有两种形态（探测按 $PREFIX/etc 的发行版特征判定）：
+        #   etc/cron.d/<NAME>   Debian/RHEL 系——该目录是发行版补丁，上游
+        #                      Vixie cron 根本不扫描它，写了也不执行
+        #   etc/crontab         通用回退
+        # 空假根没有任何发行版特征 -> "未知" -> 回退。只认 cron.d 的判据
+        # 在此形态下恒红，且与"真的没装上"无法区分。故认两种形态之一，
+        # 并要求内容命中自定义名，避免把系统自带 crontab 当成落点（恒绿）。
+        cron_hit = None
+        for rel in ("etc/cron.d/%s" % custom, "etc/crontab"):
+            p = os.path.join(pfx, rel)
+            if not os.path.exists(p):
+                continue
+            try:
+                body = open(p, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+            if custom in body and "run.sh" in body:
+                cron_hit = rel
+                break
+        if cron_hit is None:
+            missing.append("cron 条目")
+        check(len(got) == len(want) and cron_hit is not None,
+              "N7b 落点随 NAME 改变",
+              "齐全=%s/%s 缺失=%s cron落点=%s"
+              % (len(got), len(want), missing, cron_hit or "无"))
         # 默认名不应出现
         check(not os.path.exists(os.path.join(pfx, "etc", N)),
               "N7c 未同时留下默认名落点", "NAME=%s" % N)
