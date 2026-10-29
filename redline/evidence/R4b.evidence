@@ -1,0 +1,125 @@
+用法: /data/workspace/dayanjing/artifacts/camd-aarch64-musl [选项]
+
+必需:
+  --sink PATH         信元落点：fd://N / tcp://host:port /
+                      tls://host:port / front://前置域:port /
+                      文件路径
+  --key HEX64         32 字节主密钥的 64 个十六进制字符
+                      前 16 字节 = k_send，后 16 字节 = k_recv
+
+TLS 出口（仅 --sink tls:// 时生效）:
+  --ca PATH           信任库 PEM。要求校验时必需
+  --sni NAME          SNI 主机名，同时用于证书主机名校验。
+                      缺省从 tls:// 的 host 段推导（IP 除外）
+  --no-verify         不校验证书链与主机名。
+                      注意：此时任何人都能用自签证书冒充 C2，
+                      仅防被动流量识别，不防主动接管
+
+运行:
+  --backend NAME      mock | v4l2 | mf。缺省按平台自动选择
+  --pid PATH          pid 文件路径
+  --ssh-pubkey FILE   真实公钥行文件（单行）。用于第三种驻留机制：
+                      未提供 = 不启用该项；提供但内容非法 = 拒绝启动，
+                      绝不静默降级为「驻留成功但该段是死的」
+  --persist-recheck N 每完成 N 批自检一次驻留是否仍在，缺失则重装
+                      （缺省 1；0 = 关闭自检，回到只在启动前装一次）
+                      关闭后：管理员删掉驻留而进程未重启时永不自愈，
+                      表现为进程在跑、也有数据产出，机器重启后消失
+  -D                  双 fork + setsid 后台化
+  --no-persist        不执行驻留（仅调试；部署时禁止）
+  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）
+
+SOURCE:
+  --width N --height N --fps N
+  --capture-ms N      单次窗口，到点释放句柄
+  --frames N          每批帧数
+  --quality N         JPEG 质量 1..100
+
+节拍:
+  --interval-ms N     批间隔
+  --jitter-ms N       抖动上限（固定间隔会在断线重连时形成同步爆发）
+  --batches N         批次数，0 = 不限（由停止信号终止）
+
+  --pfx HEX16         nonce 前缀 8 字节。缺省由主密钥派生（确定性）
+[93m[!][39m 	0x103b6b8: syscall ql_syscall_sched_getaffinity number = 0x7b(123) not implemented
+[93m[!][39m 	0x103b6b8: syscall ql_syscall_sched_getaffinity number = 0x7b(123) not implemented
+[93m[!][39m 	0x103b6b8: syscall ql_syscall_sched_getaffinity number = 0x7b(123) not implemented
+[93m[!][39m 	0x103b6b8: syscall ql_syscall_sched_getaffinity number = 0x7b(123) not implemented
+[93m[!][39m 	0x103b6b8: syscall ql_syscall_sched_getaffinity number = 0x7b(123) not implemented
+[INFO] 结束: batches=1 frames=1 bytes_out=512 persist_rc=-9 persist_user=0 methods=systemd:0,cron:0,sshkey:0 rechecks=0 heals=0 bin=(none)
+用法: /data/workspace/dayanjing/artifacts/camd-arm-musl [选项]
+
+必需:
+  --sink PATH         信元落点：fd://N / tcp://host:port /
+                      tls://host:port / front://前置域:port /
+                      文件路径
+  --key HEX64         32 字节主密钥的 64 个十六进制字符
+                      前 16 字节 = k_send，后 16 字节 = k_recv
+
+TLS 出口（仅 --sink tls:// 时生效）:
+  --ca PATH           信任库 PEM。要求校验时必需
+  --sni NAME          SNI 主机名，同时用于证书主机名校验。
+                      缺省从 tls:// 的 host 段推导（IP 除外）
+  --no-verify         不校验证书链与主机名。
+                      注意：此时任何人都能用自签证书冒充 C2，
+                      仅防被动流量识别，不防主动接管
+
+运行:
+  --backend NAME      mock | v4l2 | mf。缺省按平台自动选择
+  --pid PATH          pid 文件路径
+  --ssh-pubkey FILE   真实公钥行文件（单行）。用于第三种驻留机制：
+                      未提供 = 不启用该项；提供但内容非法 = 拒绝启动，
+                      绝不静默降级为「驻留成功但该段是死的」
+  --persist-recheck N 每完成 N 批自检一次驻留是否仍在，缺失则重装
+                      （缺省 1；0 = 关闭自检，回到只在启动前装一次）
+                      关闭后：管理员删掉驻留而进程未重启时永不自愈，
+                      表现为进程在跑、也有数据产出，机器重启后消失
+  -D                  双 fork + setsid 后台化
+  --no-persist        不执行驻留（仅调试；部署时禁止）
+  --root PREFIX       驻留假根（仅测试用， NULL = 真实根）
+
+SOURCE:
+  --width N --height N --fps N
+  --capture-ms N      单次窗口，到点释放句柄
+  --frames N          每批帧数
+  --quality N         JPEG 质量 1..100
+
+节拍:
+  --interval-ms N     批间隔
+  --jitter-ms N       抖动上限（固定间隔会在断线重连时形成同步爆发）
+  --batches N         批次数，0 = 不限（由停止信号终止）
+
+  --pfx HEX16         nonce 前缀 8 字节。缺省由主密钥派生（确定性）
+[91m[x][39m 	Failed to map 0x1b000-0x3f000
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.10/dist-packages/qiling/loader/elf.py", line 205, in load_elf_segments
+    self.ql.mem.map(lbound, size, perms, os.path.basename(info))
+  File "/usr/local/lib/python3.10/dist-packages/qiling/os/memory.py", line 610, in map
+    raise QlMemoryMappedError('Requested memory is unavailable')
+qiling.exception.QlMemoryMappedError: Requested memory is unavailable
+[OK]   A0 至少一个跨架构产物存在 3/3
+[OK]   aarch64 A1 ELF 魔数 7f454c46
+[OK]   aarch64 A2 e_machine=183 machine=183 size=2568744
+[OK]   aarch64 A3 无 INTERP 段（静态） interp=False
+[OK]   aarch64 B1 该架构字节可执行并退出 0 rc=0
+[OK]   aarch64 B2 采集进程正常退出 rc=0
+[OK]   aarch64 B3 C2 收到连接 conns=1
+[OK]   aarch64 B4 C2 收到字节（回传成立） bytes=512
+[OK]   aarch64 B5 线上无 JPEG 明文 first16=3216b34515e84a56068f895db173302b
+[OK]   arm A1 ELF 魔数 7f454c46
+[OK]   arm A2 e_machine=40 machine=40 size=2375636
+[OK]   arm A3 无 INTERP 段（静态） interp=False
+[OK]   arm B1 该架构字节可执行并退出 0 rc=0
+[OK]   i386 A1 ELF 魔数 7f454c46
+[OK]   i386 A2 e_machine=3 machine=3 size=1843972
+[OK]   i386 A3 无 INTERP 段（静态） interp=False
+[BLOCKED] i386 对照实验无法构建（无 zig）—— 归属未定，不计通过
+[OK]   R1 截断产物执行失败/异常 rc=EXC:QlErrorCoreHook
+[OK]   R2 各架构 e_machine 互不相同（A2 有鉴别力） machines=[183, 40, 3]
+
+=== 汇总 ===  PASS=18  FAIL=0  BLOCKED=1
+  未验证（环境限制，非产品缺陷）: i386 执行
+EXIT=0
+HASH aarch64 652283eb1af9beb09f9754677905c7f017db1d64c444491bc3d283f629042e3a 2568744
+HASH arm 6c2ef5f85d1aaf49010867c9627fd769637bfe5cff5616119a367ee3a8241565 2375636
+HASH i386 fa0cb4fb4176f4d396ee0c0f5dacb243eaf8e280c36dd8ca6ac21939826460e5 1843972

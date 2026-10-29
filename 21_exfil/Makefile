@@ -355,7 +355,16 @@ verify-user-deploy:
 verify-autoroot:
 	@python3 tests/verify_autoroot.py
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity
+verify-cross-exec:
+	@python3 tests/verify_arm64_exec.py; \
+	  rc=$$?; \
+	  if [ $$rc -eq 2 ]; then \
+	    echo "[SKIP] 跨架构执行守卫: 环境不具备（无模拟器或无产物）—— R4b 仍 BLOCKED，不算通过"; \
+	  elif [ $$rc -ne 0 ]; then \
+	    echo "[FAIL] 跨架构执行守卫"; exit 1; \
+	  else echo "[OK] 跨架构执行守卫通过"; fi
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-cross-exec
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -379,5 +388,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot
+.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-cross-exec
 

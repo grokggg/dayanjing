@@ -17,7 +17,7 @@
 #   "incompatible with aarch64linux"。必须与主程序同目标重编，且不能就地
 #   覆盖原生产物（原生回归还要用）。故复制到 $WORK 后 clean 再编。
 #
-# 用法: sh scripts/build_cross.sh [aarch64|arm|x86_64]
+# 用法: sh scripts/build_cross.sh [aarch64|arm|x86_64|i386]
 set -eu
 
 TARGET="${1:-aarch64}"
@@ -25,6 +25,7 @@ case "$TARGET" in
     aarch64) ZT="aarch64-linux-musl";     OUT="camd-aarch64-musl" ;;
     arm)     ZT="arm-linux-musleabihf";   OUT="camd-arm-musl" ;;
     x86_64)  ZT="x86_64-linux-musl";      OUT="camd-x86_64-musl" ;;
+    i386)    ZT="x86-linux-musl";          OUT="camd-i386-musl" ;;
     *) echo "未知目标: $TARGET" >&2; exit 2 ;;
 esac
 
@@ -64,11 +65,22 @@ cp build/linux/camd "$ART/$OUT"
 python3 - "$ART/$OUT" <<'PY'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
-phoff, = struct.unpack_from('<Q', d, 32)
-phentsize, phnum = struct.unpack_from('<HH', d, 54)
+cls = d[4]                       # 1=ELF32 2=ELF64
+# 【历史 bug】这里曾无条件按 ELF64 布局解析（e_phoff@32、e_phentsize@54）。
+# arm/i386 是 ELF32：e_phoff@28(4B)、e_phentsize@42、e_phnum@44。
+# 按 64 位偏移读 32 位文件会得到荒谬的 phoff（实测 3.6e17）并抛
+# struct.error —— 而此时产物**已经拷贝完成**，脚本却以 rc=1 结束，
+# 表现为"构建失败"而产物其实是对的。判据必须按 EI_CLASS 分支。
+if cls == 2:
+    phoff, = struct.unpack_from('<Q', d, 32)
+    phentsize, phnum = struct.unpack_from('<HH', d, 54)
+else:
+    phoff, = struct.unpack_from('<I', d, 28)
+    phentsize, phnum = struct.unpack_from('<HH', d, 42)
 interp = any(struct.unpack_from('<I', d, phoff + i * phentsize)[0] == 3
              for i in range(phnum))
-print("[OK] %s magic=%s machine=%d %s size=%d"
-      % (sys.argv[1], d[:4].hex(), struct.unpack_from('<H', d, 18)[0],
+print("[OK] %s magic=%s class=%s machine=%d %s size=%d"
+      % (sys.argv[1], d[:4].hex(), "ELF64" if cls == 2 else "ELF32",
+         struct.unpack_from('<H', d, 18)[0],
          "静态" if not interp else "动态(有INTERP)", len(d)))
 PY

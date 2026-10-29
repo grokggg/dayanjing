@@ -9,6 +9,7 @@
 本脚本只判定状态，不替任何人生成证据。
 证据必须是真实实跑的输出，由人放到 evidence/ 下。
 """
+import hashlib
 import os
 import shutil
 import subprocess
@@ -123,14 +124,76 @@ REDLINES = [
     },
     {
         "id": "R4b",
-        "name": "arm64 真机执行",
+        "name": "跨架构产物真执行（arm64 / arm）",
         "why": "产物能编出来，不等于能在 arm64 上跑起来；无 qemu 时执行路径无从验证",
-        "probe": "command -v qemu-aarch64 >/dev/null "
-                 "|| command -v qemu-aarch64-static >/dev/null",
-        "verify": "在 arm64 真机或 qemu-user 下执行 camd，断言采集与回传成立",
+        # 探测口径修正：qemu 装不上（apt: Unable to locate package；PyPI 无该包），
+        # 但 PyPI 有纯 Python 的 qiling，支持 ARM64 Linux ELF + 系统调用。
+        # "没有模拟器"同样是渠道问题。判据改为：有任意可用模拟器 且 有 arm64 产物。
+        "probe": "(command -v qemu-aarch64 >/dev/null "
+                 "|| command -v qemu-aarch64-static >/dev/null "
+                 "|| python3 -c 'import qiling' >/dev/null 2>&1) "
+                 "&& test -f {REPO}/artifacts/camd-aarch64-musl",
+        "verify": "python3 {REPO}/21_exfil/tests/verify_arm64_exec.py",
         "ev": "R4b.evidence",
     },
+    {
+        "id": "R4c",
+        "name": "i386 产物执行",
+        "why": "32 位 x86 存量目标仍大量存在；产物已能编出（e_machine=3 静态），"
+               "\n      但该架构字节能否跑起来未验。本环境 qiling 对 x86-32 支持不足："
+               "\n      同目标（x86-linux-musl 静态）的 hello world 在模拟器下同样"
+               "\n      UcError(Invalid memory write)，而 arm 的能跑 —— 对照实验证明"
+               "\n      这是模拟器的限制，不是 camd 的 i386 产物有缺陷。"
+               "\n      【故此处是 BLOCKED（环境限制），不是 PENDING，更不是 VERIFIED】",
+        # 判据是对照实验而非猜：模拟器能跑同目标 hello world，才算具备验证条件。
+        "probe": "python3 {REPO}/redline/probe_i386_emu.py",
+        "verify": "换支持 x86-32 的模拟器（真 qemu-user-i386）后执行 camd-i386-musl，"
+                  "断言采集与回传成立",
+        "ev": "R4c.evidence",
+    },
 ]
+
+
+# 产物指纹绑定：证据必须记下它所验证的那份产物的哈希。
+# 没有这层绑定，重新编译产物后旧证据仍会被判 VERIFIED ——
+# 即"用旧产物的证据冒充新产物的状态"，这是防伪造机制的第三个漏洞。
+ARTIFACT_OF_ARCH = {
+    "aarch64": "artifacts/camd-aarch64-musl",
+    "arm":     "artifacts/camd-arm-musl",
+    "i386":    "artifacts/camd-i386-musl",
+}
+
+
+def check_evidence_fresh(ev_path):
+    """返回 (ok, reason)。证据里若有 HASH 行，必须与当前产物逐位一致。"""
+    try:
+        txt = open(ev_path, "r", errors="replace").read()
+    except OSError as e:
+        return False, "证据不可读: %s" % e
+    lines = [l for l in txt.splitlines() if l.startswith("HASH ")]
+    if not lines:
+        # 该红线的证据不绑定产物（如纯日志类），无法校验也不降级。
+        return True, None
+    checked = 0
+    for l in lines:
+        parts = l.split()
+        if len(parts) != 4:
+            continue
+        arch, sha, size = parts[1], parts[2], int(parts[3])
+        rel = ARTIFACT_OF_ARCH.get(arch)
+        if not rel:
+            continue
+        fp = os.path.join(REPO, rel)
+        if not os.path.isfile(fp):
+            return False, "指纹 %s 对应的产物已不存在: %s" % (arch, rel)
+        raw = open(fp, "rb").read()
+        cur = hashlib.sha256(raw).hexdigest()
+        checked += 1
+        if cur != sha or len(raw) != size:
+            return False, "指纹与当前 %s 产物不一致（该证据对应的是旧产物）" % arch
+    if checked == 0:
+        return True, None
+    return True, None
 
 
 def main():
@@ -144,8 +207,14 @@ def main():
         else:
             ev_path = os.path.join(EV, r["ev"])
             if os.path.exists(ev_path) and os.path.getsize(ev_path) > 0:
-                state = "VERIFIED"
-                detail = "证据: %s" % r["ev"]
+                ok, why = check_evidence_fresh(ev_path)
+                if ok:
+                    state = "VERIFIED"
+                    detail = "证据: %s" % r["ev"]
+                else:
+                    state = "PENDING"
+                    detail = "证据已失效 —— %s" % why
+                    pending += 1
             else:
                 state = "PENDING"
                 detail = "环境已具备但无证据 —— 必须验证"
