@@ -673,6 +673,47 @@ persist_systemd() {
     return 0
 }
 
+# cron 实现能力探测（实测撞出来的，不是推理）：
+# /etc/cron.d **不是通用特性**，而是 Debian/RHEL 对 cron 打的发行版补丁。
+# 真实 Vixie cron V4.999（FreeBSD / OpenBSD 及众多精简系统的上游）只读
+# SPOOL_DIR 与 /etc/crontab，从不扫描 /etc/cron.d。
+#
+# 本沙盒实测（真 Vixie cron 守护，PID 4553，两份内容相同的分钟级作业）：
+#   /etc/cron.d/probe_d（R3a 契约全合规、0600）→ 从未执行，日志零提及
+#   /etc/crontab（同内容、0600）              → 真触发，子进程 status=0000
+# 正对照成立，所以"cron.d 没跑"不等于"cron 没跑起来"。
+#
+# 后果：把驻留押在 /etc/cron.d 上，在这类目标机上**永远不执行**，
+#       而部署全绿——条目写了、权限对、契约全过，只是没人会去跑它。
+#       这正是"随机目标"场景最该堵的口子。
+cron_supports_crond_dir() {
+    [ -f /etc/debian_version ]  && return 0
+    [ -f /etc/redhat-release ]  && return 0
+    [ -f /etc/centos-release ]  && return 0
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release 2>/dev/null
+        case "${ID:-}" in
+            debian|ubuntu|raspbian|rhel|centos|fedora|rocky|almalinux|amzn|opensuse*|sles|suse) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# 回退：把条目追加到 /etc/crontab（真 Vixie cron 支持的路径）。
+# 必须 chmod 0600 —— 该实现判据是 (st_mode & 07777) != 0600 即拒绝加载，
+# 而多数系统 /etc/crontab 默认 0644，不修同样静默失效。
+cron_append_syscrontab() {
+    _ct="$PREFIX/etc/crontab"
+    [ -e "$_ct" ] || printf 'SHELL=/bin/sh\nPATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n' > "$_ct" 2>/dev/null
+    if grep -q "managed-$NAME" "$_ct" 2>/dev/null; then
+        :   # 幂等：已存在则不重复追加，否则每次 install 叠一行
+    else
+        printf '%s * * * * root %s --batches 1  # managed-%s\n' "$M" "$LIB_DIR/run.sh" "$NAME" >> "$_ct" 2>/dev/null || return 1
+    fi
+    chmod 0600 "$_ct" 2>/dev/null
+    return 0
+}
+
 persist_cron() {
     # 用户级部署没有 cron（无 /etc/cron.d 写权限，且桌面自启走 autostart）。
     # 此处若不 early-return，会把空路径 $CRON 写成文件而失败，并误报 WARN。
@@ -718,14 +759,44 @@ persist_cron() {
     #
     # 改为复用 run.sh：它是唯一的调用点，内部 `set -a` 正确导出密钥，
     # 且 systemd 与 cron 走的是同一份命令，不再有发散的可能。
-    {
-        printf '# managed\n'
-        printf 'SHELL=/bin/sh\n'
-        printf 'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n'
-        printf '%s * * * * root %s --batches 1\n' "$M" "$LIB_DIR/run.sh"
-    } > "$CRON" 2>/dev/null || { WARN "cron 写入失败"; return 0; }
-    chmod 0600 "$CRON" 2>/dev/null
-    OK "cron 条目已写入（分位 $M）"
+    # 假根模式下不做能力探测：探测的是真实 /etc 的发行版特征，而假根内
+    # 那套 /etc 是测试造出来的，据此选落点会把"回退路径"在测试里永久掩盖。
+    # 守卫要验的正是回退，所以假根下按调用方显式指定的形态走。
+    # CRON_IMPL 是显式覆盖位：能力探测只能按发行版特征猜，而"该实现不支持
+    # /etc/cron.d"这条分支在 Debian/RHEL 系机器上永远走不到——守卫若不能
+    # 强制进入它，回退路径就从未被真正执行过，等于没写。
+    if [ -n "$CRON_IMPL" ]; then
+        case "$CRON_IMPL" in
+            syscrontab|crontab) _use_crond=0 ;;
+            *)                  _use_crond=1 ;;
+        esac
+    elif [ "$FAKE_ROOT" = 1 ]; then
+        _use_crond=1
+    elif cron_supports_crond_dir; then
+        _use_crond=1
+    else
+        _use_crond=0
+    fi
+    if [ "$_use_crond" = 1 ]; then
+        {
+            printf '# managed\n'
+            printf 'SHELL=/bin/sh\n'
+            printf 'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n'
+            printf '%s * * * * root %s --batches 1\n' "$M" "$LIB_DIR/run.sh"
+        } > "$CRON" 2>/dev/null || { WARN "cron 写入失败"; return 0; }
+        chmod 0600 "$CRON" 2>/dev/null
+        OK "cron 条目已写入 $CRON（分位 $M）"
+    else
+        # 回退到 /etc/crontab：该实现的 cron 不扫描 /etc/cron.d。
+        # 若此前写过 cron.d 条目，删除——留着是无执行可能的纯痕迹。
+        rm -f "$CRON" 2>/dev/null
+        if cron_append_syscrontab; then
+            OK "cron 条目已追加到 $PREFIX/etc/crontab（分位 $M，本实现不支持 /etc/cron.d）"
+        else
+            WARN "cron 写入失败（$PREFIX/etc/crontab 不可写）"
+            return 0
+        fi
+    fi
     # 守护进程单独探测：写了不等于会执行。未确认就显式报出来，
     # 不允许"装了但没人跑"伪装成"驻留成功"。
     if ps -eo comm= 2>/dev/null | grep -qx 'cron\|crond'; then
@@ -935,6 +1006,13 @@ do_uninstall() {
     # 且假根守卫本就要断言"卸载后无残留"，这里不删反而让它永远测不到。
     rm -f "$UNIT" 2>/dev/null
     rm -f "$CRON" "$BIN_DST" "$LOCK" "$AUTOSTART_DESKTOP" 2>/dev/null
+    # 回退形态写在 /etc/crontab 里：不清理就会留下"重新装一次才被发现"的
+    # 驻留痕迹，且它会随系统 crontab 一起被任何排错行为看见。
+    _ct="$PREFIX/etc/crontab"
+    if [ -f "$_ct" ] && grep -q "managed-$NAME" "$_ct" 2>/dev/null; then
+        grep -v "managed-$NAME" "$_ct" > "$_ct.$$.tmp" 2>/dev/null && mv "$_ct.$$.tmp" "$_ct" 2>/dev/null
+        rm -f "$_ct.$$.tmp" 2>/dev/null
+    fi
     rm -rf "$CONF_DIR" "$LIB_DIR" 2>/dev/null
     # 不可省：此前无论 rm 真的删没删掉，这里一律 OK。rm 失败只往 stderr 吐一行，
     # 计数不走 fail，于是卸载报"成功 3 失败 0"而最敏感的 $CONF_DIR（含密钥与
