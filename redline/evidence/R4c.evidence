@@ -1,0 +1,17 @@
+[OK]   F1 产物为 32 位 ELF class=1
+[OK]   F2 e_machine=3(i386) machine=3
+[OK]   F3 静态链接（无 INTERP，不挑 libc） INTERP=False
+[OK]   F4 宿主原生可执行 i386 字节（无需模拟器） 
+[OK]   F5 i386 产物端到端退出码 0 rc=0
+[OK]   F6 C2 实收字节（采集+编码+加密+回传全通） 4096 字节
+[OK]   F7 线上无 JPEG 明文（FFD8FF） 含 magic=False
+[OK]   F8 密文特征（字节值多样性 > 100） 256 种取值
+[OK]   R1 反向：发明文的假程序必须被「无明文」判据抓到 收端 4100 字节，含 magic=True
+[OK]   R2 反向：损坏产物不得再判为可执行 
+# ---- 产物指纹（产物变了，本证据即失效）----
+HASH i386 fa0cb4fb4176f4d396ee0c0f5dacb243eaf8e280c36dd8ca6ac21939826460e5 1843972
+
+=== result: 10 pass, 0 fail ===
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC 21_exfil/tests/verify_i386_exec.py 58a9414431b1e68c556b1d1287a06673b25b84bc1ae2fd516508eb08f2a7b545 8611

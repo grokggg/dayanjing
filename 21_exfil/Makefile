@@ -371,7 +371,18 @@ verify-cross-exec:
 	    echo "[FAIL] 跨架构执行守卫"; exit 1; \
 	  else echo "[OK] 跨架构执行守卫通过"; fi
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-cross-exec
+# i386 真执行：32 位 x86 存量目标。宿主 x86_64 自带 IA32 兼容，原生跑即可，
+# 不需要模拟器 —— 此前据此误判为 BLOCKED，此处必须独立成目标，别再退回。
+verify-i386-exec:
+	@python3 tests/verify_i386_exec.py; \
+	  rc=$$?; \
+	  if [ $$rc -eq 2 ]; then \
+	    echo "[SKIP] i386 执行守卫: 环境不具备（无产物或内核无 IA32 兼容）—— R4c 仍 BLOCKED，不算通过"; \
+	  elif [ $$rc -ne 0 ]; then \
+	    echo "[FAIL] i386 执行守卫"; exit 1; \
+	  else echo "[OK] i386 执行守卫通过"; fi
+
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-cross-exec verify-i386-exec
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -395,5 +406,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-persist-selfheal ensure-cross-env verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-cross-exec
+.PHONY: all test clean inspect verify-persist-selfheal ensure-cross-env verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-cross-exec verify-i386-exec
 

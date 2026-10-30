@@ -173,19 +173,25 @@ REDLINES = [
     {
         "id": "R4c",
         "name": "i386 产物执行",
-        "why": "32 位 x86 存量目标仍大量存在；产物已能编出（e_machine=3 静态），"
-               "\n      但该架构字节能否跑起来未验。本环境 qiling 对 x86-32 支持不足："
-               "\n      同目标（x86-linux-musl 静态）的 hello world 在模拟器下同样"
-               "\n      UcError(Invalid memory write)，而 arm 的能跑 —— 对照实验证明"
-               "\n      这是模拟器的限制，不是 camd 的 i386 产物有缺陷。"
-               "\n      【故此处是 BLOCKED（环境限制），不是 PENDING，更不是 VERIFIED】",
-        # 判据是对照实验而非猜：模拟器能跑同目标 hello world，才算具备验证条件。
-        "probe": "python3 {REPO}/redline/probe_i386_emu.py",
-        "verify": "换支持 x86-32 的模拟器（真 qemu-user-i386）后执行 camd-i386-musl，"
-                  "断言采集与回传成立",
+        "why": "32 位 x86 存量目标仍大量存在（老工控机、瘦客户端、旧办公机）；"
+               "\n      产物已能编出（e_machine=3 静态），但该架构字节能否跑起来未验。"
+               "\n      【认知修正 —— 此前误判为环境限制，勿再退回】"
+               "\n      前几轮记为 BLOCKED，理由是「qiling 对 x86-32 支持不足」，"
+               "\n      依据是同目标 hello world 在模拟器下同样 UcError。"
+               "\n      那个推理漏了：宿主本身就是 x86_64，Linux 内核自带 IA32"
+               "\n      compatibility，32 位静态 ELF 可**原生执行**，根本不需要模拟器。"
+               "\n      实测 camd-i386-musl --help 直接 RC=0。所以这是排查路径选错，"
+               "\n      不是环境不具备。（判据也踩过坑：帮助文本走 stderr 不是 stdout，"
+               "\n      只查 stdout 会把「能跑」误判成「无 IA32 兼容」。）",
+        # 判据是被测产物自身能否原生执行，不猜内核配置、不依赖任何模拟器。
+        # 产物缺失也走这里 -> BLOCKED（提示先跑 build_cross.sh），语义正确。
+        "probe": "test -x {REPO}/artifacts/camd-i386-musl && "
+                 "{REPO}/artifacts/camd-i386-musl --help 2>&1 | grep -q -- '--sink'",
+        "verify": "跑 21_exfil/tests/verify_i386_exec.py：原生执行 i386 产物，"
+                  "断言采集+编码+加密+回传端到端成立、线上无 JPEG 明文",
         "ev": "R4c.evidence",
         "sources": [
-            "21_exfil/tests/verify_arm64_exec.py",
+            "21_exfil/tests/verify_i386_exec.py",
         ],
     },
 ]

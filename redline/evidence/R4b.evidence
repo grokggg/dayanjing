@@ -97,13 +97,6 @@ Traceback (most recent call last):
   File "/usr/local/lib/python3.10/dist-packages/qiling/os/memory.py", line 610, in map
     raise QlMemoryMappedError('Requested memory is unavailable')
 qiling.exception.QlMemoryMappedError: Requested memory is unavailable
-[91m[x][39m 	Failed to map 0x22000-0x63000
-Traceback (most recent call last):
-  File "/usr/local/lib/python3.10/dist-packages/qiling/loader/elf.py", line 205, in load_elf_segments
-    self.ql.mem.map(lbound, size, perms, os.path.basename(info))
-  File "/usr/local/lib/python3.10/dist-packages/qiling/os/memory.py", line 610, in map
-    raise QlMemoryMappedError('Requested memory is unavailable')
-qiling.exception.QlMemoryMappedError: Requested memory is unavailable
 [OK]   A0 至少一个跨架构产物存在 3/3
 [OK]   aarch64 A1 ELF 魔数 7f454c46
 [OK]   aarch64 A2 e_machine=183 machine=183 size=2568872
@@ -112,7 +105,7 @@ qiling.exception.QlMemoryMappedError: Requested memory is unavailable
 [OK]   aarch64 B2 采集进程正常退出 rc=0
 [OK]   aarch64 B3 C2 收到连接 conns=1
 [OK]   aarch64 B4 C2 收到字节（回传成立） bytes=512
-[OK]   aarch64 B5 线上无 JPEG 明文 first16=5e9761210323fe61540621a7dc955205
+[OK]   aarch64 B5 线上无 JPEG 明文 first16=7c7e766f8196b17741bace7fc6e80fc1
 [OK]   arm A1 ELF 魔数 7f454c46
 [OK]   arm A2 e_machine=40 machine=40 size=2375636
 [OK]   arm A3 无 INTERP 段（静态） interp=False
@@ -120,7 +113,7 @@ qiling.exception.QlMemoryMappedError: Requested memory is unavailable
 [OK]   i386 A1 ELF 魔数 7f454c46
 [OK]   i386 A2 e_machine=3 machine=3 size=1843972
 [OK]   i386 A3 无 INTERP 段（静态） interp=False
-[BLOCKED] i386 该架构模拟器不支持（同目标 hello world 对照同样失败） —— 不计通过，也不计为产品缺陷
+[BLOCKED] i386 对照实验无法构建（无 zig）—— 归属未定，不计通过
 [OK]   R1 截断产物执行失败/异常 rc=EXC:QlErrorCoreHook
 [OK]   R2 各架构 e_machine 互不相同（A2 有鉴别力） machines=[183, 40, 3]
 
