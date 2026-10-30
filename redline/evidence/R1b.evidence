@@ -1,27 +1,27 @@
-=== F1-F12 正向：V4L2 内核 ABI 全序列 ===
-  [OK] F1  open() 成功  0
-  [OK] F2  VIDIOC_QUERYCAP 成功（命令号与结构体大小被内核接受）  qcap_structsz=104
-  [OK] F3  capabilities 带 V4L2_CAP_DEVICE_CAPS  caps=0x84000001
-  [OK] F4  能力判据通过（device_caps 含 CAPTURE|STREAMING）  effcaps=0x4000001
-  [OK] F5  S_FMT(MJPEG) 被拒 —— 触发后端回退分支  errno=22
-  [OK] F6  S_FMT(YUYV) 成功且尺寸回显一致  640x480
-  [OK] F7  sizeimage 与 YUYV422 一致  614400 == 614400
-  [OK] F8  REQBUFS 成功
-  [OK] F9  QUERYBUF 长度正确
-  [OK] F10 QUERYBUF m.offset 页对齐（mmap 前提）
-  [OK] F11 mmap 成功 —— 后端取帧所依赖的通路真实可用
-  [OK] F12 DQBUF 返回真实帧长度  bytesused=614400
-  [OK] F13 mmap 区域是真图案（两处像素不同，非单色/全零填充）  PIX0=eb80eb80eb80eb80 PIX100000=d380d380d380d380
-  [OK] F14 帧内不同字节值种类 >= 8（真像素而非填充）  variety=19
-  [OK] F15 设备确实推进了帧（frame_no>=2）  frame_no=2
-  [OK] S1  后端源码含 DEVICE_CAPS 条件判据（与探针镜像同源，防脱钩）
-=== R1/R2 反向：证明 F11 与 F4 不是恒绿 ===
-  [OK] R1  m.offset 非页对齐时 mmap 必失败 —— F11 有鉴别力  MMAP=-1
-  [OK] R2  老驱动形态（无 DEVICE_CAPS、无采集能力）判据应失败 —— F4 有鉴别力  CAPS_OK=0 effcaps=16777216
+[OK]   前置：V4L2 ABI 模拟器已编译
+[OK]   前置：/dev/video0 可用（字符设备）  -- 已创建
+[OK]   F1  create(v4l2) 成功  -- OK
+[OK]   F2  open 成功  -- ok
+[OK]   F3  capture 成功  -- ok
+[OK]   F4  帧分辨率 320x240  -- 320x240
+[OK]   F5  帧长 == W*H*2（YUYV422）  -- 153600
+[OK]   F6  帧内容非全零（>90% 非零字节）  -- nonzero=153600/153600
+[OK]   F7  原始帧不是 JPEG（必须走转码而非直通）  -- 0
+[OK]   F8  容量探测成功且长度 > 0  -- PROBE_LEN=3419
+[OK]   F9  转码成功  -- OK
+[OK]   F10 转码长度与探测一致  -- jpeg=3419 probe=3419
+[OK]   F11 输出是合法 JPEG（SOI+EOI）  -- magic=1 eoi=1
+[OK]   F12 输出分辨率与源一致  -- 320x240
+[OK]   F13 后续仍能连续取帧（流未断）  -- extra=3
+[OK]   F14 真路径证据：mmap 被调用（非零）  -- MMAP=1
+[OK]   F15 真路径证据：DQBUF 被调用（非零）  -- DQBUF=4
+[OK]   S1  产品源码含真 V4L2 ioctl 调用  -- DQBUF=1 QUERYCAP=2 mmap=14
+[OK]   R1  设备不可用时真路径证据必须消失（反证 F14/F15 有鉴别力）  -- 降级分支 CAPTURE=OK，ioctl 计数=全 0/无文件
+[OK]   R2  DQBUF 失败时 capture 必须失败（不得静默返回合成帧）  -- CAPTURE=FAIL ERR=timeout
 
-共 18 项，通过 18，失败 0
+共 20 项，失败 0
 
 # ---- 源码指纹（改了下列任一文件，本证据即失效）----
-SRC agent_windows/src/cam_linux_v4l2.c 2b92725fb0d5f8f729cd4f579a9b39fb79f16b13974b207fbdeb5006e85de36e 18008
-SRC agent_windows/tests/v4l2sim_shim.c 7df8fa50e486f8a91a4be1128c9df7021079f714d3d35a9439e7d719184edf37 14676
+SRC agent_windows/src/cam_linux_v4l2.c 4e1422f6bec4d8ada691bb52f721110d752963fe31e3a14a47f9130215a77ac4 19592
+SRC agent_windows/tests/v4l2sim_shim.c 5866903589aa000fa32176f317446f9a916f8b6792fd57435e9bb16460970657 15285
 SRC 21_exfil/tests/verify_v4l2_abi.py f77d4f9dae8c7315b9705654f495f3a3e30b9660f8ec7b861c097bffc571a340 8413
