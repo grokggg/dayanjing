@@ -28,6 +28,7 @@ def run(cmd):
         # PENDING 永远 0，"环境具备却未验证必须报警"这个防伪造机制从未工作。
         # 参数名就是 cmd，直接用它。
         cmd = cmd.replace("{REPO}", REPO)
+        cmd = cmd.replace("{VENDOR}", VENDOR)
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
         return p.returncode, (p.stdout + p.stderr).strip()
     except Exception as e:
@@ -161,11 +162,14 @@ REDLINES = [
         # 探测口径修正：qemu 装不上（apt: Unable to locate package；PyPI 无该包），
         # 但 PyPI 有纯 Python 的 qiling，支持 ARM64 Linux ELF + 系统调用。
         # "没有模拟器"同样是渠道问题。判据改为：有任意可用模拟器 且 有 arm64 产物。
+        # 判据修正：qiling 装在持久 vendor 目录（比 site-packages 不易被环境
+        # 清理），必须显式带 PYTHONPATH，否则默认 site-packages 被清后本红线
+        # 会误判 STALE —— 那是"环境不具备"与"路径没指对"混为一谈。
         "probe": "(command -v qemu-aarch64 >/dev/null "
                  "|| command -v qemu-aarch64-static >/dev/null "
-                 "|| python3 -c 'import qiling' >/dev/null 2>&1) "
+                 "|| PYTHONPATH={VENDOR} python3 -c 'import qiling' >/dev/null 2>&1) "
                  "&& test -f {REPO}/artifacts/camd-aarch64-musl",
-        "verify": "python3 {REPO}/21_exfil/tests/verify_arm64_exec.py",
+        "verify": "PYTHONPATH={VENDOR} python3 {REPO}/21_exfil/tests/verify_arm64_exec.py",
         "ev": "R4b.evidence",
         "sources": [
             "21_exfil/tests/verify_arm64_exec.py",
@@ -201,6 +205,11 @@ REDLINES = [
 # 产物指纹绑定：证据必须记下它所验证的那份产物的哈希。
 # 没有这层绑定，重新编译产物后旧证据仍会被判 VERIFIED ——
 # 即"用旧产物的证据冒充新产物的状态"，这是防伪造机制的第三个漏洞。
+# 模拟器/依赖的持久安装位。放 /data 而非 site-packages：
+# 后者会被环境清理，导致证据"在但不可复现"（STALE）。
+VENDOR = os.environ.get("QILING_VENDOR", "/data/workspace/vendor")
+
+
 ARTIFACT_OF_ARCH = {
     "aarch64": "artifacts/camd-aarch64-musl",
     "arm":     "artifacts/camd-arm-musl",
