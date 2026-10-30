@@ -32,7 +32,38 @@ import threading
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ART = os.path.join(REPO, "artifacts")
-ROOTFS = "/tmp/a64root_guard"
+
+
+def _pick_workdir():
+    """选一个"真的能写"的目录作为工作根。
+
+    为什么不能硬编码 /tmp：本沙盒的根 overlay 是只读的（/ 以 ro 挂载），
+    /tmp 随之为 ro；历史上 /tmp 还被 502 清空过两次。硬编码会让守卫
+    在最需要它的时候以 OSError 退出——而且报错指向文件系统，排查方向
+    被引向"环境坏了"，而非"守卫选错了目录"。
+    """
+    cands = []
+    env = os.environ.get("GUARD_WORKDIR")
+    if env:
+        cands.append(env)
+    cands.append(os.path.join(os.path.dirname(REPO), ".guard_work"))
+    cands.append("/data/workspace/.guard_work")
+    cands.append("/tmp/a64root_guard")
+    for c in cands:
+        try:
+            os.makedirs(c, exist_ok=True)
+            t = os.path.join(c, ".wtest")
+            with open(t, "w") as f:
+                f.write("x")
+            os.remove(t)
+            return c
+        except OSError:
+            continue
+    return "/tmp/a64root_guard"
+
+
+WORK = _pick_workdir()
+ROOTFS = os.path.join(WORK, "a64root_guard")
 
 # 架构名 -> (产物文件名, 期望 e_machine, 是否跑完整采集回传)
 TARGETS = [
@@ -65,7 +96,7 @@ def control_emu(target):
       UcError(Invalid memory write)，而 arm 的能跑 —— 故 i386 是 (a)。
     """
     import subprocess, tempfile
-    work = "/tmp/cross_ctrl"
+    work = os.path.join(WORK, "cross_ctrl")
     os.makedirs(work, exist_ok=True)
     src = os.path.join(work, "h.c")
     open(src, "w").write('#include <stdio.h>\nint main(void){printf("C\\n");return 0;}\n')

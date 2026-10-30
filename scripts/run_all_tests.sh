@@ -16,7 +16,21 @@ skipped=0
 # 三类症状没有一个指向"并发"，排查方向会被带向被干扰模块自身。
 # 用 flock 而非 pidfile：pidfile 在进程被强杀后残留，会把后续所有回归
 # 永久判成"已有实例在跑"。
-REG_LOCK=/tmp/dayanjing_regression.lock
+# 临时目录不能硬编码 /tmp：本沙盒根 overlay 以 ro 挂载，/tmp 随之只读；
+# /tmp 还会被环境清理。硬编码会让整条入口以 "Read-only file system" 退出，
+# 报错指向文件系统，排查方向被引向"环境坏了"而非"入口选错了目录"。
+TMPD="${DAYANJING_TMP:-}"
+if [ -z "$TMPD" ] || ! { mkdir -p "$TMPD" 2>/dev/null && : > "$TMPD/.wtest" 2>/dev/null; }; then
+    TMPD=""
+    for c in /data/workspace/.regtmp /tmp; do
+        if mkdir -p "$c" 2>/dev/null && : > "$c/.wtest" 2>/dev/null; then TMPD="$c"; break; fi
+    done
+fi
+if [ -z "$TMPD" ]; then
+    echo "[FATAL] 找不到可写临时目录（/data/workspace/.regtmp 与 /tmp 均不可写）"
+    exit 2
+fi
+REG_LOCK=$TMPD/dayanjing_regression.lock
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$REG_LOCK"
     if ! flock -n 9; then
@@ -60,9 +74,9 @@ run_c() {
     name="$1"
     [ -d "$d" ] || { printf "=== %-16s SKIP(目录不存在)\n" "$name"; return; }
     printf "=== %-16s " "$name"
-    if ! (cd "$d" && timeout 300 make >/tmp/mk_$name.log 2>&1); then
+    if ! (cd "$d" && timeout 300 make >$TMPD/mk_$name.log 2>&1); then
         echo "BUILD FAIL"
-        tail -5 /tmp/mk_$name.log
+        tail -5 $TMPD/mk_$name.log
         failed=$((failed+1)); return
     fi
     ok=1
@@ -75,13 +89,13 @@ run_c() {
         failed=$((failed+1)); return
     fi
     for t in $tests; do
-        timeout "$(tmo_for "$name")" "$t" >/tmp/t_$name.log 2>&1
+        timeout "$(tmo_for "$name")" "$t" >$TMPD/t_$name.log 2>&1
         rc=$?
         # 变异审计发现：被测进程在 ptrace_stop 等场景下，"timeout 已到期"
         # 与"进程仍存活"可以同时成立，且 waitpid 可能返回 0，于是挂起的测试
         # 被记为退出码 0 -> 误判 PASS。零输出是唯一可靠的挂起判据：
         # 正常测试必定打印结果行。
-        if [ ! -s /tmp/t_$name.log ]; then
+        if [ ! -s $TMPD/t_$name.log ]; then
             ok=0
             echo "FAIL -> $t (零输出：疑似挂起/被杀，退出码 $rc 不可信)"
             break
@@ -90,14 +104,14 @@ run_c() {
             # 退出码 77 = 环境不具备（如无 root 读不了 /proc/kcore）。
             # 记为 SKIP：既不冒认通过，也不算作代码缺陷。
             echo "SKIP -> $(basename "$t")"
-            grep -E '^\[SKIP\]' /tmp/t_$name.log | head -2
+            grep -E '^\[SKIP\]' $TMPD/t_$name.log | head -2
             skipped=$((skipped+1))
             continue
         fi
         if [ $rc -ne 0 ]; then
             ok=0
             echo "FAIL -> $t"
-            tail -6 /tmp/t_$name.log
+            tail -6 $TMPD/t_$name.log
             break
         fi
     done
@@ -109,12 +123,12 @@ run_int() {
     name="$1"; shift
     printf "=== %-16s " "$name"
     # 源路径是相对 ROOT 的，必须先 cd，否则找不到 tests/*.c
-    if (cd "$ROOT" && timeout 120 cc -std=c11 -O2 -Wall -Wextra -Wpedantic "$@" >/tmp/cc_$name.log 2>&1) \
-       && timeout 120 /tmp/bin_$name >/tmp/t_$name.log 2>&1; then
+    if (cd "$ROOT" && timeout 120 cc -std=c11 -O2 -Wall -Wextra -Wpedantic "$@" >$TMPD/cc_$name.log 2>&1) \
+       && timeout 120 $TMPD/bin_$name >$TMPD/t_$name.log 2>&1; then
         echo "PASS"; passed=$((passed+1))
     else
         echo "FAIL"
-        tail -6 /tmp/cc_$name.log /tmp/t_$name.log 2>/dev/null
+        tail -6 $TMPD/cc_$name.log $TMPD/t_$name.log 2>/dev/null
         failed=$((failed+1))
     fi
 }
@@ -122,15 +136,15 @@ run_int() {
 # Python 侧
 run_py() {
     printf "=== %-16s " "$1"
-    if timeout 180 python3 "$ROOT/$2" >/tmp/py_$1.log 2>&1; then
-        echo "PASS  $(tail -1 /tmp/py_$1.log)"; passed=$((passed+1))
+    if timeout 180 python3 "$ROOT/$2" >$TMPD/py_$1.log 2>&1; then
+        echo "PASS  $(tail -1 $TMPD/py_$1.log)"; passed=$((passed+1))
     else
-        echo "FAIL"; tail -6 /tmp/py_$1.log; failed=$((failed+1))
+        echo "FAIL"; tail -6 $TMPD/py_$1.log; failed=$((failed+1))
     fi
 }
 
 # huffman 交叉验证的用例文件在源码树里（24_front/tests/data/hf_cases.txt）。
-# 不导出的话 test_huffman 会回退到 /tmp/hf_cases.txt，该文件在干净环境里
+# 不导出的话 test_huffman 会回退到 $TMPD/hf_cases.txt，该文件在干净环境里
 # 不存在，于是返回 77 被记成 SKIP —— 表面不失败，实际这条验证从没跑过。
 # 显式导出，让它真正参与回归。
 export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
@@ -157,14 +171,14 @@ run_ct_asm() {
     # 依赖 build/crypto_gcm.o（生产构建，不带 CRYPTO_CT_INSTRUMENT）。
     # 00_crypto 的默认 make 只产出测试二进制，不产出该 .o —— 此前守卫能过
     # 纯属产物恰好还留在 build/ 里。显式构建，失败即报，不靠"碰巧还在"。
-    if ! (cd "$ROOT/00_crypto" && make build/crypto_gcm.o >/tmp/mk_ctasm.log 2>&1); then
-        echo "BUILD FAIL"; tail -5 /tmp/mk_ctasm.log; failed=$((failed+1)); return
+    if ! (cd "$ROOT/00_crypto" && make build/crypto_gcm.o >$TMPD/mk_ctasm.log 2>&1); then
+        echo "BUILD FAIL"; tail -5 $TMPD/mk_ctasm.log; failed=$((failed+1)); return
     fi
-    if (cd "$ROOT/00_crypto" && python3 scripts/check_ct_asm.py >/tmp/t_ct_asm.log 2>&1); then
-        echo "PASS"; grep -E "^\[PASS\]" /tmp/t_ct_asm.log | sed 's/^/    /'
+    if (cd "$ROOT/00_crypto" && python3 scripts/check_ct_asm.py >$TMPD/t_ct_asm.log 2>&1); then
+        echo "PASS"; grep -E "^\[PASS\]" $TMPD/t_ct_asm.log | sed 's/^/    /'
         passed=$((passed+1))
     else
-        echo "FAIL"; cat /tmp/t_ct_asm.log
+        echo "FAIL"; cat $TMPD/t_ct_asm.log
         failed=$((failed+1))
     fi
 }
@@ -182,18 +196,18 @@ run_mono() {
     # 编 52 个 .o，实测 5m26s（326s）。原 300s 在冷启动下必然被杀，
     # 表现为 BUILD FAIL，并连锁让 lifecycle 因缺少 implant 而 FAIL——
     # 两次失败都与代码无关，纯属超时预算不足。900s 留出 2.7 倍余量。
-    if ! (cd "$ROOT/monolith" && timeout 900 make >/tmp/mk_monolith.log 2>&1); then
-        echo "BUILD FAIL"; tail -5 /tmp/mk_monolith.log
+    if ! (cd "$ROOT/monolith" && timeout 900 make >$TMPD/mk_monolith.log 2>&1); then
+        echo "BUILD FAIL"; tail -5 $TMPD/mk_monolith.log
         failed=$((failed+1)); return
     fi
     # --run-ms 必须有界：无上界时若帧被去重跳过，循环永不退出。
     # --budget 给足：默认预算下 3 秒窗口累积不足 1 个覆盖信元，
     # 覆盖恒为 0 是预算与时长的正常关系而非缺陷，但那样就测不到覆盖路径。
     if (cd "$ROOT/monolith" && timeout 120 ./implant --selftest --run-ms 3000 \
-            --budget 307200 --allow-sandbox >/tmp/t_monolith.log 2>&1); then
+            --budget 307200 --allow-sandbox >$TMPD/t_monolith.log 2>&1); then
         echo "PASS"; passed=$((passed+1))
     else
-        echo "FAIL"; tail -12 /tmp/t_monolith.log
+        echo "FAIL"; tail -12 $TMPD/t_monolith.log
         failed=$((failed+1))
     fi
 }
@@ -209,15 +223,15 @@ run_life()
     # lifecycle 依赖 25_deploy/build/deploy_pack，但本脚本此前从不构建
     # 25_deploy——它不在模块循环里。于是干净环境下 lifecycle 必定卡在
     # "[FATAL] 打包失败"，与被测逻辑无关。必须先补这一步。
-    if ! (cd "$ROOT/25_deploy" && timeout 600 make >/tmp/mk_25deploy.log 2>&1); then
-        echo "DEP BUILD FAIL"; tail -5 /tmp/mk_25deploy.log
+    if ! (cd "$ROOT/25_deploy" && timeout 600 make >$TMPD/mk_25deploy.log 2>&1); then
+        echo "DEP BUILD FAIL"; tail -5 $TMPD/mk_25deploy.log
         failed=$((failed+1)); return
     fi
     if timeout 300 bash "$ROOT/25_deploy/scripts/lifecycle.sh" \
-            >/tmp/t_lifecycle.log 2>&1; then
+            >$TMPD/t_lifecycle.log 2>&1; then
         echo "PASS"; passed=$((passed+1))
     else
-        echo "FAIL"; tail -20 /tmp/t_lifecycle.log
+        echo "FAIL"; tail -20 $TMPD/t_lifecycle.log
         failed=$((failed+1))
     fi
 }
@@ -225,17 +239,17 @@ run_life
 
 run_int integration \
     -I03_transport/include -I10_evasion/include -I06_db/include -I07_ui/include \
-    -o /tmp/bin_integration tests/integration.c \
+    -o $TMPD/bin_integration tests/integration.c \
     03_transport/build/*.o 10_evasion/build/*.o 06_db/build/*.o 07_ui/build/*.o
 
 run_int e2e_camo \
     -I03_transport/include -I10_evasion/include \
-    -o /tmp/bin_e2e_camo tests/e2e_camo.c \
+    -o $TMPD/bin_e2e_camo tests/e2e_camo.c \
     03_transport/build/*.o 10_evasion/build/*.o
 
 run_int proto_c2_layer \
     -I01_proto/include -I02_c2/include \
-    -o /tmp/bin_proto_c2_layer tests/proto_c2_layering.c \
+    -o $TMPD/bin_proto_c2_layer tests/proto_c2_layering.c \
     01_proto/build/frame.o 02_c2/build/c2_frame.o 02_c2/build/c2.o \
     02_c2/build/crypto_gcm.o 02_c2/build/crypto_hash.o
 
@@ -243,12 +257,12 @@ run_int proto_c2_layer \
 # 单独一个脚本驱动：它需要 Python 侧先生成夹具，缺夹具时 C 侧返回 77(SKIP)，
 # 由脚本统一判定，避免"没比对过"被当成"比对一致"。
 if [ -f "$ROOT/scripts/run_c2_align.sh" ]; then
-    if sh "$ROOT/scripts/run_c2_align.sh" > /tmp/c2_align.log 2>&1; then
+    if sh "$ROOT/scripts/run_c2_align.sh" > $TMPD/c2_align.log 2>&1; then
         echo "  [PASS] c2_align"
         passed=$((passed + 1))
     else
         echo "  [FAIL] c2_align"
-        grep -E "FAIL" /tmp/c2_align.log | sed 's/^/         /'
+        grep -E "FAIL" $TMPD/c2_align.log | sed 's/^/         /'
         failed=$((failed + 1))
     fi
 fi
@@ -276,13 +290,13 @@ run_py 12_exploit_pillowcms 12_exploit/tests/test_pillow_cms.py
 # Windows 后端 cam_mf.cpp 的逻辑验证。MinGW 不可得（apt/release 均 403），
 # 改用 SDK shim 在 Linux 下真实编译并用 mock 设备真跑其逻辑。
 echo "=== winshim_mf ==="
-if make -C "$ROOT/agent_windows" winshim > /tmp/winshim.log 2>&1 \
-   && grep -q "19 pass, 0 fail" /tmp/winshim.log; then
+if make -C "$ROOT/agent_windows" winshim > $TMPD/winshim.log 2>&1 \
+   && grep -q "19 pass, 0 fail" $TMPD/winshim.log; then
     echo "  [PASS] winshim_mf (cam_mf 19/19)"
     passed=$((passed + 1))
 else
-    echo "  [FAIL] winshim_mf  (见 /tmp/winshim.log)"
-    tail -15 /tmp/winshim.log
+    echo "  [FAIL] winshim_mf  (见 $TMPD/winshim.log)"
+    tail -15 $TMPD/winshim.log
     failed=$((failed + 1))
 fi
 
@@ -292,13 +306,13 @@ if [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deploy.py ]; then
     echo "=== deploy_4node ==="
     if python3 14_p2p/tools/deploy.py \
         --topology 14_p2p/tools/topo_4node.json \
-        --out /tmp/dep_selftest --run > /tmp/dep_selftest.log 2>&1 \
-        && grep -q "端到端贯通 PASS" /tmp/dep_selftest.log; then
+        --out $TMPD/dep_selftest --run > $TMPD/dep_selftest.log 2>&1 \
+        && grep -q "端到端贯通 PASS" $TMPD/dep_selftest.log; then
         echo "  [PASS] deploy_4node"
         passed=$((passed + 1))
     else
-        echo "  [FAIL] deploy_4node  (见 /tmp/dep_selftest.log)"
-        tail -12 /tmp/dep_selftest.log
+        echo "  [FAIL] deploy_4node  (见 $TMPD/dep_selftest.log)"
+        tail -12 $TMPD/dep_selftest.log
         failed=$((failed + 1))
     fi
 fi
@@ -309,13 +323,13 @@ fi
 if [ "$(id -u)" = "0" ] && command -v ip >/dev/null 2>&1 \
    && ip netns list >/dev/null 2>&1 && [ -f "$ROOT/14_p2p/tools/deploy_crossns.sh" ]; then
     echo "=== deploy_crossns ==="
-    if timeout 300 bash "$ROOT/14_p2p/tools/deploy_crossns.sh" > /tmp/xns_reg.log 2>&1 \
-       && grep -q "端到端贯通 PASS" /tmp/xns_reg.log; then
+    if timeout 300 bash "$ROOT/14_p2p/tools/deploy_crossns.sh" > $TMPD/xns_reg.log 2>&1 \
+       && grep -q "端到端贯通 PASS" $TMPD/xns_reg.log; then
         echo "  [PASS] deploy_crossns (4 独立网络栈贯通)"
         passed=$((passed + 1))
     else
-        echo "  [SKIP] deploy_crossns 未通过（见 /tmp/xns_reg.log）"
-        grep -E "FAIL|Error" /tmp/xns_reg.log | head -5
+        echo "  [SKIP] deploy_crossns 未通过（见 $TMPD/xns_reg.log）"
+        grep -E "FAIL|Error" $TMPD/xns_reg.log | head -5
     fi
 else
     echo "=== deploy_crossns   SKIP(无 root/netns 能力) ==="
@@ -342,13 +356,13 @@ fi
 # 未分类即失败，新增任何一处 memcmp 都会被拦下要求人工判定。
 if [ -f "$ROOT/scripts/check_secret_cmp.py" ]; then
     echo "=== check_secret_cmp（全仓 memcmp 分类守卫） ==="
-    if python3 "$ROOT/scripts/check_secret_cmp.py" > /tmp/seccmp.log 2>&1; then
+    if python3 "$ROOT/scripts/check_secret_cmp.py" > $TMPD/seccmp.log 2>&1; then
         echo "  [PASS] 全仓 memcmp 均已分类且无秘密比较"
-        grep -E "^\[INFO\]|^\[WARN\]" /tmp/seccmp.log | sed 's/^/         /'
+        grep -E "^\[INFO\]|^\[WARN\]" $TMPD/seccmp.log | sed 's/^/         /'
         passed=$((passed + 1))
     else
-        echo "  [FAIL] 秘密比较守卫未通过（见 /tmp/seccmp.log）"
-        sed -n '/\[FAIL\]/,$p' /tmp/seccmp.log | head -40
+        echo "  [FAIL] 秘密比较守卫未通过（见 $TMPD/seccmp.log）"
+        sed -n '/\[FAIL\]/,$p' $TMPD/seccmp.log | head -40
         failed=$((failed + 1))
     fi
 fi
@@ -375,24 +389,24 @@ fi
 for g in gen_ch_struct gen_cke_struct; do
     if [ -f "$ROOT/scripts/$g.py" ]; then
         echo "=== $g --check（结构化变异真值漂移） ==="
-        python3 "$ROOT/scripts/$g.py" --check > /tmp/$g.log 2>&1
+        python3 "$ROOT/scripts/$g.py" --check > $TMPD/$g.log 2>&1
         rc=$?
         if [ $rc -eq 0 ]; then
-            echo "  [PASS] $(grep -E '^\[PASS\]' /tmp/$g.log | sed 's/^\[PASS\] //')"
+            echo "  [PASS] $(grep -E '^\[PASS\]' $TMPD/$g.log | sed 's/^\[PASS\] //')"
             passed=$((passed + 1))
         elif [ $rc -eq 77 ]; then
-            echo "  [SKIP] 未验证：$(grep -E '^\[SKIP\]' /tmp/$g.log | head -1 | sed 's/^\[SKIP\] //')"
+            echo "  [SKIP] 未验证：$(grep -E '^\[SKIP\]' $TMPD/$g.log | head -1 | sed 's/^\[SKIP\] //')"
             skipped=$((skipped + 1))
         elif [ $rc -eq 78 ]; then
             echo "  [SKIP] 探测起不来（退出码 78，端口被占等）—— 未取得真值"
-            grep -E "^\[FATAL\]" /tmp/$g.log | sed 's/^/         [环境] /'
+            grep -E "^\[FATAL\]" $TMPD/$g.log | sed 's/^/         [环境] /'
             skipped=$((skipped + 1))
         else
-            echo "  [FAIL] 真值已漂移或检查失败（见 /tmp/$g.log）"
+            echo "  [FAIL] 真值已漂移或检查失败（见 $TMPD/$g.log）"
             # 区分两种故障：「起不来」（环境/端口问题）与「真值漂移」（真缺陷）。
             # 不区分的话，一次端口冲突会被当成产品缺陷去查。
-            grep -E "^\[FATAL\]" /tmp/$g.log | sed 's/^/         [环境] /'
-            grep -E "^\[FAIL\]|^       " /tmp/$g.log | sed 's/^/         /'
+            grep -E "^\[FATAL\]" $TMPD/$g.log | sed 's/^/         [环境] /'
+            grep -E "^\[FAIL\]|^       " $TMPD/$g.log | sed 's/^/         /'
             failed=$((failed + 1))
         fi
     fi
@@ -408,14 +422,14 @@ done
 # ---------------------------------------------------------------------------
 if [ -f "$ROOT/scripts/check_gen_dedup.py" ]; then
     echo "=== check_gen_dedup（探测基础设施去重） ==="
-    python3 "$ROOT/scripts/check_gen_dedup.py" > /tmp/gen_dedup.log 2>&1
+    python3 "$ROOT/scripts/check_gen_dedup.py" > $TMPD/gen_dedup.log 2>&1
     rc=$?
     if [ $rc -eq 0 ]; then
-        echo "  [PASS] $(grep -E '^\[PASS\]' /tmp/gen_dedup.log | sed 's/^\[PASS\] //')"
+        echo "  [PASS] $(grep -E '^\[PASS\]' $TMPD/gen_dedup.log | sed 's/^\[PASS\] //')"
         passed=$((passed + 1))
     else
         echo "  [FAIL] 探测基础设施出现重复实现"
-        grep -E '^       ' /tmp/gen_dedup.log | sed 's/^/         /'
+        grep -E '^       ' $TMPD/gen_dedup.log | sed 's/^/         /'
         failed=$((failed + 1))
     fi
 fi
@@ -433,14 +447,14 @@ fi
 # ---------------------------------------------------------------------------
 if [ -f "$ROOT/scripts/check_guards.py" ]; then
     echo "=== check_guards（Python 守卫自身双向有效） ==="
-    python3 "$ROOT/scripts/check_guards.py" > /tmp/guards.log 2>&1
+    python3 "$ROOT/scripts/check_guards.py" > $TMPD/guards.log 2>&1
     rc=$?
     if [ $rc -eq 0 ]; then
-        echo "  [PASS] $(grep -E '^\[PASS\]' /tmp/guards.log | sed 's/^\[PASS\] //')"
+        echo "  [PASS] $(grep -E '^\[PASS\]' $TMPD/guards.log | sed 's/^\[PASS\] //')"
         passed=$((passed + 1))
     else
         echo "  [FAIL] Python 侧守卫自身失效（恒绿或恒红）"
-        grep -E '^       |^\[FATAL\]' /tmp/guards.log | sed 's/^/         /'
+        grep -E '^       |^\[FATAL\]' $TMPD/guards.log | sed 's/^/         /'
         failed=$((failed + 1))
     fi
 fi
@@ -489,14 +503,14 @@ fi
 # 归为 failed 而非 warn：这里一旦失守，前面所有 pass 数都不可信。
 if [ -f "$ROOT/scripts/audit_makefile_tests.py" ]; then
     echo "=== audit_makefile_tests（构建契约） ==="
-    if python3 "$ROOT/scripts/audit_makefile_tests.py" > /tmp/mkaudit.log 2>&1; then
+    if python3 "$ROOT/scripts/audit_makefile_tests.py" > $TMPD/mkaudit.log 2>&1; then
         echo "  [PASS] 各模块测试二进制均由回归调用的目标构建"
-        grep -E "^\[WARN\]" /tmp/mkaudit.log | sed 's/^/         /'
+        grep -E "^\[WARN\]" $TMPD/mkaudit.log | sed 's/^/         /'
         passed=$((passed + 1))
     else
         echo "  [FAIL] 构建契约被破坏：有测试二进制不由 make 产出，"
-        echo "         build/ 中可能正被执行陈旧产物（见 /tmp/mkaudit.log）"
-        grep -E "^\[MISS\]|^\[ERR \]" /tmp/mkaudit.log | sed 's/^/         /'
+        echo "         build/ 中可能正被执行陈旧产物（见 $TMPD/mkaudit.log）"
+        grep -E "^\[MISS\]|^\[ERR \]" $TMPD/mkaudit.log | sed 's/^/         /'
         failed=$((failed + 1))
     fi
 fi
@@ -510,17 +524,17 @@ if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
         *)        MUT_ARGS="" ;;
     esac
     if timeout 1200 python3 "$ROOT/scripts/mutation_audit.py" $MUT_ARGS \
-        > /tmp/mut.log 2>&1; then
+        > $TMPD/mut.log 2>&1; then
         echo "  [PASS] mutation_audit ($MUT_MODE)"
         # 必须带上"已知盲区"两栏：它们是 SURVIVED 但审计不失败的项，
         # 若只 grep 前三项，回归报告会完全看不见"哪些缺陷测不了"，
         # 等于把盲区单列出来的努力白费掉。
         grep -E "^捕获|^存活|^审计失效|^符合预期|^已知盲区|^\[!\]|^    M[0-9]" \
-            /tmp/mut.log | sed 's/^/         /'
+            $TMPD/mut.log | sed 's/^/         /'
         passed=$((passed + 1))
     else
-        echo "  [FAIL] mutation_audit ($MUT_MODE)  (见 /tmp/mut.log)"
-        sed -n '/=== 变异审计结果 ===/,$p' /tmp/mut.log
+        echo "  [FAIL] mutation_audit ($MUT_MODE)  (见 $TMPD/mut.log)"
+        sed -n '/=== 变异审计结果 ===/,$p' $TMPD/mut.log
         failed=$((failed + 1))
     fi
 fi
@@ -536,13 +550,13 @@ if [ -f "$ROOT/scripts/check_realroot_pollution.py" ]; then
         failed=$((failed + 1))
     fi
     if python3 "$ROOT/scripts/check_realroot_pollution.py" --selftest \
-        > /tmp/rrguard.log 2>&1; then
+        > $TMPD/rrguard.log 2>&1; then
         echo "  [PASS] 污染守卫正向对照（种下必检出、清除必归零）"
-        grep -E "^  \[OK\]" /tmp/rrguard.log | sed 's/^/         /'
+        grep -E "^  \[OK\]" $TMPD/rrguard.log | sed 's/^/         /'
         passed=$((passed + 1))
     else
         echo "  [FAIL] 污染守卫本身失效（恒绿或自检留污染）"
-        cat /tmp/rrguard.log | sed 's/^/         /'
+        cat $TMPD/rrguard.log | sed 's/^/         /'
         failed=$((failed + 1))
     fi
 fi
