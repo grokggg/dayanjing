@@ -213,7 +213,12 @@ def main():
     os.makedirs("/var/spool/cron", exist_ok=True)
 
     # ---- 3. 起真 crond ----
-    logf = "/tmp/r3_crond.log"
+    # 【判据修正 —— /tmp 会被环境清理，日志落盘即 S3 恒红、R2 恒绿】
+    # 此前 logf 写在 /tmp/r3_crond.log。环境（502 事件）会清空 /tmp，
+    # 于是 CMD 日志行随文件一起消失：S3 报「无」而 R2「无」也通过——
+    # R2 因此退化成恒绿假通过。日志必须写在持久目录。
+    os.makedirs("/data/workspace/runlog", exist_ok=True)
+    logf = "/data/workspace/runlog/r3_crond.log"
     fl = open(logf, "wb")
     pd = subprocess.Popen([crond, "-n", "-x", "sch,proc,pars,load"],
                           stdout=fl, stderr=subprocess.STDOUT,
@@ -298,25 +303,44 @@ def main():
     rec(bool(cmd_lines), "S3 crond 日志记录了该命令",
         cmd_lines[-1].strip() if cmd_lines else "无")
 
+    # 日志通道必须可用，否则 R2（反向「无日志行」）会退化成恒绿假通过
+    log_ok = "cron started" in cl
+    rec(log_ok, "S3b crond 日志通道可用（否则 R2 反向判据无效）",
+        "cron started 行存在" if log_ok else "日志为空，判据不可用")
+
     # ---- 6. 反向：退回缺陷写法（去掉 user 字段）----
     note("反向注入：去掉 user 字段（真 cron.d 契约违反）")
     broken = body.replace(" root ", " ", 1)
     open(CRON, "w").write(broken)
     os.chmod(CRON, 0o600)
-    os.remove(logf)
-    open(logf, "w").close()
+    # 【判据修正 —— 删文件重建会让 crond 继续写已删除 inode，新文件恒空 → R2 恒绿】
+    # crond 持有的是原 fd；os.remove + 重建同名文件不会改变它的写入目标。
+    # 因此反向阶段必须按「字节偏移量截取增量」，而不是靠清空文件隔离。
+    pos2 = os.path.getsize(logf)
     base2 = sink.bytes
     w2 = seconds_until_minute(M)
     time.sleep(min(w2 + 20, 120))
     rec(sink.bytes == base2, "R1 缺陷条目：C2 不再新增字节",
         "%d -> %d" % (base2, sink.bytes))
-    cl2 = open(logf, "r", errors="replace").read()
+    with open(logf, "r", errors="replace") as fh:
+        fh.seek(pos2)
+        cl2 = fh.read()
     ran = [l for l in cl2.splitlines() if "CMD (" in l and "run.sh" in l]
-    rec(not ran, "R2 缺陷条目：crond 日志不再出现该命令",
-        ran[-1].strip() if ran else "无")
+    if not log_ok:
+        rec(False, "R2 缺陷条目：crond 日志不再出现该命令",
+            "日志通道不可用，无法判定（不得记为通过）")
+    elif len(cl2.strip()) == 0:
+        rec(False, "R2 缺陷条目：crond 日志不再出现该命令",
+            "日志增量为 0 字节，未采集到数据（不得记为通过）")
+    else:
+        rec(not ran, "R2 缺陷条目：crond 日志不再出现该命令",
+            ran[-1].strip() if ran else "无（增量 %d 字节内无 CMD 行）" % len(cl2))
 
     # ---- 7. 清理 ----
-    sh("sh %s uninstall" % ok_sh)
+    rc_u, out_u = sh("sh %s uninstall" % ok_sh)
+    note("uninstall rc=%d" % rc_u)
+    for ln in out_u.splitlines():
+        note("  | " + ln)
     left = [p for p in ("/etc/%s" % NAME, "/usr/local/bin/%s" % NAME,
                         "/var/lib/%s" % NAME, CRON,
                         "/etc/systemd/system/%s.service" % NAME,

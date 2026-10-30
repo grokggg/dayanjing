@@ -3,8 +3,8 @@
 [OK] S0a 真 cron（cronie）构建成功  CROND=/var/tmp/cronsrc/crond
 [OK] S0b 版本可查  cronie 1.7.2
 [OK] S1a 一键脚本已生成  1989691 字节
-[OK] S0c crond 以守护进程方式存活  pid=1611
-[OK] S2a C2 收端已起  port=35999
+[OK] S0c crond 以守护进程方式存活  pid=1700
+[OK] S2a C2 收端已起  port=39805
     ---- install 输出（第 1 次） ----
     [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
     [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1425976 字节）
@@ -13,13 +13,13 @@
     [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
     [OK] systemd 单元静态校验通过
     [WARN] systemd 未运行，单元已校验但未安装（降级到 cron）
-    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 55）
+    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 31）
     [OK] cron 守护进程在跑（条目会被执行）
-    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:35999）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:39805）
     [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
     [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
     计数: 成功 9  失败 0  警告 2
-    ---- 条目分位 M=55，距下次触发 3305 秒 ----
+    ---- 条目分位 M=31，距下次触发 3389 秒 ----
     ---- install 输出（第 2 次） ----
     [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
     [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1425976 字节）
@@ -28,40 +28,35 @@
     [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
     [OK] systemd 单元静态校验通过
     [WARN] systemd 未运行，单元已校验但未安装（降级到 cron）
-    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 0）
+    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 35）
     [OK] cron 守护进程在跑（条目会被执行）
-    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:35999）
+    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:39805）
     [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
     [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
     计数: 成功 9  失败 0  警告 2
-    ---- 条目分位 M=0，距下次触发 3600 秒 ----
-    ---- install 输出（第 3 次） ----
-    [OK] 环境: arch=x86_64 systemd=0 backend=v4l2 front=无
-    [OK] 内嵌产物校验通过（ELF/amd64，e_machine=62，1425976 字节）
-    [OK] 配置写入 /etc/sysupdate/sysupdate.conf（0600）
-    [OK] 二进制已安装 /usr/local/bin/sysupdate
-    [OK] 启动器已写入 /var/lib/sysupdate/run.sh（0700）
-    [OK] systemd 单元静态校验通过
-    [WARN] systemd 未运行，单元已校验但未安装（降级到 cron）
-    [OK] cron 条目已写入 /etc/cron.d/sysupdate（分位 1）
-    [OK] cron 守护进程在跑（条目会被执行）
-    [OK] 试运行已送达 C2（204288 字节信元，tcp://127.0.0.1:35999）
-    [INFO] 驻留三段: systemd=1 cron=1 sshkey=0（生效 2/3）
-    [WARN] 驻留仅 2/3 段生效——报告成功不等于三段都在，逐段核对见 status
-    计数: 成功 9  失败 0  警告 2
-    ---- 条目分位 M=1，距下次触发 59 秒 ----
+    ---- 条目分位 M=35，距下次触发 25 秒 ----
 [OK] S1c install 退出 0  rc=0
-[OK] S1d 条目含 user 字段与 run.sh  # managed | SHELL=/bin/sh | PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin | 1 * * * * root /var/lib/sysupdate/run.sh --batches 1
-    ---- 触发前 C2 基线 612864 字节（install 试运行已计入） ----
-[OK] S2 真实分钟触发后 C2 新增字节  612864 -> 817152（+204288）连接数=4
-[FAIL] S3 crond 日志记录了该命令  无
+[OK] S1d 条目含 user 字段与 run.sh  # managed | SHELL=/bin/sh | PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin | 35 * * * * root /var/lib/sysupdate/run.sh --batches 1
+    ---- 触发前 C2 基线 408576 字节（install 试运行已计入） ----
+[OK] S2 真实分钟触发后 C2 新增字节  408576 -> 612864（+204288）连接数=3
+[OK] S3 crond 日志记录了该命令  loalog_it: (root 1873) CMD (/var/lib/sysupdate/run.sh --batches 1)
+[OK] S3b crond 日志通道可用（否则 R2 反向判据无效）  cron started 行存在
     ---- 反向注入：去掉 user 字段（真 cron.d 契约违反） ----
-[OK] R1 缺陷条目：C2 不再新增字节  817152 -> 817152
-[OK] R2 缺陷条目：crond 日志不再出现该命令  无
-[FAIL] C1 卸载后真根无残留  /etc/sysupdate,/usr/local/bin/sysupdate,/var/lib/sysupdate,/
-证据: /data/workspace/dayanjing/redline/evidence/R3.evidence
-PASS=10 FAIL=2
-IL 2
+[OK] R1 缺陷条目：C2 不再新增字节  612864 -> 612864
+[OK] R2 缺陷条目：crond 日志不再出现该命令  无（增量 4206 字节内无 CMD 行）
+    ---- uninstall rc=0 ----
+    ----   | [OK] systemd 不可用，跳过 systemctl（单元文件仍会删除） ----
+    ----   | [OK] 文件与二进制已清理 ----
+    ----   | [OK] 进程已清理 ----
+    ----   | 计数: 成功 3  失败 0  警告 0 ----
+[OK] C1 卸载后真根无残留  无
+
+计数: PASS 13  FAIL 0
 SRC 21_exfil/onekey.sh a8bdd272b6159d30b928cf956d487f526a6d4cee398b4ef3e630f92793035983 63357
-SRC redline/verify_r3_cron.py e54bd6b20c63904b144fd032a5c84b3881d46ad39ed0704f723ad5df90826fce 13457
+SRC redline/verify_r3_cron.py fbaef5f021993ce8d44549f3090d6dd8d28273f2c696fb506bc9315829279f26 15065
+SRC scripts/build_cronie.sh b8ce662bfb1f52336b178de1f7fe46880c9dae5dd0c6acea5992e5224b20dc72 3877
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC 21_exfil/onekey.sh a8bdd272b6159d30b928cf956d487f526a6d4cee398b4ef3e630f92793035983 63357
+SRC redline/verify_r3_cron.py fbaef5f021993ce8d44549f3090d6dd8d28273f2c696fb506bc9315829279f26 15065
 SRC scripts/build_cronie.sh b8ce662bfb1f52336b178de1f7fe46880c9dae5dd0c6acea5992e5224b20dc72 3877
