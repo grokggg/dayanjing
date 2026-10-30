@@ -205,9 +205,16 @@ def main():
 
     # ---- 反向：退回旧写法，F 组必须变红 ----
     src = open(run_sh).read()
-    if 'exec "$BIN_ABS" "$@"' in src:
-        mut = src.replace('exec "$BIN_ABS" "$@"',
-                          'exec "$BIN_ABS" --sink "$CAMD_SINK" "$@"')
+    # 按 exec 行整体匹配，而不是死记整行字面量：run.sh 后来加了 $ROOTARG
+    # （假根隔离，与试运行同源），整行变了，按字面量匹配的注入点会找不到，
+    # R1 随即退化成"永远不注入、也不报错"的恒绿反向。
+    # 注入必须保留原有的 $ROOTARG，否则反向用例自己会把驻留写回真实根。
+    m_exec = re.search(r'^exec "\$BIN_ABS".*$', src, re.M)
+    if m_exec:
+        line = m_exec.group(0)
+        newline = line.replace('exec "$BIN_ABS"',
+                               'exec "$BIN_ABS" --sink "$CAMD_SINK"', 1)
+        mut = src.replace(line, newline, 1)
         open(run_sh, "w").write(mut)
         base2 = c2.total
         p2 = subprocess.Popen(["sh", run_sh], stdout=subprocess.DEVNULL,

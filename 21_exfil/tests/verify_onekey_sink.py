@@ -12,6 +12,7 @@ R1 的存在意义：若没有它，仅凭"C2 收到字节"这个正向断言，
 """
 import re
 import os, re, socket, subprocess, sys, time, threading, hashlib, glob
+import tempfile, atexit, shutil
 
 
 def _default_name(tpl):
@@ -94,10 +95,17 @@ def clear_strays(port):
 
 
 def main():
-    if not os.path.exists(CAMD):
-        shutil_ok = run(f"cp {CAMD_SRC} {CAMD} && chmod 755 {CAMD}")
-        if shutil_ok[0] != 0:
-            print("[FATAL] camd 不可用"); sys.exit(2)
+    # camd 直接跑会做驻留。此前既未设 CAMD_SVC_NAME 也未给 --root，
+    # 服务名回退项目名，驻留便写进真实 /etc —— 实测留下
+    # /etc/systemd/system/dayanjing.service 与 /etc/cron.d/dayanjing。
+    # 后果不是"多几个文件"：后续 verify-autoroot 以"真实根干净"为基线，
+    # 被这条污染后 F6/F10/R1-e/R2-d 全红，make test 整条挂掉，
+    # 而排查方向会被指向 autoroot 而非真正的污染源。
+    # 本守卫只关心 sink 单一产地，驻留不是它的关注点 —— 用假根隔离。
+    if not os.path.exists(CAMD_SRC):
+        print("[FATAL] camd 产物不存在: %s" % CAMD_SRC); sys.exit(2)
+    work = tempfile.mkdtemp(prefix="oksink_")
+    atexit.register(lambda: shutil.rmtree(work, ignore_errors=True))
 
     key = hashlib.sha256(os.urandom(32)).hexdigest()[:64]
     cwd = "/data/workspace"
@@ -108,7 +116,8 @@ def main():
     time.sleep(0.5)
     reset()
     clear_strays(port)
-    rc, out, _ = run(f"cd {cwd} && {CAMD} --sink tcp://127.0.0.1:{port} "
+    rc, out, _ = run(f"cd {cwd} && {CAMD_SRC} --root {work} "
+                     f"--sink tcp://127.0.0.1:{port} "
                      f"--backend mock --key {key} --batches 1 --frames 1 2>&1")
     time.sleep(1.0)
     magic = b"\xff\xd8\xff"
@@ -122,7 +131,8 @@ def main():
     port2 = free_port()   # 故意不监听
     reset()
     clear_strays(port2)
-    rc2, out2, _ = run(f"cd {cwd} && {CAMD} --sink 127.0.0.1:{port2} "
+    rc2, out2, _ = run(f"cd {cwd} && {CAMD_SRC} --root {work} "
+                       f"--sink 127.0.0.1:{port2} "
                        f"--backend mock --key {key} --batches 1 --frames 1 2>&1")
     time.sleep(0.5)
     stray = [p for p in (f"{cwd}/127.0.0.1:{port2}", f"/tmp/127.0.0.1:{port2}")

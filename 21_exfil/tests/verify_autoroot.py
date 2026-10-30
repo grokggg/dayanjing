@@ -105,7 +105,10 @@ def main():
     chk(os.path.isfile(conf), "F4 假根内配置文件已写入", conf)
     chk(os.path.isfile(bind), "F5 假根内二进制已安装", bind)
     grc, gout = guard_rc()
-    chk(grc == 0, "F6 真实根未被污染（守卫 rc=0）", "guard_rc=%d" % grc)
+    # 只打印 rc 时，"守卫报警了"和"守卫为什么报警"是两件事，排查者只看到
+    # rc=1，方向被指向 autoroot 自己——而它多半不是污染源。失败必带落点。
+    chk(grc == 0, "F6 真实根未被污染（守卫 rc=0）",
+        "guard_rc=%d" % grc if grc == 0 else "guard_rc=%d\n%s" % (grc, gout))
     chk(c2.total > 0, "F7 功能未受损：C2 实收字节 > 0", "total=%d conns=%d" % (c2.total, c2.conns))
 
     # 卸载：同一标记下应派生同一 PREFIX，能清掉
@@ -113,8 +116,9 @@ def main():
     chk(r.returncode == 0, "F8 uninstall rc=0", "rc=%d" % r.returncode)
     chk(not os.path.exists(conf) and not os.path.exists(bind),
         "F9 卸载后假根内落点已清", "%s / %s" % (conf, bind))
-    grc, _ = guard_rc()
-    chk(grc == 0, "F10 卸载后真实根仍干净（守卫 rc=0）", "guard_rc=%d" % grc)
+    grc, gout = guard_rc()
+    chk(grc == 0, "F10 卸载后真实根仍干净（守卫 rc=0）",
+        "guard_rc=%d" % grc if grc == 0 else "guard_rc=%d\n%s" % (grc, gout))
 
     # ================= 反向 R1：无回归标记 → 必须写真根 ======================
     print("=== 反向 R1：root 且无 DAYNANJING_REGRESSION（生产路径）===")

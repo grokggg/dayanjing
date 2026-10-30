@@ -532,6 +532,18 @@ install_runner() {
     # heredoc 用**无引号** RUNEOF（要展开 $PREFIX），因此运行期变量一律
     # 写成 \$ 转义。漏转义的后果是 conf 值在生成期就被展开成空——run.sh
     # 里留下 `--sink ""`，服务起不来而 conf 内容看起来是对的。
+    # 【run.sh 必须与试运行同源传 --root】
+    # 此前 run.sh 只 exec "$BIN_ABS" "$@"，不带 --root；而上方试运行在假根
+    # 模式下是 --root "$PREFIX"。两处不同源，后果不是"路径略有偏差"：
+    # 回归里直接跑 run.sh（如 verify-cmdline-stealth 读运行期 cmdline）时，
+    # camd 的驻留落回真实根，实测留下 /etc/systemd/system/sysupdate.service，
+    # 污染后续以"真实根干净"为基线的守卫，而该守卫自身 EXIT=0 完全不报警。
+    # 真机模式 PREFIX 为空 → 不传 --root（NULL = 真实根），行为不变。
+    if [ -n "$PREFIX" ]; then
+        ROOTARG="--root \"$PREFIX\""
+    else
+        ROOTARG=""
+    fi
     cat > "$LIB_DIR/run.sh" <<RUNEOF || DIE "写 run.sh 失败"
 #!/bin/sh
 # 由 onekey.sh 生成。密钥经环境注入，不出现在命令行（ps 可见）。
@@ -557,7 +569,7 @@ set +a
 # `set -a` 导出，camd 从 /proc/<pid>/environ（0400，仅同用户/root）读取。
 # \$CAMD_EXTRA 已废弃：多词拼接会被 conf 解析成"临时环境变量+命令"，改成分
 # 立标量 CAMD_FRONT_HOST / CAMD_CA 后此形态不复存在。
-exec "\$BIN_ABS" "\$@"
+exec "\$BIN_ABS" $ROOTARG "\$@"
 RUNEOF
     chmod 0700 "$LIB_DIR/run.sh" 2>/dev/null
     OK "启动器已写入 $LIB_DIR/run.sh（0700）"

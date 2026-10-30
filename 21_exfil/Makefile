@@ -338,7 +338,14 @@ verify-unit-contract-reverse:
 verify-persist-selfheal:
 	@python3 tests/verify_persist_selfheal.py
 
-verify-redline:
+# 跨架构依赖（ziglang + qiling）会被沙盒不定期清理——已发生三次。缺失时
+# R4/R4b 判 STALE 并 ALARM，整条 make test 变红。放宽判据等于承认"凭无法
+# 复现的旧证据声称已验证"，所以正确的是把恢复做成回归的前置步骤。
+# 依赖齐备时它只做两次 import，开销可忽略。
+ensure-cross-env:
+	@sh ../scripts/ensure_cross_env.sh 2>&1 | grep -vE "^WARNING:" || true
+
+verify-redline: ensure-cross-env
 	@python3 ../redline/redline_check.py
 
 verify-redline-guard:
@@ -388,5 +395,5 @@ inspect: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean inspect verify-persist-selfheal verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-cross-exec
+.PHONY: all test clean inspect verify-persist-selfheal ensure-cross-env verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-cross-exec
 
