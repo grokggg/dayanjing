@@ -140,6 +140,13 @@ cam_source_t *cam_source_create_mock(void)
     m->seq                  = 0;
     m->frame_buf            = NULL;
     m->frame_cap            = 0;
+    /* 合成源必须显式声明自己是降级的。
+     *
+     * degrade 字段默认 0（NONE = 真设备），而 mock 一帧都不来自设备。沿用
+     * 默认值会让 --probe 与 status 对合成源报出"设备画面（真）"——一个假的
+     * "真"。这正是该字段最危险的读法：没写就等于声称是真的。合成源是测试
+     * 后端，但 status 那行是给人看的，报错方向比不报更糟。 */
+    m->api.degrade          = CAM_DEGRADE_NO_DEVICE;
     return &m->api;
 }
 

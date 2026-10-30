@@ -134,6 +134,26 @@ implant_err_t implant_run(implant_t *im);
 /* 请求停止：当前步结束后退出，不产生半批数据 */
 void implant_stop(implant_t *im);
 
+/* 设备降级探测：打开一次设备后立即关闭，不采集、不回传。
+ *
+ * 返回 cam_degrade_t（0=NONE 真设备 / 1=NO_DEVICE / 2=DEVICE_BUSY）。
+ * 负值表示探测本身失败（如 src 未就绪）。
+ *
+ * 为什么必须真的 open 一次：DEVICE_BUSY 的定义就是"设备存在但打不开"，
+ * 不尝试打开就无法与 NO_DEVICE 区分——而这两者的处置完全不同：
+ * 前者是"机器有摄像头，正被别的程序占用"，后者是"这台机器没有摄像头"。
+ * 只做 stat 扫描或 QUERYCAP 探测，两种处境会得到同一个答案。
+ *
+ * 代价与它的必要性：设备空闲可打开时（NONE），这次 open 会让摄像头被短暂
+ * 持有，部分机型指示灯会亮一下。这是有意为之——运维问的是"这台机器能不能
+ * 采到真人画面"，不接受一次瞬时 open 就得不到确定答案。被占用时（BUSY）
+ * try_open 在 REQBUFS/STREAMON 之前就失败，不会与占用者争流。 */
+int implant_probe_degrade(implant_t *im);
+
+/* 查询最近一次 open 的降级状态，不重新打开设备。
+ * 供运行中的驻留进程在自检时上报：此时设备已 open 过，读字段即可。 */
+int implant_degrade(const implant_t *im);
+
 const implant_stats_t *implant_stats(const implant_t *im);
 implant_state_t        implant_cur_state(const implant_t *im);
 const char            *implant_errstr(implant_err_t e);

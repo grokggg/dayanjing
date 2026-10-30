@@ -1126,6 +1126,31 @@ do_status() {
     printf 'systemd 单元: %s\n' "$([ -f "$UNIT" ] && echo 存在 || echo 缺失)"
     printf 'cron 条目: %s\n' "$([ -f "$CRON" ] && echo 存在 || echo 缺失)"
     printf '运行进程: %s\n' "$(ps -eo comm= 2>/dev/null | grep -c -x "$NAME")"
+
+    # 设备画面：回答"这台机器现在收到的是不是真人画面"。
+    #
+    # 为什么必须有这一行：上面每一项都绿（文件在、进程在、驻留在），仍然可能
+    # 收的全是假画面——摄像头被视频会议占用时，后端会静默切到内置合成源，
+    # open 与格式协商照过、JPEG 照产、C2 照收，全程零报错。它和"这台机器没
+    # 摄像头"在 status 里长得一模一样，唯独 --probe 能把两者分开：
+    #   0 设备画面  1 无采集设备  2 有设备但打不开（被占用）
+    #
+    # 代价说明：探测要真的打开一次设备（不这样做就无法区分"打不开"与"没有"），
+    # 设备空闲时部分机型指示灯会亮一下。这是有意的——不接受一次瞬时打开，就
+    # 得不到确定答案。被占用时不会与占用者争流（在 STREAMON 之前就失败）。
+    if [ -x "$BIN_DST" ]; then
+        _bk=$(sed -n 's/^CAMD_BACKEND=//p' "$CONF_FILE" 2>/dev/null | head -1)
+        [ -n "$_bk" ] || _bk="v4l2"
+        _pr=$("$BIN_DST" --probe --backend "$_bk" 2>/dev/null)
+        _dg=$(printf '%s\n' "$_pr" | sed -n 's/^DEGRADE=//p' | head -1)
+        case "$_dg" in
+            0) _dt="设备画面（真）" ;;
+            1) _dt="无采集设备，运行在内置合成源上（画面非设备）" ;;
+            2) _dt="设备存在但打不开（多因被占用），当前为合成源（画面非设备）" ;;
+            *) _dt="未知（探测未执行）" ;;
+        esac
+        printf '设备画面: %s\n' "$_dt"
+    fi
     return 0
 }
 

@@ -395,6 +395,35 @@ implant_err_t implant_step(implant_t *im)
     }
 }
 
+int implant_probe_degrade(implant_t *im)
+{
+    if (!im || !im->src) return -1;
+
+    /* 已 open 过就直接读，不重复打开（避免二次持有设备） */
+    if (!im->opened) {
+        if (!im->src->open) return -1;
+        if (im->src->open(im->src, &im->cfg.cam) != CAM_OK) {
+            /* open 整体失败：设备一个都打不开。此时后端未必写了 degrade
+             * 字段（不同后端失败路径不同），回落到查询值，让调用方至少
+             * 拿得到 NO_DEVICE / BUSY 的区分。 */
+            return cam_source_degrade(im->src);
+        }
+        im->opened = 1;
+    }
+
+    int d = cam_source_degrade(im->src);
+
+    /* 立即关闭：探测不采集、不回传，也不该让设备被长期持有 */
+    if (im->src->close) { im->src->close(im->src); im->opened = 0; }
+    return d;
+}
+
+int implant_degrade(const implant_t *im)
+{
+    if (!im || !im->src) return -1;
+    return cam_source_degrade(im->src);
+}
+
 implant_err_t implant_run(implant_t *im)
 {
     if (!im) return IMPLANT_ERR_PARAM;

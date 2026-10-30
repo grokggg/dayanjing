@@ -18,3 +18,6 @@ artifacts/
 # 一键部署生成物（含 base64 内嵌二进制，由 make_onekey.py 现场生成）
 21_exfil/onekey-*.sh
 21_exfil/*_onekey*.sh
+
+# V4L2 模拟器：由 tests/v4l2sim_shim.c 现编，不入库
+**/v4l2sim_shim.so

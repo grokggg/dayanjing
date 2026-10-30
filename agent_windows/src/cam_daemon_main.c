@@ -91,7 +91,11 @@ static void usage(const char *argv0)
         "  --jitter-ms N       抖动上限（固定间隔会在断线重连时形成同步爆发）\n"
         "  --batches N         批次数，0 = 不限（由停止信号终止）\n"
         "\n"
-        "  --pfx HEX16         nonce 前缀 8 字节。缺省由主密钥派生（确定性）\n",
+        "  --pfx HEX16         nonce 前缀 8 字节。缺省由主密钥派生（确定性）\n"
+        "\n"
+        "  --probe [--backend B]  只探测设备：输出当前能不能采到真人画面，\n"
+        "                         不采集、不回传、不驻留。DEGRADE=0 真设备 /\n"
+        "                         1 无采集设备 / 2 有设备但打不开（被占用）\n",
         argv0);
 }
 
@@ -118,8 +122,68 @@ static int parse_hex(const char *s, uint8_t *out, size_t nbytes)
     return 0;
 }
 
+/* 设备降级探测：只回答"这台机器现在能不能采到真人画面"。
+ *
+ * 不采集、不回传、不驻留、不写任何文件——它唯一做的事是把设备打开一次再
+ * 关掉，据此区分三种处境：
+ *   0 NONE        真设备，像素来自摄像头
+ *   1 NO_DEVICE   没有任何采集设备（无摄像头的机器本就该走合成帧）
+ *   2 DEVICE_BUSY 有采集设备但打不开（最常见：摄像头正被视频会议占用）
+ *
+ * 为什么需要它：上面第 2 种在真机上是高频场景，而它与"没装摄像头"在
+ * 部署报告里长得完全一样——都有合法 JPEG、都零报错、都 rc=0。运维看到
+ * "一切正常"，收到的却一直是棋盘格。这条命令让"画面是假的"可以被问出来。
+ *
+ * 输出给机器读（KEY=VALUE），不写人话，便于 status 直接解析。 */
+static int run_probe(const char *backend)
+{
+    if (!backend || !*backend) backend = "v4l2";
+
+    implant_cfg_t ic;
+    memset(&ic, 0, sizeof ic);
+    ic.cam.width  = 640;
+    ic.cam.height = 480;
+    ic.frames_per_batch = 1;
+    ic.jpeg_quality = 75;
+
+    implant_t *im = implant_create(&ic, backend);
+    if (!im) {
+        fprintf(stderr, "[FATAL] 无法创建采集源（backend=%s）\n", backend);
+        return 2;
+    }
+
+    int d = implant_probe_degrade(im);
+    implant_destroy(im);
+
+    if (d < 0) {
+        fprintf(stderr, "[FATAL] 设备探测失败（backend=%s）\n", backend);
+        return 2;
+    }
+
+    const char *nm = (d == 0) ? "NONE" : (d == 1) ? "NO_DEVICE" : "DEVICE_BUSY";
+    printf("BACKEND=%s\n", backend);
+    printf("DEGRADE=%d\n", d);
+    printf("DEGRADE_NAME=%s\n", nm);
+    /* REAL_FRAME 是运维真正要问的那句话，单独给一行，避免让人去背枚举值 */
+    printf("REAL_FRAME=%s\n", (d == 0) ? "yes" : "no");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    /* --probe 在参数解析主循环之前处理：它不需要 sink/key/驻留，走主循环
+     * 会被"必须指定 --sink""必须指定 --key"之类的前置校验挡下来，而探测
+     * 恰恰要在"还没部署"的时候用——那时没有 conf、也没有密钥。 */
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--probe")) {
+            const char *backend = NULL;
+            for (int j = 1; j + 1 < argc; j++)
+                if (!strcmp(argv[j], "--backend")) backend = argv[j + 1];
+            if (!backend || !*backend) backend = getenv("CAMD_BACKEND");
+            return run_probe(backend);
+        }
+    }
+
     cam_daemon_cfg_t cfg;
     memset(&cfg, 0, sizeof cfg);
 

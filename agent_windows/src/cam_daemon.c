@@ -768,12 +768,50 @@ typedef struct {
     int  base[CAM_DAEMON_PERSIST_N];   /* 启动时各段是否装上，作为自检基线 */
     int  user_mode;                    /* 1=驻留回退到了用户级，自检须走
                                         * persist_user_ensure，不能查 /etc */
+    int  last_degrade;                 /* 上次上报的降级态，-1 = 尚未上报 */
+    const implant_t *im;               /* 读降级态用，不持有所有权 */
 } cd_audit_ctx_t;
+
+/* 上报采集降级态。
+ *
+ * 为什么必须说出口：DEVICE_BUSY（摄像头被视频会议占用）时后端会静默切合成
+ * 帧而整体仍返回成功——驻留进程自己知道画面是假的，却什么都不说。运维在
+ * C2 侧看到的是"有合法 JPEG、零报错、持续送达"，与真人画面完全无法区分。
+ *
+ * 为什么只在变化时输出：常驻进程每批都打印会把 journal 刷满，而刷屏本身
+ * 也是一种暴露。状态从"真设备"翻成"被占用"、或反过来，才是运维需要知道
+ * 的时刻。首次自检必然触发一次（last_degrade 初值 -1），因此"这台机器装
+ * 上后就一直是假画面"这条信息在 journal 里一定留得下来。
+ *
+ * 措辞刻意中性：不出现采集/摄像头等语义词——stderr 会进 journal，而 journal
+ * 是运维与审计都能读的。 */
+static void cd_report_degrade(cd_audit_ctx_t *c)
+{
+    if (!c || !c->im) return;
+    int d = implant_degrade(c->im);
+    if (d < 0) return;
+    if (d == c->last_degrade) return;
+
+    c->last_degrade = d;
+    if (d == 0) {
+        fprintf(stderr, "[INFO] 采集源已恢复到设备输入\n");
+    } else if (d == 1) {
+        fprintf(stderr, "[INFO] 采集源未发现输入设备，运行在内置合成源上\n");
+    } else {
+        fprintf(stderr,
+                "[WARN] 采集源存在输入设备但无法打开（多因被其它进程占用），"
+                "当前输出非设备画面\n");
+    }
+}
 
 static int cd_persist_audit(uint32_t batch_no, void *ud)
 {
     cd_audit_ctx_t *c = (cd_audit_ctx_t *)ud;
     if (!c || !c->cfg || !c->st) return -1;
+
+    /* 采集降级上报放在自检最前面：即便下面的驻留自检因故提前 return，
+     * "画面是不是真的"也已经说出口了。驻留可以补装，假画面补不回来。 */
+    cd_report_degrade(c);
 
     uint32_t n = c->cfg->persist_recheck_batches;
     if (n == 0) return 0;
@@ -1016,7 +1054,19 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
      * 时不该被算成缺段，否则每 N 批都会触发一次含覆盖写落盘的 ensure。 */
     cd_audit_ctx_t actx;
     memset(&actx, 0, sizeof actx);
-    if (cfg->ensure_persist && cfg->persist_recheck_batches) {
+    /* -1 而非 0：0 是合法的"真设备"态。若初值取 0，则常驻进程首次自检时
+     * 恰好跑在合成源上会因为"与上次相同"而永远不上报——那正是最需要报的
+     * 一种情况（装上后一直是假画面）。 */
+    actx.last_degrade = -1;
+    actx.im = im;
+    /* 安装条件只取 ensure_persist，不再要求 persist_recheck_batches 非 0。
+     *
+     * 两者是独立关注点：persist_recheck_batches=0 表示"不做驻留周期性补装"，
+     * 不代表"不在乎画面是不是真的"。若把它一并作为安装条件，用户一旦关掉
+     * 驻留自检，采集降级态就再也不会上报——而那恰恰是常驻进程唯一会说出
+     * "当前是假画面"的地方。cd_persist_audit 内部会在 n==0 时跳过驻留部分，
+     * 只做降级上报。 */
+    if (cfg->ensure_persist) {
         actx.cfg = cfg;
         actx.st  = &st;
         actx.user_mode = st.persist_user;
