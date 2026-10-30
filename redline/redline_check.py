@@ -9,6 +9,7 @@
 本脚本只判定状态，不替任何人生成证据。
 证据必须是真实实跑的输出，由人放到 evidence/ 下。
 """
+import re
 import hashlib
 import os
 import shutil
@@ -269,6 +270,32 @@ def check_evidence_fresh(ev_path):
     return True, None
 
 
+
+# 第三层：证据自证结果。
+# 历史漏洞（第五处）：状态机只校验"证据存在 + 指纹匹配"，从不看证据
+# 内容本身是否通过。实测 R3.evidence 末尾写着 PASS=10 FAIL=2、正文含
+# 两条 [FAIL]，状态机照样把它判成 VERIFIED —— 一份失败的运行输出被
+# 当成"已验证"的证据。
+# 只认显式汇总行 FAIL=<n>：反向验证的预期失败也写成 [FAIL]，数行会误伤。
+FAIL_SUMMARY_RE = re.compile(r"\bFAIL\s*[:=]\s*(\d+)")
+
+
+def check_evidence_selfresult(ev_path):
+    """返回 (ok, reason)。证据自证有失败则不得支撑 VERIFIED。"""
+    try:
+        txt = open(ev_path, "r", errors="replace").read()
+    except OSError as e:
+        return False, "证据不可读: %s" % e
+    nums = [int(m) for m in FAIL_SUMMARY_RE.findall(txt)]
+    if not nums:
+        # 该证据不写汇总行，无法判定也不降级（避免误伤预期反向）
+        return True, None
+    if max(nums) > 0:
+        return False, ("证据自证 %d 项失败 —— 它是失败的运行输出，"
+                       "不得用作'已验证'的依据；请修复后重新生成" % max(nums))
+    return True, None
+
+
 def main():
     print("=== 红线巡检 ===\n")
     pending = 0
@@ -293,8 +320,14 @@ def main():
             if ev_exists:
                 ok, why = check_evidence_fresh(ev_path)
                 if ok:
-                    state = "VERIFIED"
-                    detail = "证据: %s" % r["ev"]
+                    ok2, why2 = check_evidence_selfresult(ev_path)
+                    if ok2:
+                        state = "VERIFIED"
+                        detail = "证据: %s" % r["ev"]
+                    else:
+                        state = "PENDING"
+                        detail = "%s（证据 %s）" % (why2, r["ev"])
+                        pending += 1
                 else:
                     state = "PENDING"
                     detail = "证据已失效 —— %s" % why
