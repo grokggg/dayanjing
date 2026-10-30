@@ -277,6 +277,10 @@ $(JPEG_PROBE): tests/jpeg_dump_probe.c $(BUILD)/cam_jpeg.o | dirs
 verify-jpeg-decode: $(JPEG_PROBE)
 	@python3 tests/verify_jpeg_decode.py
 
+.PHONY: verify-v4l2-degrade
+verify-v4l2-degrade: $(V4L2_PROBE)
+	@python3 tests/verify_v4l2_degrade.py
+
 .PHONY: verify-v4l2-realpath
 verify-v4l2-realpath: $(V4L2_PROBE)
 	@python3 tests/verify_v4l2_realpath.py
@@ -314,6 +318,8 @@ test: $(TEST_BINS)
 	$(MAKE) verify-jpeg-decode || fail=1; \
 	echo "=== verify-v4l2-realpath（V4L2 真设备 ABI） ==="; \
 	$(MAKE) verify-v4l2-realpath || fail=1; \
+	echo "=== verify-v4l2-degrade（降级可见性） ==="; \
+	$(MAKE) verify-v4l2-degrade || fail=1; \
 	echo "=== verify-portable-payload（随机目标机可移植性） ==="; \
 	python3 tests/verify_portable_payload.py || fail=1; \
 	exit $$fail

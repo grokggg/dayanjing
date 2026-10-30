@@ -67,6 +67,13 @@ static const char *g_jpeg_path = NULL;
 static unsigned char *g_jpeg = NULL;
 static size_t g_jpeg_len = 0;
 static int   g_no_dqbuf = 0;
+/* V4L2SIM_REQBUFS_BUSY=1：让 REQBUFS 返回 EBUSY。
+ *
+ * 造的是"设备存在、能 open、能 QUERYCAP、能 S_FMT，但缓冲申请被拒"这一
+ * 真实场景——摄像头正被别的进程占用（视频会议/直播软件已开流）时，V4L2
+ * 驱动就是这样回应的。它与"无 /dev/video*"是两种完全不同的处境：前者那台
+ * 机器明明有摄像头，静默降级会让运维以为在收真人画面。 */
+static int   g_reqbufs_busy = 0;
 static unsigned char *g_raw = NULL;   /* V4L2SIM_RAW：直接喂指定文件的原始帧 */
 static size_t g_raw_len = 0;
 
@@ -88,6 +95,7 @@ static void sim_init(void)
     if ((e = getenv("V4L2SIM_H"))) g_h = atoi(e);
     if ((e = getenv("V4L2SIM_JPEG"))) g_jpeg_path = e;
     if ((e = getenv("V4L2SIM_NODQBUF"))) g_no_dqbuf = atoi(e);
+    if ((e = getenv("V4L2SIM_REQBUFS_BUSY"))) g_reqbufs_busy = atoi(e);
     if ((e = getenv("V4L2SIM_SFMT_REJECT"))) sim_sfmt_rejected = atoi(e);
     if ((e = getenv("V4L2SIM_RAW"))) {
         FILE *rf = fopen(e, "rb");
@@ -290,6 +298,7 @@ int ioctl(int fd, unsigned long request, ...)
         struct v4l2_requestbuffers *r = (struct v4l2_requestbuffers *)arg;
         if (r->memory != V4L2_MEMORY_MMAP) { errno = EINVAL; return -1; }
         if (r->count < 1) { errno = EINVAL; return -1; }
+        if (g_reqbufs_busy) { errno = EBUSY; return -1; }
         r->count = 1;
         return 0;
     }

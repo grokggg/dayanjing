@@ -91,6 +91,16 @@ cam_source_t *cam_source_create(const char *backend)
     return cam_source_create_mock ? cam_source_create_mock() : NULL;
 }
 
+int cam_source_degrade(const cam_source_t *src)
+{
+    if (!src) return CAM_DEGRADE_NO_DEVICE;
+
+    /* 后端未设置过（MF / mock，或未走 open）时 degrade 是 0，即 NONE。
+     * 只有 V4L2 后端会写这个字段——它是唯一带"静默切合成帧"逻辑的后端，
+     * 也正是唯一需要区分"没设备"与"有设备打不开"的地方。 */
+    return src->degrade;
+}
+
 void cam_source_destroy(cam_source_t *src)
 {
     if (!src) return;

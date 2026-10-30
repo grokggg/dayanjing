@@ -58,6 +58,14 @@ int main(int argc, char **argv)
     printf("OPEN_ERR=%s\n", cam_errstr(e));
     if (e != CAM_OK) { emit("RC", 2); return 2; }
 
+    /* 降级原因：0=真设备，1=无设备，2=有设备但打不开（被占用）。
+     *
+     * 必须在 open 之后立刻取。此前产品代码在 V4L2 初始化失败时静默切合成
+     * 帧且 open 仍返回 CAM_OK，于是"设备不存在"与"设备被占用"在调用方看来
+     * 完全一样——都是 CAPTURE=OK、都有合法 JPEG、都零报错，而后者那台机器
+     * 明明有摄像头。 */
+    emit("DEGRADE", (long long)cam_source_degrade(src));
+
     cam_frame_t f;
     memset(&f, 0, sizeof(f));
     e = src->capture(src, &f);

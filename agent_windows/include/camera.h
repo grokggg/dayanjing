@@ -71,6 +71,26 @@ typedef enum {
     CAM_ERR_INVALID_ARG
 } cam_err_t;
 
+/* 降级原因：当前产出的像素是否来自真摄像头。
+ *
+ * 为什么需要它（修掉的真实缺陷）：
+ *   cam_linux_v4l2.c 在 V4L2 初始化失败时静默切到内置合成帧，且 open 仍返回
+ *   CAM_OK。于是"设备不存在"与"设备存在但打不开"在调用方看来完全一样——
+ *   都是 CAPTURE=OK、都有合法 JPEG、都零报错。
+ *
+ *   后者在真机上是常见场景：摄像头正被别的进程占用（视频会议/直播已开流），
+ *   open 与格式协商都能过，REQBUFS/STREAMON 才失败。此时那台机器明明有摄像
+ *   头，而运维看到的是"一切正常"，收到的却是棋盘格。这是最难被发现的一类
+ *   失效，因为它不报错、不失败，只是画面一直是假的。
+ *
+ *   本枚举把两者分开：NO_DEVICE 是合法降级（无摄像头机器本就该走合成帧），
+ *   DEVICE_BUSY 是必须可见的异常。 */
+typedef enum {
+    CAM_DEGRADE_NONE = 0,      /* 真设备，像素来自摄像头 */
+    CAM_DEGRADE_NO_DEVICE,     /* 未找到任何采集设备（如无 /dev/video*） */
+    CAM_DEGRADE_DEVICE_BUSY    /* 设备存在且是采集设备，但打不开（被占用等） */
+} cam_degrade_t;
+
 /* 设备信息 */
 typedef struct {
     char   device_id[128];
@@ -106,6 +126,14 @@ struct cam_source {
      * 简单合并，故改为函数指针由后端自带。 */
     void      (*destroy)(cam_source_t *self);
 
+    /* 降级原因。0 = CAM_DEGRADE_NONE（真设备）；非 0 表示当前产出的是合成
+     * 帧，调用方拿到的画面不是摄像头来的。由后端在 open 时设置。
+     *
+     * 刻意不做成"降级即返回错误"：驻留进程需要继续跑（否则摄像头一被占用
+     * 整个植入体就退出，反而暴露自己），但"画面是假的"这件事必须对上层可
+     * 见——不可见就是静默失效。 */
+    int degrade;
+
     void *priv;  /* 后端私有数据 */
 };
 
@@ -117,6 +145,13 @@ struct cam_source {
  */
 cam_source_t *cam_source_create(const char *backend);
 void          cam_source_destroy(cam_source_t *src);
+
+/* 查询当前是否在产合成帧（见 cam_degrade_t）。
+ *
+ * 独立函数而非直接读 src->degrade：后端可以在 open 之前被调用方查询，此时
+ * priv 未初始化，直接解引用有风险；且后续若要加"跨后端统一判定"（如 MF 后端
+ * 的降级也要纳入），改一处即可，不必改所有调用点。 */
+int cam_source_degrade(const cam_source_t *src);
 
 /* 转码：将 frame 转成 JPEG，写入 out（调用方分配，容量 *out_cap 传入，
  * 实际写入字节数写回 *out_len）。返回 CAM_OK 表示成功。 */

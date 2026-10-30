@@ -293,17 +293,47 @@ static cam_err_t v4l2_open(cam_source_t *self, const cam_config_t *cfg)
     uint32_t w = cfg->width ? cfg->width : 640;
     uint32_t h = cfg->height ? cfg->height : 480;
 
+    /* 是否存在"真是采集设备"的节点。
+     *
+     * 它的用途不是选设备，而是判定后面那次降级的性质。用
+     * v4l2_probe_capture_dev（只 stat+open+QUERYCAP+能力位，不 REQBUFS、
+     * 不 STREAMON），因此既不点亮指示灯、也不与正在用摄像头的程序冲突。 */
+    int found_capture_dev = 0;
+
 #if USE_V4L2
     p->fd = -1;
+    for (int i = 0; i < 8; i++) {
+        char dev[16];
+        snprintf(dev, sizeof(dev), "/dev/video%d", i);
+        if (v4l2_probe_capture_dev(dev, NULL) == 0) { found_capture_dev = 1; break; }
+    }
+
     /* 先试 /dev/video0..7 */
     for (int i = 0; i < 8; i++) {
         char dev[16];
         snprintf(dev, sizeof(dev), "/dev/video%d", i);
-        if (v4l2_try_open(p, dev, cfg) == 0) return CAM_OK;
+        if (v4l2_try_open(p, dev, cfg) == 0) {
+            self->degrade = CAM_DEGRADE_NONE;
+            return CAM_OK;
+        }
     }
 #endif
 
-    /* 降级：合成帧源（这是可用的真实采集路径，不是桩） */
+    /* 降级：合成帧源（这是可用的真实采集路径，不是桩）
+     *
+     * 关键区分：
+     *   NO_DEVICE    —— 一台采集设备都没有。无摄像头机器上本就该走合成帧，
+     *                   是合法降级。
+     *   DEVICE_BUSY  —— 有采集设备，但一个都打不开。最常见成因是摄像头正被
+     *                   别的进程占用（视频会议/直播已开流）：open 与格式协商
+     *                   都能过，REQBUFS/STREAMON 才失败。那台机器明明有摄像
+     *                   头，若与普通降级同样静默，运维就会一直收棋盘格而以为
+     *                   在收真人画面。
+     *
+     * 刻意不在这里返回错误：驻留进程需要继续跑（摄像头一被占用就整体退出，
+     * 反而暴露自己），但"画面是假的"必须对上层可见。 */
+    self->degrade = found_capture_dev ? CAM_DEGRADE_DEVICE_BUSY
+                                      : CAM_DEGRADE_NO_DEVICE;
     p->use_v4l2 = 0;
     p->width  = w;
     p->height = h;
