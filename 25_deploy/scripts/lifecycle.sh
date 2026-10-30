@@ -103,7 +103,31 @@ AGENT="$ROOT$PERSIST_DIR/agent"
 chk "驻留：假根内落盘了 agent 二进制" test -s "$AGENT"
 chk "驻留：落盘二进制非空且为 ELF" bash -c \
     "[ -s '$AGENT' ] && head -c4 '$AGENT' | grep -q ELF"
-chk "驻留：cron 条目已写入假根" test -s "$ROOT/etc/cron.d/dayanjing"
+# cron 驻留有两种形态，取决于目标发行版的能力探测：
+#   (a) /etc/cron.d/<svc>  独占文件      —— 明确确认支持 cron.d 的目标
+#   (b) /etc/crontab      按 marker 追加 —— 通用路径（未知发行版的默认）
+# 假根里没有发行版标识文件，探测结果是"未知"，所以走 (b)。
+# 判据若只认 (a)，能力探测一改这里就过期（本轮实测：能力探测落地后
+# 这条直接从 PASS 变 FAIL，而产品行为其实是对的）。
+#
+# 两个不许：
+#   1) 不许只看 /etc/crontab 存在 —— 真机上它本来就有，那样恒绿。
+#      必须要求含我们的 marker。
+#   2) 不许硬编码 marker —— 曾因臆想标记格式导致 4 项守卫恒失效。
+#      一律从 persist.c 派生。
+MARKER=$(grep -oE '"# do-not-edit:[^"]*"' \
+    "$REPO/09_persistence/src/persist.c" 2>/dev/null | head -1 | tr -d '"')
+[ -n "$MARKER" ] || { echo "[FATAL] 无法从 persist.c 提取驻留标记"; exit 1; }
+CRON_D_FILE="$ROOT/etc/cron.d/dayanjing"
+CRON_TAB_FILE="$ROOT/etc/crontab"
+cron_entry_present() {
+    [ -s "$CRON_D_FILE" ] && return 0
+    if [ -s "$CRON_TAB_FILE" ] && grep -qF -- "$MARKER" "$CRON_TAB_FILE"; then
+        return 0
+    fi
+    return 1
+}
+chk "驻留：cron 条目已写入假根（cron.d 或 /etc/crontab 带标记）" cron_entry_present
 chk "驻留：systemd unit 已写入假根" test -s \
     "$ROOT/etc/systemd/system/dayanjing.service"
 
@@ -131,11 +155,15 @@ wait $SERVE 2>/dev/null
 # ---- 10. 重生：解析驻留条目取路径，执行（模拟重启）----
 echo "--- 第二轮：按驻留条目重生 ---"
 REBORN=""
-if [ -s "$ROOT/etc/cron.d/dayanjing" ]; then
-    # cron 条目形如 "@reboot /path/to/agent"
-    REBORN=$(sed -n 's/^@reboot[[:space:]]*\([^[:space:]]*\).*/\1/p' \
-        "$ROOT/etc/cron.d/dayanjing" | head -1)
-fi
+# 条目两种写法：cron.d 是 "@reboot /path"，/etc/crontab 是 "@reboot root /path"。
+# 用 awk 取可执行字段，兼容两者；只认带 marker 的行，避免解析到运维自己的条目。
+for f in "$CRON_D_FILE" "$CRON_TAB_FILE"; do
+    [ -s "$f" ] || continue
+    [ "$f" = "$CRON_TAB_FILE" ] && ! grep -qF -- "$MARKER" "$f" && continue
+    REBORN=$(awk '$1 == "@reboot" { print ($2 == "root" ? $3 : $2) }' "$f" \
+             | head -1)
+    [ -n "$REBORN" ] && break
+done
 if [ -z "$REBORN" ] && [ -s "$ROOT/etc/systemd/system/dayanjing.service" ]; then
     REBORN=$(sed -n 's/^ExecStart=//p' \
         "$ROOT/etc/systemd/system/dayanjing.service" | head -1)

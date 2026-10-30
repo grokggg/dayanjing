@@ -103,8 +103,15 @@ def main():
     ck("G1 整体退出码为 1（报警）", rc1 == 1, "rc=%s" % rc1)
 
     # ---- G2: 放回非空证据 -> VERIFIED ----
-    with open(ev_path, "w") as f:
-        f.write("%s 证据占位（自检用，非空）\n" % SUBJECT)
+    # 【判据过期修复】旧实现写的是占位文字，而证据现在有指纹绑定（HASH/SRC）：
+    # 缺指纹行会被判"证据已失效" -> PENDING，G2 必然失败。
+    # 占位文字在指纹机制下已经不能代表"有效证据"，必须放回真实证据，
+    # 这才命中"有有效证据 -> VERIFIED"这个语义。
+    if had_real:
+        shutil.copy2(os.path.join(backup, os.path.basename(ev_path)), ev_path)
+    else:
+        with open(ev_path, "w") as f:
+            f.write("%s 证据占位（自检用，非空）\n" % SUBJECT)
     rc2, out2 = run_check()
     ck("G2 有证据 -> %s 转 VERIFIED" % SUBJECT,
        "VERIFIED" in state_of(out2, SUBJECT), state_of(out2, SUBJECT))
@@ -129,6 +136,27 @@ def main():
         same = os.path.exists(ev_path) and os.path.getsize(ev_path) > 0
         ck("G4b 真实证据已还原且非空", same,
            "size=%d" % (os.path.getsize(ev_path) if os.path.exists(ev_path) else -1))
+
+    # ---- G5: 证据在但环境不具备 -> STALE，且必须报警 ----
+    # 这条防的是"拿旧证据冒充当前状态"：环境退化后证据仍在，
+    # 旧实现静默退回 BLOCKED（不报警），于是那份证据可以继续被引用。
+    STALE_RID = "R1"          # 真摄像头在本环境恒不可得，probe 必失败
+    spath = os.path.join(EV, "%s.evidence" % STALE_RID)
+    pre_existed = os.path.exists(spath)
+    with open(spath, "w") as f:
+        f.write("%s 伪造证据（自检用）\n" % STALE_RID)
+    rc5, out5 = run_check()
+    l5 = state_of(out5, STALE_RID)
+    ck("G5 证据在但环境不具备 -> %s 报 STALE" % STALE_RID, "STALE" in l5, l5)
+    ck("G5 整体退出码为 1（报警）", rc5 == 1, "rc=%s" % rc5)
+    if not pre_existed:
+        os.remove(spath)
+    else:
+        shutil.copy2(os.path.join(backup, os.path.basename(spath)), spath)
+
+    rc6, out6 = run_check()
+    ck("G6 清理伪造证据后回到基线", rc6 == 0 and not has_pending(out6), "rc=%s" % rc6)
+
     shutil.rmtree(backup, ignore_errors=True)
 
     print("\ntotal=%d pass=%d fail=%d" % (PASS + FAIL, PASS, FAIL))

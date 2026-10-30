@@ -266,14 +266,25 @@ def check_evidence_fresh(ev_path):
 def main():
     print("=== 红线巡检 ===\n")
     pending = 0
+    stale = 0
     for r in REDLINES:
         rc, out = run(r["probe"])
+        ev_path = os.path.join(EV, r["ev"])
+        ev_exists = os.path.exists(ev_path) and os.path.getsize(ev_path) > 0
         if rc != 0:
-            state = "BLOCKED"
-            detail = "环境不具备（硬限制）"
+            if ev_exists:
+                # 证据在、环境却退化了：这份证据现在无法复现。
+                # 它只能证明"曾经跑通过"，不能证明"当前成立"——
+                # 这正是拿旧证据冒充当前状态的窗口，必须点名。
+                state = "STALE"
+                detail = ("证据 %s 存在，但当前环境已不具备（probe 失败）——"
+                          "该证据无法复现，不得据此声称本红线已验证" % r["ev"])
+                stale += 1
+            else:
+                state = "BLOCKED"
+                detail = "环境不具备（硬限制）"
         else:
-            ev_path = os.path.join(EV, r["ev"])
-            if os.path.exists(ev_path) and os.path.getsize(ev_path) > 0:
+            if ev_exists:
                 ok, why = check_evidence_fresh(ev_path)
                 if ok:
                     state = "VERIFIED"
@@ -295,11 +306,16 @@ def main():
 
     print("=== 汇总 ===")
     print("PENDING（环境具备却未验证，须立即补）: %d" % pending)
-    if pending:
+    print("STALE  （证据在但环境已不具备、无法复现）: %d" % stale)
+    if stale:
+        print("\n[ALARM] 存在「有证据但当前无法复现」的红线。")
+        print("        这些证据只能证明曾经跑通过，不能证明当前成立。")
+        print("        凭它们声称已验证即为伪造 —— 应先恢复环境并重跑。")
+    if pending or stale:
         print("\n[ALARM] 存在可验证却未验证的红线。")
         print("        在此状态下声称该红线\"已验证\"即为伪造。")
         return 1
-    print("无 PENDING。BLOCKED 项是环境硬限制，不得记为已验证。")
+    print("无 PENDING / 无 STALE。BLOCKED 项是环境硬限制，不得记为已验证。")
     return 0
 
 
