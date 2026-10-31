@@ -784,7 +784,10 @@ typedef struct {
  * 上后就一直是假画面"这条信息在 journal 里一定留得下来。
  *
  * 措辞刻意中性：不出现采集/摄像头等语义词——stderr 会进 journal，而 journal
- * 是运维与审计都能读的。 */
+ * 是运维与审计都能读的。
+ *
+ * 该不变量由 21_exfil/tests/verify_name_stealth.py 的 N9b 机器校验（扫
+ * fprintf(stderr/stdout) 字面量）。改这里的措辞必须重跑该守卫。 */
 static void cd_report_degrade(cd_audit_ctx_t *c)
 {
     if (!c || !c->im) return;
@@ -794,12 +797,12 @@ static void cd_report_degrade(cd_audit_ctx_t *c)
 
     c->last_degrade = d;
     if (d == 0) {
-        fprintf(stderr, "[INFO] 采集源已恢复到设备输入\n");
+        fprintf(stderr, "[INFO] 输入源已恢复为设备输入\n");
     } else if (d == 1) {
-        fprintf(stderr, "[INFO] 采集源未发现输入设备，运行在内置合成源上\n");
+        fprintf(stderr, "[INFO] 未发现输入设备，当前运行在内置合成源上\n");
     } else {
         fprintf(stderr,
-                "[WARN] 采集源存在输入设备但无法打开（多因被其它进程占用），"
+                "[WARN] 输入设备存在但无法打开（多因被其它进程占用），"
                 "当前输出非设备画面\n");
     }
 }

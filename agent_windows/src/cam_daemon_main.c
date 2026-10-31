@@ -93,9 +93,9 @@ static void usage(const char *argv0)
         "\n"
         "  --pfx HEX16         nonce 前缀 8 字节。缺省由主密钥派生（确定性）\n"
         "\n"
-        "  --probe [--backend B]  只探测设备：输出当前能不能采到真人画面，\n"
-        "                         不采集、不回传、不驻留。DEGRADE=0 真设备 /\n"
-        "                         1 无采集设备 / 2 有设备但打不开（被占用）\n",
+        "  --probe [--backend B]  只探测设备：输出当前输入是否为真实画面，\n"
+        "                         不取帧、不外发、不驻留。DEGRADE=0 真设备 /\n"
+        "                         1 无输入设备 / 2 有设备但打不开（被占用）\n",
         argv0);
 }
 
@@ -148,7 +148,7 @@ static int run_probe(const char *backend)
 
     implant_t *im = implant_create(&ic, backend);
     if (!im) {
-        fprintf(stderr, "[FATAL] 无法创建采集源（backend=%s）\n", backend);
+        fprintf(stderr, "[FATAL] 无法创建输入源（backend=%s）\n", backend);
         return 2;
     }
 
