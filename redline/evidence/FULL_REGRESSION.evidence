@@ -70,6 +70,8 @@
          捕获                    = 1
          符合预期症状(如M2挂起)  = 0
          已知盲区(测不了,未覆盖) = 0
+=== 21_exfil_guards  PASS
+=== agent_windows_guards PASS
 === check_realroot_pollution（真实根污染） ===
   [OK]   真实根无本仓部署痕迹（已扫 3 个名字 × 派生落点）
   [PASS] 污染守卫正向对照（种下必检出、清除必归零）
@@ -77,5 +79,5 @@
            [OK]   S2 清除后检出归零（判据可收敛）
            [OK]   S3 真实根路径构造有效（种 10 检 10）
            [OK]   S4 真实根探针已清除干净（自检不留污染）
--------- passed: 53  failed: 0  skipped: 0 --------
+-------- passed: 55  failed: 0  skipped: 0 --------
 FULL_RC=0
