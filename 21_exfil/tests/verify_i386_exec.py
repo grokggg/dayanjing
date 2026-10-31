@@ -85,11 +85,21 @@ def ia32_supported():
 
 
 def run_e2e(binary, port, extra=None):
-    """起 TCP 收端，跑被测二进制做采集+回传，返回 (rc, 收到字节, stderr)。"""
+    """起 TCP 收端，跑被测二进制做采集+回传，返回 (rc, 收到字节, stderr)。
+
+    port=0 表示由内核动态分配空闲端口 —— 调用方必须用它，不要写死端口。
+
+    【踩过的坑】此前 main() 写死 45902，串行回归里前一个守卫刚用完该端口、
+    监听方尚未完全退出时，bind 直接抛 OSError(Errno 98)，守卫以 traceback 崩溃
+    退出并被判 [FAIL]。症状指向 "i386 产物有问题"，真实原因却是端口冲突 ——
+    排查方向被彻底带偏，且只在完整回归里偶发，单跑永远复现不了。
+    """
     srv = socket.socket()
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", port))
     srv.listen(4)
+    # 动态端口：必须回读内核实际分配的端口，否则被测进程连的是 0 号端口。
+    port = srv.getsockname()[1]
     buf = bytearray()
     stop = [False]
 
@@ -156,7 +166,9 @@ def main():
        "INTERP=%s" % interp)
     ck("F4 宿主原生可执行 i386 字节（无需模拟器）", ia32_supported())
 
-    port = 45902
+    # 端口由内核动态分配：写死端口会在串行回归里与前一个守卫冲突（Errno 98），
+    # 且崩溃退出会让症状伪装成"产物有问题"。
+    port = 0
     rc, data, err = run_e2e(BIN, port)
     ck("F5 i386 产物端到端退出码 0", rc == 0, "rc=%s" % rc)
     ck("F6 C2 实收字节（采集+编码+加密+回传全通）", len(data) > 0,
@@ -168,18 +180,19 @@ def main():
         ck("F8 密文特征（字节值多样性 > 100）", vals > 100, "%d 种取值" % vals)
 
     # ---- 反向：发明文的假程序必须被 F7 抓到，否则 F7 恒绿 ----
-    fake = "/tmp/fake_plain_i386.py"
+    fake = "/data/workspace/.regtmp/fake_plain_i386.py"
+    srv2 = socket.socket()
+    srv2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv2.bind(("127.0.0.1", 0))  # 动态端口：与主用例同理，写死会 Errno 98
+    srv2.listen(4)
+    p2 = srv2.getsockname()[1]
     with open(fake, "w") as f:
         f.write("#!/usr/bin/env python3\n"
                 "import socket, sys\n"
                 "s = socket.create_connection(('127.0.0.1', %d), timeout=8)\n"
                 "s.sendall(b'\\xff\\xd8\\xff\\xe0' + b'\\x00' * 4096)\n"
-                "s.close()\n" % 45903)
+                "s.close()\n" % p2)
     os.chmod(fake, 0o755)
-    srv2 = socket.socket()
-    srv2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv2.bind(("127.0.0.1", 45903))
-    srv2.listen(4)
     b2 = bytearray()
 
     def acc2():
