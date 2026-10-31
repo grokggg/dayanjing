@@ -68,7 +68,17 @@ def run(cmd, env_extra=None, uid=None, home=None):
     env = dict(os.environ)
     env.pop("PREFIX", None)
     if env_extra:
-        env.update(env_extra)
+        # 值为 None 表示显式清除该变量，而非置为空串。
+        # 本守卫自身常在回归入口内运行（入口导出 DAYNANJING_REGRESSION=1），
+        # 若 R1 组（生产路径）继承了它，install 会被自动切成假根：
+        # R1-b 判"未触发自动假根"必然失败，且真实根从未被污染 -> R1-c
+        # 的守卫 rc 恒为 0、R1-e 天然绿。三处同时失真，而失败信息只指向
+        # 断言本身。故"生产路径"必须显式清标记，不能依赖调用方环境。
+        for k, v in env_extra.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
     if home:
         env["HOME"] = home
     if uid is not None:
@@ -124,14 +134,16 @@ def main():
     print("=== 反向 R1：root 且无 DAYNANJING_REGRESSION（生产路径）===")
     c2 = C2()
     r = run(["sh", OK_SH, "install", "--c2", "127.0.0.1:%d" % c2.port,
-             "--backend", "v4l2", "--key", key])
+             "--backend", "v4l2", "--key", key],
+            env_extra={"DAYNANJING_REGRESSION": None})
     out = r.stdout.decode(errors="replace")
     c2.close()
     chk(r.returncode == 0, "R1-a install rc=0", "rc=%d" % r.returncode)
     chk("自动切假根" not in out, "R1-b 未触发自动假根（生产部署不得被误切）")
     grc, gout = guard_rc()
     chk(grc == 1, "R1-c 真实根被污染（守卫必须 rc=1 点名）", "guard_rc=%d" % grc)
-    r = run(["sh", OK_SH, "uninstall"])
+    r = run(["sh", OK_SH, "uninstall"],
+            env_extra={"DAYNANJING_REGRESSION": None})
     chk(r.returncode == 0, "R1-d uninstall rc=0", "rc=%d" % r.returncode)
     grc, _ = guard_rc()
     chk(grc == 0, "R1-e 卸载后真实根恢复干净（守卫 rc=0）", "guard_rc=%d" % grc)
