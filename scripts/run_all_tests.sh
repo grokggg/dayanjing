@@ -4,8 +4,14 @@
 # 每一步都套 timeout，任何一个卡住都不拖垮整体
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-failed=0
-passed=0
+# 断点续跑：本沙盒每约 8 分钟发生一次 502 故障并杀掉全部进程，而全仓入口
+# 需 30+ 分钟 —— 单次运行必然被打断（实测两次都死在同一时点，而该模块
+# 单独跑只需 186s，故非挂死而是进程被杀）。
+# RESUME_FROM 之前的模块由上一分段跑过，其计数经 BASE_PASSED/BASE_FAILED
+# 计入，本段只跑其后的模块。汇总与完整入口等价，但由多段拼成 ——
+# 汇报时必须说明，不得冒充"一次跑完"。
+failed=${BASE_FAILED:-0}
+passed=${BASE_PASSED:-0}
 skipped=0
 
 # 单实例锁：回归入口之间的干扰极难归因，必须前置排除。
@@ -149,10 +155,17 @@ run_py() {
 # 显式导出，让它真正参与回归。
 export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
 
+resume_skip=0
+if [ -n "${RESUME_FROM:-}" ]; then resume_skip=1; fi
+
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
          08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
          14_p2p 16_initial_access 17_loader 18_privilege 19_defense 20_packer \
          21_exfil 22_kern 23_lkm 24_front 25_tls 26_lateral_auto agent_windows; do
+    if [ "$resume_skip" = 1 ]; then
+        [ "$m" = "$RESUME_FROM" ] && resume_skip=0
+        [ "$resume_skip" = 1 ] && continue
+    fi
     run_c "$m"
 done
 
@@ -542,6 +555,30 @@ fi
 # 必须在最后：前面的部署测试会写真实 /etc。本守卫负责在收尾时点名污染，
 # 否则污染只在别处表现为"某个断言返回值不符"，排查方向被指向实现代码。
 # 自带正向对照（--selftest）：永远找不到的扫描器永远"通过"，那等于没守卫。
+# 为什么单独补这一段：
+#   run_c 只做「make 构建 + 逐个跑 build/test_* 二进制」，它从不调用 make test。
+#   而近十轮新增的判据几乎全部是 Python 守卫（verify-*.py），它们只挂在
+#   make test 上 —— 于是全仓回归的「53 passed」从来不覆盖它们。
+#   实测坐实：入口日志里 verify-autoroot / verify-cron-exec / verify-user-deploy /
+#   verify-v4l2-degrade / verify-degrade-report / redline_check 一个都没出现，
+#   而当时入口是绿的。
+#   这是第 5 处同类漏洞（前四处：判据恒绿、红线与常规限制混排、
+#   run() 未定义变量致 PENDING 恒 0、证据不绑源码），且是最严重的一处：
+#   它让「入口绿」与「守卫验过」长期脱钩。
+#   放在真实根污染检查之前：这些守卫会做部署，污染检查必须收尾。
+for m in 21_exfil agent_windows; do
+    printf "=== %-16s " "${m}_guards"
+    if (cd "$ROOT/$m" && timeout 1800 make test >$TMPD/guards_$m.log 2>&1); then
+        echo "PASS"
+        passed=$((passed + 1))
+    else
+        echo "FAIL"
+        grep -E "^\[FAIL\]|^\[ERROR\]|make.*\*\*\*" $TMPD/guards_$m.log | head -20 | sed 's/^/         /'
+        failed=$((failed + 1))
+    fi
+done
+
+
 if [ -f "$ROOT/scripts/check_realroot_pollution.py" ]; then
     echo "=== check_realroot_pollution（真实根污染） ==="
     if python3 "$ROOT/scripts/check_realroot_pollution.py"; then
