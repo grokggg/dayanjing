@@ -14,4 +14,4 @@ HASH i386 fa0cb4fb4176f4d396ee0c0f5dacb243eaf8e280c36dd8ca6ac21939826460e5 18439
 === result: 10 pass, 0 fail ===
 
 # ---- 源码指纹（改了下列任一文件，本证据即失效）----
-SRC 21_exfil/tests/verify_i386_exec.py 58a9414431b1e68c556b1d1287a06673b25b84bc1ae2fd516508eb08f2a7b545 8611
+SRC 21_exfil/tests/verify_i386_exec.py 43606d22c24c628ef631c22e7fb1f6183b2d3b43f9df9e175558daa49de91a98 9533
