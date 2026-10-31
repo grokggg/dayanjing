@@ -70,6 +70,21 @@ def sh(cmd, **kw):
                           text=True, **kw)
 
 
+def sh_realroot(cmd, **kw):
+    """显式声明"本守卫要验真实路径"，去掉回归上下文标记。
+
+    回归入口会导出 DAYNANJING_REGRESSION=1，onekey.sh 见到它且未显式
+    指定 PREFIX 时会**自动切到假根**——那是防真实根污染的正确设计。
+    但本守卫验的是"真实 cron 守护真的执行了条目"，条目必须落在真实
+    /etc 下才会被守护扫描到。被切成假根后安装必然成功、条目必然不被
+    执行，而症状表现为"文件不存在"，排查方向被引到实现上。
+    """
+    env = dict(os.environ)
+    env.pop("DAYNANJING_REGRESSION", None)
+    return subprocess.run(cmd, shell=True, capture_output=True,
+                          text=True, env=env, **kw)
+
+
 def free_port():
     import socket
     s = socket.socket()
@@ -154,16 +169,23 @@ def main():
 
     # 对齐后安装
     wait_align()
-    r = sh("sh %s --c2 127.0.0.1:%d --backend v4l2" % (onekey, port),
-           timeout=180)
-    inst_ok = ("cron 条目已写入" in r.stdout)
+    r = sh_realroot("sh %s --c2 127.0.0.1:%d --backend v4l2" % (onekey, port),
+                    timeout=180)
+    # 落点不能硬编码：/etc/cron.d 不是通用特性，而是发行版补丁。本实现
+    # 探测到不支持时会回退写 /etc/crontab，措辞也随之不同（"已写入" vs
+    # "已追加到"）。硬编码路径 + 单一措辞 = 回退分支在测试里永久失配，
+    # 症状却是"文件不存在"，排查方向被引到实现而不是判据上。
+    m = re.search(r"cron 条目已(?:写入|追加到)\s+([^\s（]+)", r.stdout)
+    cron_path = m.group(1) if m else None
+    inst_ok = cron_path is not None
     ck(inst_ok, "P2a 安装写出 cron 条目",
        " | ".join(l.strip() for l in r.stdout.splitlines() if "cron" in l))
-    if not os.path.isfile(CRONF):
-        ck(False, "P2a 安装写出 cron 条目", "文件不存在")
+    if not inst_ok or not os.path.isfile(cron_path):
+        ck(False, "P2a 安装写出 cron 条目",
+           "文件不存在: %s" % cron_path if cron_path else "未从输出解析到落点")
         sink.terminate()
         return 1
-    entry = open(CRONF).read()
+    entry = open(cron_path).read()
     print("      条目: %s" % entry.strip().replace("\n", " | "))
 
     base = c2_bytes(stats)
@@ -214,11 +236,14 @@ def main():
     else:
         ck(False, "R1 反向", "conf 不存在，无法构造")
 
-    # 清理
-    sh("sh %s uninstall" % onekey, timeout=120)
+    # 清理：必须与安装同侧。装在真实根、卸在假根 = 卸载清不掉真实落点，
+    # 而 uninstall 自身仍报告"成功"，污染由收尾守卫才抓得到。
+    sh_realroot("sh %s uninstall" % onekey, timeout=120)
     sink.terminate()
-    leftover = [p for p in ("/etc/cron.d/" + DEFN, "/usr/local/bin/" + DEFN,
-                            "/etc/%s/%s.conf" % (DEFN, DEFN)) if os.path.exists(p)]
+    leftover = [p for p in (cron_path, "/etc/cron.d/" + DEFN,
+                            "/usr/local/bin/" + DEFN,
+                            "/etc/%s/%s.conf" % (DEFN, DEFN))
+                if p and os.path.exists(p)]
     ck(not leftover, "P5 卸载无残留", str(leftover))
 
     print("\n=== result: %d pass, %d fail ===" % (len(PASS), len(FAIL)))
