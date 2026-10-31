@@ -39,7 +39,16 @@ DEFN = _default_name(TEMPLATE)
 GEN = os.path.join(MOD, "make_onekey.py")
 CAMD = os.path.join(REPO, "agent_windows", "build", "linux", "camd")
 CA = os.path.join(REPO, "25_tls", "tests", "data", "ca.pem")
-CONF = "/etc/%s/%s.conf" % (DEFN, DEFN)
+
+# 守卫自带隔离根，不写真实 /etc。
+# 旧实现读真实根 /etc/<name>/<name>.conf，两种场景都是错的：
+#   单独跑  ：把部署真装进真实 /etc 再读它，污染宿主（12 pass 是脏出来的）；
+#   回归里  ：onekey.sh 因 DAYNANJING_REGRESSION 自动切假根，真实根读不到，
+#             conf='' 令 ①-⑦ 全 FAIL（实测 5 pass / 7 fail，SEQ:68 抓到）。
+# 显式 --prefix 优先级最高，不会再触发自动假根，两种场景行为一致。
+ROOT = "/data/vof/root"
+CONF = "%s/etc/%s/%s.conf" % (ROOT, DEFN, DEFN)
+CA_DST = "%s/etc/%s/ca.pem" % (ROOT, DEFN)
 
 PASS = 0
 FAIL = 0
@@ -63,7 +72,10 @@ def gen_script(path):
 
 
 def install(args):
-    r = subprocess.run(["sh", path_onekey, "install"] + args,
+    # 显式 --prefix：本守卫自带隔离根，既不污染真实 /etc，也不会被
+    # 回归上下文的自动假根改道（两者都会让 conf 读不到或读到脏值）。
+    r = subprocess.run(["sh", path_onekey, "install",
+                        "--prefix", ROOT] + args,
                        capture_output=True, text=True, cwd=MOD)
     return r.returncode, r.stdout + r.stderr
 
@@ -77,7 +89,8 @@ def read_conf():
 
 
 def cleanup():
-    subprocess.run(["sh", path_onekey, "uninstall"],
+    # 卸载必须带同一个 --prefix，否则卸的是真实根，留下假根里的落点。
+    subprocess.run(["sh", path_onekey, "uninstall", "--prefix", ROOT],
                    capture_output=True, text=True, cwd=MOD)
 
 
@@ -118,7 +131,7 @@ def main():
     check('CAMD_FRONT_HOST="' in conf and 'CAMD_CA="' in conf,
           "④ 落点参数为带引号标量（防 source 时被当成命令执行）",
           "实测缺陷：无引号时参数静默丢失")
-    check(os.path.exists("/etc/%s/ca.pem" % DEFN), "⑤ CA 已投递到目标机")
+    check(os.path.exists(CA_DST), "⑤ CA 已投递到目标机", "期望落点 " + CA_DST)
 
     print("=== 正向：tcp 模式回归（不得被 front 改动破坏） ===")
     cleanup()
