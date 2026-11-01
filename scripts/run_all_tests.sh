@@ -82,10 +82,30 @@ tree_fp() {
     # 上限 20s：实测该命令在索引需整体刷新时会挂起 48s，而它每个步骤都要算
     # 一次。超时即判"不可得"，由上层拒绝拼接，不让一次卡顿拖垮整轮。
     _d=$(timeout 20 git -C "$ROOT" diff HEAD --name-only 2>/dev/null)
-    if [ $? -ne 0 ]; then echo "FPUNKNOWN"; return 0; fi
-    _d=$(printf '%s' "$_d" | sha256sum 2>/dev/null | cut -c1-16)
-    if [ -z "$_d" ]; then echo "FPUNKNOWN"; return 0; fi
-    echo "${_h}:${_d}"
+    if [ $? -eq 0 ]; then
+        _d=$(printf '%s' "$_d" | sha256sum 2>/dev/null | cut -c1-16)
+        if [ -n "$_d" ]; then echo "git1:${_h}:${_d}"; return 0; fi
+    fi
+    # ---- 降级：tracked 文件内容哈希指纹 ----
+    # git diff 在本沙盒实测已稳定挂死（>20s，且 D 态下 SIGTERM 无法投递，
+    # timeout 只能干等）。它一挂住，FP_NOW 就退化为 FPUNKNOWN，续跑整体失效
+    # —— 宁可不拼也不错拼，但能力等于没有。所以增加一条不依赖 git diff 的
+    # 降级指纹：仍用 rev-parse 取 commit，再用 git ls-files 取 tracked 清单
+    # （读索引文件本身，不依赖 stat 缓存），自己按路径排序后对【文件内容】哈希。
+    # 两种指纹用不同前缀区分（git1 / ch1）：跨来源必然判为不符，从而拒绝拼接；
+    # 不会像旧实现那样因为"两边都退回同一个哨兵"而照常接管。
+    # ls-files 输出 NUL 分隔，不能进 shell 变量（NUL 会被截断成只剩第一个文件），
+    # 必须落临时文件再喂给 xargs -0。
+    _tmpf=$TMPD/.lsfiles.$$
+    if timeout 15 git -C "$ROOT" ls-files -z > "$_tmpf" 2>/dev/null && [ -s "$_tmpf" ]; then
+        _fp=$( (cd "$ROOT" && xargs -0 -r sha256sum < "$_tmpf") 2>/dev/null \
+              | LC_ALL=C sort -k2 | sha256sum 2>/dev/null | cut -c1-16)
+        rm -f "$_tmpf"
+        if [ -n "$_fp" ]; then echo "ch1:${_h}:${_fp}"; return 0; fi
+    else
+        rm -f "$_tmpf"
+    fi
+    echo "FPUNKNOWN"; return 0
 }
 
 # 指纹【只在启动时算一次】，不在每个步骤重算。
@@ -97,6 +117,8 @@ tree_fp() {
 # 反而更稳：变异审计会在运行中临时改写源码再还原，若正好在改写窗口内
 # 落盘 checkpoint，逐步指纹会记下一个"还原后不复现"的值，续跑永远判不符。
 FP_NOW=$(tree_fp)
+# 仅调试用：默认关闭，不干扰正常回归输出。
+if [ "${DAYANJING_PRINT_FP:-0}" = "1" ]; then echo "[DEBUG] FP_NOW=$FP_NOW"; fi
 
 ckpt_mark() {
     # 先写临时文件再 mv。直接 `> "$CKPT"` 会先把文件截断成 0 字节，若此刻
