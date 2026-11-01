@@ -63,15 +63,40 @@ fi
 CKPT=$TMPD/dayanjing_regression.ckpt
 
 tree_fp() {
-    _h=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo nogit)
-    # 只取【已跟踪文件】的改动。第一版用的是 status --porcelain，它把未跟踪
-    # 文件也算进来 —— 而回归过程本身就在不断产生未跟踪文件（build 产物、
-    # 测试输出、日志），于是指纹在同一次运行内持续漂移，续跑时永远判定
-    # "树变了"而丢弃 checkpoint、退回从头跑。实测即如此：断点明明有效，
-    # 重启却从头开始，看上去像续跑功能没写。
-    _d=$(git -C "$ROOT" diff HEAD --name-only 2>/dev/null | sha256sum 2>/dev/null | cut -c1-16)
-    echo "${_h}:${_d:-none}"
+    # 指纹不可得时必须【显式返回哨兵】，绝不能退化成一个"看起来合法"的值。
+    # 旧实现有三条静默退化路径，每条都会让续跑跨未知状态拼接：
+    #   1) rev-parse 失败 -> echo nogit，与真实状态无从区分；
+    #   2) git diff 失败/被杀 -> 管道仍产出空输出，sha256(空) = e3b0c44298fc1c14，
+    #      与"树干净"的指纹【逐位相同】——本仓库干净树指纹正是这个值，
+    #      所以失败与干净完全不可分辨；
+    #   3) 文件系统抖动时 git diff 实测挂起 48s，而它每步都要算一次，且无超时上限。
+    # 后果就是那类最难发现的记账不实：55 passed 由两份不同源码树的分段拼成，
+    # 而汇总输出完全正常，看不出来。
+    # 【不能用 diff-index 提速】——实测证伪：本沙盒文件系统抖动（overlay ro/rw
+    # 反复重挂）会让索引里的 stat 缓存整体失效，diff-index 不刷新索引、直接
+    # 按 stat 判脏，于是报出 548 个"已改动"文件；而同一时刻 porcelain 的
+    # git diff HEAD 只有 1 个真改动。用它会得到一份与内容无关、且会随索引
+    # 是否被刷新而变的指纹——比慢更糟。正确性是硬要求，速度只能让位。
+    _h=$(timeout 15 git -C "$ROOT" rev-parse HEAD 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$_h" ]; then echo "FPUNKNOWN"; return 0; fi
+    # 上限 20s：实测该命令在索引需整体刷新时会挂起 48s，而它每个步骤都要算
+    # 一次。超时即判"不可得"，由上层拒绝拼接，不让一次卡顿拖垮整轮。
+    _d=$(timeout 20 git -C "$ROOT" diff HEAD --name-only 2>/dev/null)
+    if [ $? -ne 0 ]; then echo "FPUNKNOWN"; return 0; fi
+    _d=$(printf '%s' "$_d" | sha256sum 2>/dev/null | cut -c1-16)
+    if [ -z "$_d" ]; then echo "FPUNKNOWN"; return 0; fi
+    echo "${_h}:${_d}"
 }
+
+# 指纹【只在启动时算一次】，不在每个步骤重算。
+# 实测代价：本沙盒文件系统抖动时 git diff 会因索引整体刷新而挂起，套了
+# timeout 20 也照样被拖满（RC=124 连续两次）。而它原本在 ckpt_mark 里
+# 每步调用一次 —— 55 步就是十几分钟纯卡顿，且期间拿不到任何输出。
+# 按次计算并不削弱判据：跨分段拼接时，新分段在【自己的启动时】算一次
+# 指纹，与 checkpoint 里记录的上一段指纹比对，树变了照样判不符。
+# 反而更稳：变异审计会在运行中临时改写源码再还原，若正好在改写窗口内
+# 落盘 checkpoint，逐步指纹会记下一个"还原后不复现"的值，续跑永远判不符。
+FP_NOW=$(tree_fp)
 
 ckpt_mark() {
     # 先写临时文件再 mv。直接 `> "$CKPT"` 会先把文件截断成 0 字节，若此刻
@@ -79,7 +104,7 @@ ckpt_mark() {
     # 解析不到，表现同样是"指纹不符"，于是又从头跑。mv 是原子操作，不会
     # 留下半截状态。
     printf 'NEXT=%s PASSED=%s FAILED=%s SKIPPED=%s FP=%s\n' \
-        "$1" "$passed" "$failed" "$skipped" "$(tree_fp)" > "$CKPT.tmp" 2>/dev/null \
+        "$1" "$passed" "$failed" "$skipped" "$FP_NOW" > "$CKPT.tmp" 2>/dev/null \
         && mv -f "$CKPT.tmp" "$CKPT" 2>/dev/null || rm -f "$CKPT.tmp" 2>/dev/null
     return 0
 }
@@ -209,10 +234,24 @@ if [ -z "${RESUME_FROM:-}" ] && [ -f "$CKPT" ]; then
             FP=*)      _cfp=${_w#FP=} ;;
         esac
     done
-    if [ "$(tree_fp)" != "$_cfp" ]; then
+    _now=${FP_NOW:-FPUNKNOWN}
+    # 指纹不可得时必须【拒绝拼接】，不能只判两边是否相等：
+    # 若 checkpoint 与当前树都退回同一个哨兵值，等号成立 —— 旧实现会照常接管，
+    # 于是两段来自未知（且可能不同）源码树的结果被拼成一份 55 passed。
+    # 这类拼接比从头跑一遍更危险：汇总数字正常，看不出它对应哪份代码。
+    _fp_ok=1
+    case "$_cfp" in ""|FPUNKNOWN|*FPUNKNOWN*) _fp_ok=0 ;; esac
+    case "$_now" in ""|FPUNKNOWN|*FPUNKNOWN*) _fp_ok=0 ;; esac
+    if [ "$_fp_ok" = 0 ]; then
+        echo "[续跑] 源码树指纹不可得，拒绝拼接"
+        echo "       checkpoint: ${_cfp:-（空）}"
+        echo "       当前树:     $_now"
+        echo "       宁可从头跑一遍，也不能把未知状态的两段拼成一份汇总。"
+        rm -f "$CKPT"
+    elif [ "$_now" != "$_cfp" ]; then
         echo "[续跑] checkpoint 指纹与当前源码树不符，丢弃并从头开始"
         echo "       checkpoint: $_cfp"
-        echo "       当前树:     $(tree_fp)"
+        echo "       当前树:     $_now"
         rm -f "$CKPT"
     elif [ -n "$_cn" ]; then
         RESUME_FROM="$_cn"
