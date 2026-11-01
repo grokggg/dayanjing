@@ -81,11 +81,15 @@ tree_fp() {
     if [ $? -ne 0 ] || [ -z "$_h" ]; then echo "FPUNKNOWN"; return 0; fi
     # 上限 20s：实测该命令在索引需整体刷新时会挂起 48s，而它每个步骤都要算
     # 一次。超时即判"不可得"，由上层拒绝拼接，不让一次卡顿拖垮整轮。
-    _d=$(timeout 20 git -C "$ROOT" diff HEAD --name-only 2>/dev/null)
-    if [ $? -eq 0 ]; then
-        _d=$(printf '%s' "$_d" | sha256sum 2>/dev/null | cut -c1-16)
-        if [ -n "$_d" ]; then echo "git1:${_h}:${_d}"; return 0; fi
-    fi
+    # 【git1 已降为备用，不再优先】原实现让 git diff 路径优先，实测引发一类
+    # 新的记账不实：git diff 在本沙盒时会挂死（D 态 SIGTERM 投递不进去，timeout
+    # 只能干等 20s 后被判不可得），时好时坏 —— 于是同一次回归的两次启动会分别
+    # 拿到 git1 与 ch1 两种前缀。判据要求"两边相等才接管"，跨前缀必然不符，
+    # 结果就是：每次被 502 杀掉后重启都从头跑，跨时段续跑实际不可用，而日志
+    # 显示"指纹不符丢弃"完全合法、看不出是环境抖动导致的能力失效。
+    # 修法：让指纹来源【恒定】——优先用不依赖 git diff 的 ch1 内容哈希。只要
+    # 源码内容没变，任何一次启动拿到的都是同一个 ch1 值，续跑即可靠接管。
+    # git diff 仅保留为 ch1 也失败时的最后兜底（见本函数末尾）。
     # ---- 降级：tracked 文件内容哈希指纹 ----
     # git diff 在本沙盒实测已稳定挂死（>20s，且 D 态下 SIGTERM 无法投递，
     # timeout 只能干等）。它一挂住，FP_NOW 就退化为 FPUNKNOWN，续跑整体失效
@@ -104,6 +108,14 @@ tree_fp() {
         if [ -n "$_fp" ]; then echo "ch1:${_h}:${_fp}"; return 0; fi
     else
         rm -f "$_tmpf"
+    fi
+    # ---- 最后兜底：git diff 路径（ch1 也不可得时才用）----
+    # 它在本沙盒会挂死，故放在 ch1 之后，且上限 20s。保留它是为了在 ch1 因
+    # ls-files/sha256sum 不可用时仍有一条可判别的指纹，而不是退回哨兵。
+    _d=$(timeout 20 git -C "$ROOT" diff HEAD --name-only 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        _d=$(printf '%s' "$_d" | sha256sum 2>/dev/null | cut -c1-16)
+        if [ -n "$_d" ]; then echo "git1:${_h}:${_d}"; return 0; fi
     fi
     echo "FPUNKNOWN"; return 0
 }
