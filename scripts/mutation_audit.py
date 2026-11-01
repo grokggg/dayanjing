@@ -256,6 +256,12 @@ MUTATIONS = [
         "new": "    return (newly > 0) ? 0 : -1;",
         "mod": "09_persistence",
         "bin": "build/test_persist_partial",
+        # 锚点在 persist.c 中出现 2 次：persist_linux_ensure 与
+        # persist_user_ensure 两个同语义函数的尾部块（后者由"新增用户级
+        # 驻留"引入）。未声明时会报"锚点出现 2 次但未声明 all_occurrences"
+        # 并计入审计失效 —— 抽样抽中即整轮回归假红，与产品代码无关。
+        # 该缺陷类本就横跨两处，故与 M3/M10/M12 一致声明全部替换。
+        "all_occurrences": True,
     },
     {
         "id": "M35",
@@ -1278,6 +1284,35 @@ def main():
     h = heal()
     if h:
         print("[HEAL] 恢复了上次被强杀残留的变异: %s" % ", ".join(h))
+
+    # 锚点预检（全量、确定性）。
+    # 背景：M34 的锚点在"新增用户级驻留"后变成 2 处（persist_linux_ensure 与
+    # persist_user_ensure 同语义尾部块），未声明 all_occurrences。而本审计常态
+    # 走随机抽样（--sample N + random.seed()），抽中才报 ERROR —— 于是整轮回归
+    # 时红时绿，产品代码一行没改，排查方向被带向被抽中的那个模块本身。
+    # 改为每次启动都对全部变异做一次纯文本预检（只读文件、不构建，开销可忽略），
+    # 失效锚点一次性列全，不再靠运气暴露。
+    _broken = []
+    for _m in MUTATIONS:
+        _p = os.path.join(ROOT, _m["file"])
+        try:
+            _src = open(_p, encoding="utf-8", errors="replace").read()
+        except OSError as _e:
+            _broken.append((_m["id"], "无法读取 %s: %s" % (_m["file"], _e)))
+            continue
+        _n = _src.count(_m["old"])
+        if _n == 0:
+            _broken.append((_m["id"], "锚点在 %s 中未出现（代码已漂移/重命名）" % _m["file"]))
+        elif _n > 1 and not _m.get("all_occurrences"):
+            _broken.append((_m["id"], "锚点在 %s 中出现 %d 次但未声明 all_occurrences"
+                            % (_m["file"], _n)))
+    if _broken:
+        print("[FATAL] 变异定义失效（预检，共 %d 条）：" % len(_broken))
+        for _mid, _why in _broken:
+            print("       %s: %s" % (_mid, _why))
+        print("        修复：锚点唯一化，或（确为同类逻辑多处）声明 all_occurrences。")
+        release_lock()
+        sys.exit(2)
 
     pool = MUTATIONS
     if sel is not None:
