@@ -52,6 +52,38 @@ fi
 # 回归上下文标记：onekey.sh 在"未显式指定 PREFIX 且以 root 运行"时据此自动切
 # 假根，避免部署测试写真实 /etc。非 root 场景（verify_user_deploy 用 uid=65534
 # 验证用户级降级）不受影响——它落点在 $HOME，本来就不碰真实 /etc。
+# ---- 自动断点续跑 ----
+# 旧实现只有手写的 RESUME_FROM：进程被杀后必须由人从日志里数出断点再手工指定。
+# 实测后果：两次被 502 杀掉后重启都从 01 开始，前段二十多分钟全部作废，于是
+# 「跨时段稳定」这条限制一直拿不到第二次完整绿跑。
+# 现在每个步骤【开跑前】落盘 checkpoint（步骤名 + 此刻计数 + 源码树指纹）：
+# 被杀的步骤尚未计分，重启后从它重跑（不是跳过），计数也回退到开跑前的值，
+# 不会重复计分。指纹不匹配则丢弃 checkpoint —— 跨源码树的拼接会让「55 passed」
+# 对应两份不同的代码，比从头跑一遍更难发现。
+CKPT=$TMPD/dayanjing_regression.ckpt
+
+tree_fp() {
+    _h=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo nogit)
+    # 只取【已跟踪文件】的改动。第一版用的是 status --porcelain，它把未跟踪
+    # 文件也算进来 —— 而回归过程本身就在不断产生未跟踪文件（build 产物、
+    # 测试输出、日志），于是指纹在同一次运行内持续漂移，续跑时永远判定
+    # "树变了"而丢弃 checkpoint、退回从头跑。实测即如此：断点明明有效，
+    # 重启却从头开始，看上去像续跑功能没写。
+    _d=$(git -C "$ROOT" diff HEAD --name-only 2>/dev/null | sha256sum 2>/dev/null | cut -c1-16)
+    echo "${_h}:${_d:-none}"
+}
+
+ckpt_mark() {
+    # 先写临时文件再 mv。直接 `> "$CKPT"` 会先把文件截断成 0 字节，若此刻
+    # 被杀（502 会杀掉全部进程），就留下一个空 checkpoint —— 下次一个字段都
+    # 解析不到，表现同样是"指纹不符"，于是又从头跑。mv 是原子操作，不会
+    # 留下半截状态。
+    printf 'NEXT=%s PASSED=%s FAILED=%s SKIPPED=%s FP=%s\n' \
+        "$1" "$passed" "$failed" "$skipped" "$(tree_fp)" > "$CKPT.tmp" 2>/dev/null \
+        && mv -f "$CKPT.tmp" "$CKPT" 2>/dev/null || rm -f "$CKPT.tmp" 2>/dev/null
+    return 0
+}
+
 export DAYNANJING_REGRESSION=1
 
 # 回归一律从"未被变异污染"的树开始。
@@ -127,6 +159,7 @@ run_c() {
 # 跨模块集成：单独编译并运行
 run_int() {
     name="$1"; shift
+    step_begin "$name" || return 0
     printf "=== %-16s " "$name"
     # 源路径是相对 ROOT 的，必须先 cd，否则找不到 tests/*.c
     if (cd "$ROOT" && timeout 120 cc -std=c11 -O2 -Wall -Wextra -Wpedantic "$@" >$TMPD/cc_$name.log 2>&1) \
@@ -141,6 +174,7 @@ run_int() {
 
 # Python 侧
 run_py() {
+    step_begin "$1" || return 0
     printf "=== %-16s " "$1"
     if timeout 180 python3 "$ROOT/$2" >$TMPD/py_$1.log 2>&1; then
         echo "PASS  $(tail -1 $TMPD/py_$1.log)"; passed=$((passed+1))
@@ -155,17 +189,64 @@ run_py() {
 # 显式导出，让它真正参与回归。
 export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
 
-resume_skip=0
-if [ -n "${RESUME_FROM:-}" ]; then resume_skip=1; fi
+# 续跑接管：优先手工 RESUME_FROM；未指定时自动接管 checkpoint。
+resume_active=0
+resume_matched=0
+CKPT_RESUMED=0
+if [ -z "${RESUME_FROM:-}" ] && [ -f "$CKPT" ]; then
+    _cn=""; _cp=""; _cf=""; _cs=""; _cfp=""
+    # 必须逐【词】解析，不能写 `while read -r _k _v; do case "$_k" ...`：
+    # read 按 IFS 切词，_k 只拿到第一个词，其余全部落进 _v —— 于是
+    # PASSED/FAILED/SKIPPED/FP 一个都没被解析，_cfp 恒为空，指纹比对必然判
+    # "不符"，续跑永远退回从头跑。实测连续三次如此，而表象是"源码树变了"，
+    # 排查方向被引向树的状态而不是这段解析。
+    for _w in $(cat "$CKPT" 2>/dev/null); do
+        case "$_w" in
+            NEXT=*)    _cn=${_w#NEXT=} ;;
+            PASSED=*)  _cp=${_w#PASSED=} ;;
+            FAILED=*)  _cf=${_w#FAILED=} ;;
+            SKIPPED=*) _cs=${_w#SKIPPED=} ;;
+            FP=*)      _cfp=${_w#FP=} ;;
+        esac
+    done
+    if [ "$(tree_fp)" != "$_cfp" ]; then
+        echo "[续跑] checkpoint 指纹与当前源码树不符，丢弃并从头开始"
+        echo "       checkpoint: $_cfp"
+        echo "       当前树:     $(tree_fp)"
+        rm -f "$CKPT"
+    elif [ -n "$_cn" ]; then
+        RESUME_FROM="$_cn"
+        passed=${_cp:-0}; failed=${_cf:-0}; skipped=${_cs:-0}
+        resume_active=1; CKPT_RESUMED=1
+        echo "[续跑] 自动接管：自步骤 $_cn 开始"
+        echo "       前段计数已计入 passed=$passed failed=$failed skipped=$skipped"
+        echo "       本次汇总由多段拼成，非单次连续运行，汇报时必须说明。"
+    fi
+elif [ -n "${RESUME_FROM:-}" ]; then
+    resume_active=1
+fi
+
+# 每个步骤的统一入口。返回 0 = 应当执行；返回 1 = 位于断点之前，跳过。
+# 所有步骤都必须经过它：未经它保护的步骤在续跑时会重跑一遍，导致重复计分，
+# 而汇总数字看起来完全正常 —— 这正是最难发现的一类记账不实。
+step_begin() {
+    if [ "$resume_active" = 1 ]; then
+        if [ "$1" = "$RESUME_FROM" ]; then
+            resume_active=0; resume_matched=1
+        else
+            printf "=== %-16s SKIP(续跑：前段已跑过)\n" "$1"
+            return 1
+        fi
+    fi
+    ckpt_mark "$1"
+    return 0
+}
 
 for m in 00_crypto 01_proto 02_c2 03_transport 04_agent 05_server 06_db 07_ui \
          08_lateral 09_persistence 10_evasion 11_edr_bypass 12_exploit \
          14_p2p 16_initial_access 17_loader 18_privilege 19_defense 20_packer \
          21_exfil 22_kern 23_lkm 24_front 25_tls 26_lateral_auto agent_windows; do
-    if [ "$resume_skip" = 1 ]; then
-        [ "$m" = "$RESUME_FROM" ] && resume_skip=0
-        [ "$resume_skip" = 1 ] && continue
-    fi
+    step_begin "$m" || continue
     run_c "$m"
 done
 
@@ -180,6 +261,7 @@ done
 # 依赖 build/crypto_gcm.o（生产构建，不带 CRYPTO_CT_INSTRUMENT），
 # 该产物已由上方 00_crypto 的 run_c 构建。
 run_ct_asm() {
+    step_begin ct_asm_guard || return 0
     printf "=== %-16s " "ct_asm_guard"
     # 依赖 build/crypto_gcm.o（生产构建，不带 CRYPTO_CT_INSTRUMENT）。
     # 00_crypto 的默认 make 只产出测试二进制，不产出该 .o —— 此前守卫能过
@@ -204,6 +286,7 @@ run_ct_asm
 # 环回 TCP 完成握手 -> 任务通道 -> 采集回传。服务端 stdout/stderr 写文件
 # 而不是继承管道，因此不会让回归脚本等 EOF 挂起。
 run_mono() {
+    step_begin monolith || return 0
     printf "=== %-16s " "monolith"
     # 超时必须覆盖**冷编译**：monolith 链接 9 个上游模块，obj/ 为空时要
     # 编 52 个 .o，实测 5m26s（326s）。原 300s 在冷启动下必然被杀，
@@ -232,6 +315,7 @@ run_mono
 # 而那正是持久化唯一的意义所在。
 run_life()
 {
+    step_begin lifecycle || return 0
     printf "=== %-16s " "lifecycle"
     # lifecycle 依赖 25_deploy/build/deploy_pack，但本脚本此前从不构建
     # 25_deploy——它不在模块循环里。于是干净环境下 lifecycle 必定卡在
@@ -269,7 +353,7 @@ run_int proto_c2_layer \
 # C <-> Python 双向协议对齐（密钥派生 + 帧格式 + AAD）。
 # 单独一个脚本驱动：它需要 Python 侧先生成夹具，缺夹具时 C 侧返回 77(SKIP)，
 # 由脚本统一判定，避免"没比对过"被当成"比对一致"。
-if [ -f "$ROOT/scripts/run_c2_align.sh" ]; then
+if step_begin c2_align && [ -f "$ROOT/scripts/run_c2_align.sh" ]; then
     if sh "$ROOT/scripts/run_c2_align.sh" > $TMPD/c2_align.log 2>&1; then
         echo "  [PASS] c2_align"
         passed=$((passed + 1))
@@ -302,6 +386,7 @@ run_py 12_exploit_pillowcms 12_exploit/tests/test_pillow_cms.py
 
 # Windows 后端 cam_mf.cpp 的逻辑验证。MinGW 不可得（apt/release 均 403），
 # 改用 SDK shim 在 Linux 下真实编译并用 mock 设备真跑其逻辑。
+if step_begin winshim_mf; then
 echo "=== winshim_mf ==="
 if make -C "$ROOT/agent_windows" winshim > $TMPD/winshim.log 2>&1 \
    && grep -q "19 pass, 0 fail" $TMPD/winshim.log; then
@@ -312,10 +397,11 @@ else
     tail -15 $TMPD/winshim.log
     failed=$((failed + 1))
 fi
+fi
 
 # 部署自检：真实起 4 节点（endpoint->edge0->edge1->core）+ echo 目标，
 # 建洋葱电路并校验端到端回显一致。这不是单测，是部署级贯通验证。
-if [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deploy.py ]; then
+if step_begin deploy_4node && [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deploy.py ]; then
     echo "=== deploy_4node ==="
     if python3 14_p2p/tools/deploy.py \
         --topology 14_p2p/tools/topo_4node.json \
@@ -333,7 +419,14 @@ fi
 # 跨网络命名空间部署验证：4 个节点各占独立网络栈 + 独立目标栈，
 # 经网桥互通 —— 跨主机部署会遇到的绑定/路由/邻居问题在这里真实暴露。
 # 需要 root 与 ip/netns 能力，不具备时跳过而不计失败。
-if [ "$(id -u)" = "0" ] && command -v ip >/dev/null 2>&1 \
+# step_begin 必须独立判断，不能写成 `step_begin X && [能力] && ...`：
+# step_begin 返回 1（续跑跳过）会短路进 else，而 else 打印的是
+# "无 root/netns 能力" —— 于是前段跑过的步骤被记成"环境不支持"。
+# 分段续跑的汇总里这类错误归因最致命：它让"哪一步真跑了"不可信，
+# 排查方向还会被带到环境上，而这一步从头到尾没被执行过。
+if ! step_begin deploy_crossns; then
+    :  # 续跑跳过，已由 step_begin 打印
+elif [ "$(id -u)" = "0" ] && command -v ip >/dev/null 2>&1 \
    && ip netns list >/dev/null 2>&1 && [ -f "$ROOT/14_p2p/tools/deploy_crossns.sh" ]; then
     echo "=== deploy_crossns ==="
     if timeout 300 bash "$ROOT/14_p2p/tools/deploy_crossns.sh" > $TMPD/xns_reg.log 2>&1 \
@@ -367,7 +460,7 @@ fi
 # 测试全绿，却引入逐字节早退的时序预言机；源码插桩看不见它（那个
 # 函数根本没被调用），机器码守卫也看不见它（它审的是函数体）。
 # 未分类即失败，新增任何一处 memcmp 都会被拦下要求人工判定。
-if [ -f "$ROOT/scripts/check_secret_cmp.py" ]; then
+if step_begin check_secret_cmp && [ -f "$ROOT/scripts/check_secret_cmp.py" ]; then
     echo "=== check_secret_cmp（全仓 memcmp 分类守卫） ==="
     if python3 "$ROOT/scripts/check_secret_cmp.py" > $TMPD/seccmp.log 2>&1; then
         echo "  [PASS] 全仓 memcmp 均已分类且无秘密比较"
@@ -400,6 +493,7 @@ fi
 # 两者都记为 SKIP 而非 PASS：未验证不等于无漂移，显式报出来，不许混进通过数。
 # 用退出码区分而不是在输出里匹配文案 —— 文案一改，文本检测就静默失效。
 for g in gen_ch_struct gen_cke_struct; do
+    step_begin "${g}_check" || continue
     if [ -f "$ROOT/scripts/$g.py" ]; then
         echo "=== $g --check（结构化变异真值漂移） ==="
         python3 "$ROOT/scripts/$g.py" --check > $TMPD/$g.log 2>&1
@@ -433,7 +527,7 @@ done
 # 变，而两边各自固化下来的期望值仍然"全绿" —— 同一套真值体系里出现两套
 # 口径，且固化常量不会暴露这个分叉。
 # ---------------------------------------------------------------------------
-if [ -f "$ROOT/scripts/check_gen_dedup.py" ]; then
+if step_begin check_gen_dedup && [ -f "$ROOT/scripts/check_gen_dedup.py" ]; then
     echo "=== check_gen_dedup（探测基础设施去重） ==="
     python3 "$ROOT/scripts/check_gen_dedup.py" > $TMPD/gen_dedup.log 2>&1
     rc=$?
@@ -458,7 +552,7 @@ fi
 # 即判失败。只跑上面两项无法替代：它们只证明"此刻通过"，证明不了"该红的
 # 时候会红"。
 # ---------------------------------------------------------------------------
-if [ -f "$ROOT/scripts/check_guards.py" ]; then
+if step_begin check_guards && [ -f "$ROOT/scripts/check_guards.py" ]; then
     echo "=== check_guards（Python 守卫自身双向有效） ==="
     python3 "$ROOT/scripts/check_guards.py" > $TMPD/guards.log 2>&1
     rc=$?
@@ -483,7 +577,7 @@ fi
 # 不能靠一条普通变异条目来锁：CAUGHT 在归类时被直接跳过、永远不计入失败，
 # 所以守卫退化会被 CAUGHT 静默接受。故用独立子命令直接断言状态字。
 # ---------------------------------------------------------------------------
-if [ -f "$ROOT/scripts/mutation_audit.py" ]; then
+if step_begin mut_audit_selftest && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     echo "=== mutation_audit selftest-py（崩溃不得算作捕获） ==="
     python3 "$ROOT/scripts/mutation_audit.py" selftest-py > /data/ma_selftest.log 2>&1
     rc=$?
@@ -514,7 +608,7 @@ fi
 #   21_exfil    all 漏 test_tol
 #   26_lateral_auto  E2E 变量定义在 all 之后，先决条件展开为空
 # 归为 failed 而非 warn：这里一旦失守，前面所有 pass 数都不可信。
-if [ -f "$ROOT/scripts/audit_makefile_tests.py" ]; then
+if step_begin audit_makefile_tests && [ -f "$ROOT/scripts/audit_makefile_tests.py" ]; then
     echo "=== audit_makefile_tests（构建契约） ==="
     if python3 "$ROOT/scripts/audit_makefile_tests.py" > $TMPD/mkaudit.log 2>&1; then
         echo "  [PASS] 各模块测试二进制均由回归调用的目标构建"
@@ -529,7 +623,7 @@ if [ -f "$ROOT/scripts/audit_makefile_tests.py" ]; then
 fi
 
 MUT_MODE=${MUTATION:-sample:1}
-if [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
+if step_begin mutation_audit && [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     echo "=== mutation_audit ==="
     case "$MUT_MODE" in
         full)     MUT_ARGS="" ;;
@@ -567,6 +661,7 @@ fi
 #   它让「入口绿」与「守卫验过」长期脱钩。
 #   放在真实根污染检查之前：这些守卫会做部署，污染检查必须收尾。
 for m in 21_exfil agent_windows; do
+    step_begin "${m}_guards" || continue
     printf "=== %-16s " "${m}_guards"
     if (cd "$ROOT/$m" && timeout 1800 make test >$TMPD/guards_$m.log 2>&1); then
         echo "PASS"
@@ -579,7 +674,7 @@ for m in 21_exfil agent_windows; do
 done
 
 
-if [ -f "$ROOT/scripts/check_realroot_pollution.py" ]; then
+if step_begin realroot_pollution && [ -f "$ROOT/scripts/check_realroot_pollution.py" ]; then
     echo "=== check_realroot_pollution（真实根污染） ==="
     if python3 "$ROOT/scripts/check_realroot_pollution.py"; then
         passed=$((passed + 1))
@@ -598,5 +693,16 @@ if [ -f "$ROOT/scripts/check_realroot_pollution.py" ]; then
     fi
 fi
 
+# 续跑一致性校验：指定了断点却一次都没匹配上，说明断点名已失效（步骤改名 /
+# checkpoint 陈旧）。此时上面所有步骤都被静默跳过，汇总会把「前段计数」原样
+# 输出成一个看起来正常的绿 —— 必须拦下。
+if [ -n "${RESUME_FROM:-}" ] && [ "$resume_matched" = 0 ]; then
+    echo "[FATAL] 续跑断点 '$RESUME_FROM' 未匹配任何步骤：本次未执行任何测试"
+    exit 2
+fi
+if [ "$CKPT_RESUMED" = 1 ]; then
+    echo "[注意] 本次汇总由分段续跑拼成，非单次连续运行"
+fi
+rm -f "$CKPT"
 echo "-------- passed: $passed  failed: $failed  skipped: $skipped --------"
 exit $failed
