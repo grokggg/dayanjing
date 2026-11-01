@@ -1,0 +1,54 @@
+# DAYANJING v3 — 00_crypto Makefile
+
+CC      ?= gcc
+CFLAGS  ?= -O2 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes -std=c11
+CFLAGS  += -Iinclude -D_GNU_SOURCE
+LDFLAGS ?=
+
+BUILD   := build
+SRC     := src/crypto_gcm.c src/crypto_hash.c src/crypto_x25519.c
+HDR     := include/crypto_gcm.h include/crypto_hash.h include/crypto_x25519.h
+
+OBJS    := $(BUILD)/crypto_gcm.o $(BUILD)/crypto_hash.o $(BUILD)/crypto_x25519.o
+
+.PHONY: all clean test mkdirs inspect
+
+all: mkdirs $(BUILD)/test_gcm $(BUILD)/test_hash $(BUILD)/test_x25519
+
+mkdirs:
+	@mkdir -p $(BUILD)
+
+$(BUILD)/%.o: src/%.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# GCM 测试用【插桩版】编译单元：打开 CRYPTO_CT_INSTRUMENT 后，
+# crypto_constant_time_eq 才会记录循环体执行次数，测试才能断言
+# "tag 比对确实走了常量时间原语"。生产库 crypto_gcm.o 不带插桩，
+# 零开销。两者必须分开，否则生产路径就被测试专用代码污染了。
+$(BUILD)/crypto_gcm_ct.o: src/crypto_gcm.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) -DCRYPTO_CT_INSTRUMENT -c $< -o $@
+
+$(BUILD)/test_gcm: $(BUILD)/crypto_gcm_ct.o tests/test_gcm.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) -DCRYPTO_CT_INSTRUMENT tests/test_gcm.c $(BUILD)/crypto_gcm_ct.o -o $@ $(LDFLAGS)
+
+$(BUILD)/test_hash: $(BUILD)/crypto_hash.o tests/test_hash.c $(HDR) | mkdirs
+	$(CC) $(CFLAGS) tests/test_hash.c $(BUILD)/crypto_hash.o -o $@ $(LDFLAGS)
+
+# X25519：权威向量由 Python cryptography 生成，随测试一起编译（tests/x25519_vectors.h）
+$(BUILD)/test_x25519: $(BUILD)/crypto_x25519.o tests/test_x25519.c tests/x25519_vectors.h | mkdirs
+	$(CC) $(CFLAGS) -Itests tests/test_x25519.c $(BUILD)/crypto_x25519.o -o $@ $(LDFLAGS)
+
+test: all
+	./$(BUILD)/test_gcm
+	./$(BUILD)/test_hash
+	./$(BUILD)/test_x25519
+
+inspect: all
+	@echo "== 敏感字符串扫描（应为空） =="
+	@strings $(BUILD)/test_gcm $(BUILD)/test_hash \
+	  | grep -Ei "crypto_layer|key_derivation|PSK|session" || echo "  (无明文敏感标识)"
+	@echo "== 符号表 =="
+	@nm -g --defined-only $(BUILD)/crypto_hash.o | awk '{print "  "$$3}'
+
+clean:
+	rm -rf $(BUILD)

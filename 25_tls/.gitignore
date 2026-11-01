@@ -1,0 +1,7 @@
+tests/data/
+tests/test_bn
+tests/test_x509
+tests/test_tls
+tests/test_asn1
+src/*.o
+*.o

@@ -1,0 +1,86 @@
+[HEAL] 无残留变异备份
+[续跑] 自动接管：自步骤 21_exfil 开始
+       前段计数已计入 passed=19 failed=0 skipped=0
+       本次汇总由多段拼成，非单次连续运行，汇报时必须说明。
+=== 00_crypto        SKIP(续跑：前段已跑过)
+=== 01_proto         SKIP(续跑：前段已跑过)
+=== 02_c2            SKIP(续跑：前段已跑过)
+=== 03_transport     SKIP(续跑：前段已跑过)
+=== 04_agent         SKIP(续跑：前段已跑过)
+=== 05_server        SKIP(续跑：前段已跑过)
+=== 06_db            SKIP(续跑：前段已跑过)
+=== 07_ui            SKIP(续跑：前段已跑过)
+=== 08_lateral       SKIP(续跑：前段已跑过)
+=== 09_persistence   SKIP(续跑：前段已跑过)
+=== 10_evasion       SKIP(续跑：前段已跑过)
+=== 11_edr_bypass    SKIP(续跑：前段已跑过)
+=== 12_exploit       SKIP(续跑：前段已跑过)
+=== 14_p2p           SKIP(续跑：前段已跑过)
+=== 16_initial_access SKIP(续跑：前段已跑过)
+=== 17_loader        SKIP(续跑：前段已跑过)
+=== 18_privilege     SKIP(续跑：前段已跑过)
+=== 19_defense       SKIP(续跑：前段已跑过)
+=== 20_packer        SKIP(续跑：前段已跑过)
+=== 21_exfil         PASS
+=== 22_kern          PASS
+=== 23_lkm           PASS
+=== 24_front         PASS
+=== 25_tls           PASS
+=== 26_lateral_auto  PASS
+=== agent_windows    PASS
+=== ct_asm_guard     PASS
+    [PASS] 机器码级：循环体内无与 diff 相关的控制流（无早退路径）
+    [PASS] 机器码级：回边仅依赖 i != len，diff 从不参与分支判断
+=== monolith         PASS
+=== lifecycle        PASS
+=== integration      PASS
+=== e2e_camo         PASS
+=== proto_c2_layer   PASS
+  [PASS] c2_align
+=== 13_c2_server_py  PASS  [13_c2_server] 19/19 tests passed
+=== 13_c2_server_exfil PASS  === result: 72 pass, 0 fail ===
+=== 13_c2_server_task PASS  total=42 pass=42 fail=0
+=== 13_c2_server_cache PASS  === result: 25 pass, 0 fail ===
+=== 13_c2_server_resume PASS  === result: 29 pass, 0 fail ===
+=== 13_c2_server_seqin PASS  === result: 24 pass, 0 fail ===
+=== 12_exploit_pillowcms PASS  === result: 15 pass, 0 fail ===
+=== winshim_mf ===
+  [PASS] winshim_mf (cam_mf 19/19)
+=== deploy_4node ===
+  [PASS] deploy_4node
+=== deploy_crossns ===
+  [PASS] deploy_crossns (4 独立网络栈贯通)
+=== check_secret_cmp（全仓 memcmp 分类守卫） ===
+  [PASS] 全仓 memcmp 均已分类且无秘密比较
+         [INFO] 扫描到 memcmp 调用点 50 处（产品代码）
+         [INFO] 已分类 50 处
+=== gen_ch_struct --check（结构化变异真值漂移） ===
+  [PASS] 真值无漂移：47 例期望值与当前 OpenSSL 实测一致
+=== gen_cke_struct --check（结构化变异真值漂移） ===
+  [PASS] 真值无漂移：17 例期望值与当前 OpenSSL 实测一致
+=== check_gen_dedup（探测基础设施去重） ===
+  [PASS] 探测基础设施无重复：2 个生成器共用 tls_truth.py 的 6 个实现
+=== check_guards（Python 守卫自身双向有效） ===
+  [PASS] Python 侧守卫双向有效：6 个方向（合规须 PASS / 违规须 FAIL）
+=== mutation_audit selftest-py（崩溃不得算作捕获） ===
+  [PASS] Python runner 判定标记守卫自检
+=== audit_makefile_tests（构建契约） ===
+  [PASS] 各模块测试二进制均由回归调用的目标构建
+=== mutation_audit ===
+  [PASS] mutation_audit (sample:1)
+         存活(用例证明不了任何事) = 0
+         审计失效/挂起           = 0
+         捕获                    = 1
+         符合预期症状(如M2挂起)  = 0
+         已知盲区(测不了,未覆盖) = 0
+=== 21_exfil_guards  PASS
+=== agent_windows_guards PASS
+=== check_realroot_pollution（真实根污染） ===
+  [OK]   真实根无本仓部署痕迹（已扫 3 个名字 × 派生落点）
+  [PASS] 污染守卫正向对照（种下必检出、清除必归零）
+           [OK]   S1 假根种下 10 项痕迹全部检出
+           [OK]   S2 清除后检出归零（判据可收敛）
+           [OK]   S3 真实根路径构造有效（种 10 检 10）
+           [OK]   S4 真实根探针已清除干净（自检不留污染）
+[注意] 本次汇总由分段续跑拼成，非单次连续运行
+-------- passed: 55  failed: 0  skipped: 0 --------

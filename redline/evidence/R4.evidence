@@ -1,0 +1,18 @@
+=== R4 arm64 真产物（zig 交叉编译）===
+
+-- 重编（本轮，产物已变化，旧证据失效）--
+[OK] /data/workspace/dayanjing/artifacts/camd-aarch64-musl magic=7f454c46 class=ELF64 machine=183 静态 size=2568872
+
+-- 打包与架构分派（决定性证据）--
+  make_onekey.py amd64=<e_machine=62> arm64=<e_machine=183>
+  -> [OK] 架构: amd64 arm64
+  假 uname(aarch64) 模拟 arm64 目标 install:
+    [OK] 环境: arch=aarch64
+    [OK] 内嵌产物校验通过（ELF/arm64，e_machine=183，2568872 字节）
+    [FATAL] 二进制无法执行（rc=126）-- 点名架构错配，未误导成 C2 问题
+
+  说明：arm64 段被正确选中；本 x86 主机执行不了属预期。
+
+# ---- 源码指纹（改了下列任一文件，本证据即失效）----
+SRC scripts/build_cross.sh 79fdcfd3d7ab6f35745b6bf8a4a32b24cc7542885a84ad482b698f228340a865 3815
+SRC 21_exfil/make_onekey.py 8b723f89ced5fc898484cf8a690624baf924c6bb0c68043bd1e81a8530a2667a 5224

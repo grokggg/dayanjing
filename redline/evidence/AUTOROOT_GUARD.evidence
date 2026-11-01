@@ -1,0 +1,27 @@
+make: Entering directory '/data/workspace/dayanjing/21_exfil'
+=== 正向：root + DAYNANJING_REGRESSION（未指定 PREFIX）===
+[OK] F1 install rc=0  -- rc=0
+[OK] F2 触发自动切假根（WARN 可见）
+[OK] F3 能取到自动假根路径
+[OK] F4 假根内配置文件已写入  -- /tmp/ok_autoroot_sysupdate/etc/sysupdate/sysupdate.conf
+[OK] F5 假根内二进制已安装  -- /tmp/ok_autoroot_sysupdate/usr/local/bin/sysupdate
+[OK] F6 真实根未被污染（守卫 rc=0）  -- guard_rc=0
+[OK] F7 功能未受损：C2 实收字节 > 0  -- total=204288 conns=1
+[OK] F8 uninstall rc=0  -- rc=0
+[OK] F9 卸载后假根内落点已清  -- /tmp/ok_autoroot_sysupdate/etc/sysupdate/sysupdate.conf / /tmp/ok_autoroot_sysupdate/usr/local/bin/sysupdate
+[OK] F10 卸载后真实根仍干净（守卫 rc=0）  -- guard_rc=0
+=== 反向 R1：root 且无 DAYNANJING_REGRESSION（生产路径）===
+[OK] R1-a install rc=0  -- rc=0
+[OK] R1-b 未触发自动假根（生产部署不得被误切）
+[OK] R1-c 真实根被污染（守卫必须 rc=1 点名）  -- guard_rc=1
+[OK] R1-d uninstall rc=0  -- rc=0
+[OK] R1-e 卸载后真实根恢复干净（守卫 rc=0）  -- guard_rc=0
+=== 反向 R2：uid=65534 + 标记（用户级降级不受影响）===
+[OK] R2-a install rc=0  -- rc=0
+[OK] R2-b 仍走用户级降级（USER_MODE）
+[OK] R2-c 非 root 不得被切成假根
+[OK] R2-d 真实根未被污染（守卫 rc=0）  -- guard_rc=0
+[OK] R2-e uninstall rc=0  -- rc=0
+======== 0 项失败 ========
+make: Leaving directory '/data/workspace/dayanjing/21_exfil'
+AR_RC=0

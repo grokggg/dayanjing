@@ -1,0 +1,9 @@
+{
+  "probe_interval_ms": 2000,
+  "nodes": [
+    {"alias": "endpoint", "role": "endpoint", "neighbors": ["edge0"]},
+    {"alias": "edge0",    "role": "edge",     "neighbors": ["endpoint", "edge1"]},
+    {"alias": "edge1",    "role": "edge",     "neighbors": ["edge0", "core"]},
+    {"alias": "core",     "role": "core",     "neighbors": ["edge1"]}
+  ]
+}

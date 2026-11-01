@@ -1,0 +1,26 @@
+# 真实根污染守卫：串联验证（真根 install → 守卫 → uninstall → 守卫）
+# 目的：证明守卫在完整序列里既会报警、也能恢复，不是恒绿、也不是恒红。
+
+[基线] 真根无痕迹, guard rc=0
+
+[1] 真根 install（onekey-amd64.sh, 无 PREFIX）
+    落点: /etc/sysupdate /etc/sysupdate/sysupdate.conf /var/lib/sysupdate
+          /usr/local/bin/sysupdate /etc/systemd/system/sysupdate.service
+          /etc/cron.d/sysupdate
+    install rc=0
+
+[2] 守卫（install 后）
+    GUARD_RC=1  [FAIL] 真实根存在本仓部署痕迹 6 项（逐项点名）
+
+[3] 真根 uninstall
+    uninstall rc=0  计数: 成功 3 失败 0 警告 0
+
+[4] 守卫（uninstall 后）
+    GUARD_RC=0  [OK] 真实根无本仓部署痕迹
+
+[结论] 守卫在真实部署序列中具备鉴别力：种下必报、清除必复。
+
+[全仓入口] scripts/run_all_tests.sh
+    -------- passed: 53  failed: 0  skipped: 0 --------
+    FULL_RC=0
+    守卫在收尾执行：主扫描 [OK]，正向对照 S1-S4 全 OK

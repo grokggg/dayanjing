@@ -1,0 +1,11 @@
+# DAYANJING v4 — LKM 本体构建（需目标机内核头文件 + kbuild 树）
+#
+#   make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+#
+# 注意：lkm_mod.c 只能在目标机内核头文件下编译。沙盒内没有头文件，
+# 因此默认构建（Makefile）只编译用户态核心与测试，不触碰本文件。
+
+obj-m := dayanjing.o
+dayanjing-objs := src/lkm_mod.o src/lkm.o
+
+ccflags-y := -I$(src)/include -I$(src)/../22_kern/include
