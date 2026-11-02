@@ -338,10 +338,35 @@ resume_matched=0
 CKPT_RESUMED=0
 # 候选顺序：tmpfs 主本优先（virtiofs 故障时它更可能可读），virtiofs 镜像回退
 # （tmpfs 被重启清空时它还在）。两份内容相同，取任一可读且指纹相符者。
+#
+# 【必须按指纹挑，不能只按"存在"挑】——旧实现取第一个存在的文件，实测后果：
+# 主本（/dev/shm）残留着【上一个提交】的过期 ckpt，而镜像才是本次被杀时
+# 落下的、指纹相符的那一份；旧实现选中过期那份 -> 判不符 -> rm -f 掉【两份】
+# （含可用镜像）——唯一能续跑的一份被自己删除，续跑永远回退到从头跑，
+# 而日志显示"源码树变了"，排查方向被引向 git 状态而不是这段选取逻辑。
+# 502 重启清空 /dev/shm 后实测：镜像（virtiofs）带着匹配指纹存活，正是
+# 唯一可接管的一份。
+ckpt_fp_of() { # 取候选文件的 FP 字段；不可读或无该字段时输出空
+    _f="$1"
+    [ -n "$_f" ] && [ -f "$_f" ] || return 0
+    for _w in $(cat "$_f" 2>/dev/null); do
+        case "$_w" in FP=*) echo "${_w#FP=}"; return 0 ;; esac
+    done
+    return 0
+}
 CKPT_SRC=""
+CKPT_STALE=""
 for _c in "$CKPT" "$CKPT_MIRROR"; do
-    [ -n "$_c" ] && [ -f "$_c" ] && CKPT_SRC="$_c" && break
+    [ -n "$_c" ] && [ -f "$_c" ] || continue
+    # 指纹不可得时一律不参与"相符"判定，避免两边哨兵相等而误接管。
+    case "${FP_NOW:-}" in ""|FPUNKNOWN|*FPUNKNOWN*) CKPT_STALE="$_c"; continue ;; esac
+    if [ "$(ckpt_fp_of "$_c")" = "$FP_NOW" ]; then
+        CKPT_SRC="$_c"; break
+    fi
+    [ -z "$CKPT_STALE" ] && CKPT_STALE="$_c"
 done
+# 没有一份相符时，退回首份存在者，仅用于打印"为何不符"（随后会被判丢弃）。
+[ -z "$CKPT_SRC" ] && [ -n "$CKPT_STALE" ] && CKPT_SRC="$CKPT_STALE"
 if [ -z "${RESUME_FROM:-}" ] && [ -n "$CKPT_SRC" ]; then
     _cn=""; _cp=""; _cf=""; _cs=""; _cfp=""
     # 必须逐【词】解析，不能写 `while read -r _k _v; do case "$_k" ...`：
