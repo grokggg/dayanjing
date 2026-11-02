@@ -382,7 +382,7 @@ verify-i386-exec:
 	    echo "[FAIL] i386 执行守卫"; exit 1; \
 	  else echo "[OK] i386 执行守卫通过"; fi
 
-test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-cross-exec verify-i386-exec
+test: verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-uninstall-busy verify-persist-selfheal verify-redline verify-redline-guard verify-autoroot verify-user-deploy $(BUILD)/test_exfil $(BUILD)/test_cam_e2e $(BUILD)/test_exfil_circuit $(BUILD)/test_sched $(BUILD)/test_sched_gate $(BUILD)/test_task $(BUILD)/test_task_circuit $(BUILD)/test_link_cover $(BUILD)/test_task_cover $(BUILD)/test_cover_loop $(BUILD)/test_cover_circuit $(BUILD)/test_exfil_cover_circuit $(BUILD)/test_tol verify-cron-contract verify-v4l2-abi verify-exfil-fidelity verify-cross-exec verify-i386-exec $(BUILD)/test_exfil_srcflag
 	./$(BUILD)/test_exfil
 	./$(BUILD)/test_cam_e2e
 	./$(BUILD)/test_exfil_circuit
@@ -408,3 +408,9 @@ clean:
 
 .PHONY: all test clean inspect verify-persist-selfheal ensure-cross-env verify-redline verify-redline-guard verify-upload verify-c2 verify-c2-reverse verify-tls-sink verify-onekey-sink verify-onekey-arch verify-onekey-front verify-sshkey-persist verify-svcname verify-cron-exec verify-prefix verify-name-stealth verify-cmdline-stealth verify-unit-contract verify-unit-contract-reverse verify-daemon-resilience verify-uninstall-unit verify-v4l2-abi verify-exfil-fidelity verify-autoroot verify-cross-exec verify-i386-exec
 
+
+# test_exfil_srcflag：信元分片后，接收侧解出的 flags 必须与发送侧置入的 flags 一致。
+# 此前该源码从未被任何 Makefile 目标引用 —— 其断言从未执行过一次（被
+# audit_makefile_tests 构建契约守卫抓到）。现接入 test，使断言真正运行。
+$(BUILD)/test_exfil_srcflag: tests/test_exfil_srcflag.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
+	$(CC) $(CFLAGS) -o $@ tests/test_exfil_srcflag.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
