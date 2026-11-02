@@ -1,7 +1,7 @@
 [HEAL] 无残留变异备份
 [续跑] checkpoint 指纹与当前源码树不符，丢弃并从头开始
-       checkpoint: ch1:d25acd05371d6ce4864499f8d3ba68cc3cc243dd:1ebfaa8700b09ac4
-       当前树:     ch1:d25acd05371d6ce4864499f8d3ba68cc3cc243dd:27a5c7cefea384c5
+       checkpoint: ch1:bd24c67c45507d7c850c4fcdbf920a8fc66d8e49:ae11a663e263a83a
+       当前树:     ch1:dd51de6bda3fc6e99261c54322308fa40d9cc6a5:ae11a663e263a83a
 === 00_crypto        PASS
 === 01_proto         PASS
 === 02_c2            PASS
@@ -83,3 +83,4 @@
            [OK]   S3 真实根路径构造有效（种 10 检 10）
            [OK]   S4 真实根探针已清除干净（自检不留污染）
 -------- passed: 55  failed: 0  skipped: 0 --------
+FULL_RC=0
