@@ -36,7 +36,25 @@ if [ -z "$TMPD" ]; then
     echo "[FATAL] 找不到可写临时目录（/data/workspace/.regtmp 与 /tmp 均不可写）"
     exit 2
 fi
-REG_LOCK=$TMPD/dayanjing_regression.lock
+
+# ---- checkpoint 与锁单独放盘，必须与 $TMPD 分离 ----
+# SEQ:77 实测：virtiofs 抖动会让整个 /data/workspace 出现 Stale file handle，
+# 而续跑状态（checkpoint）原本就写在这里 —— 于是「需要续跑」的时刻恰好是
+# 「续跑状态读不出来」的时刻，断点记录随故障一起丢失，被杀后只能从头跑。
+# /dev/shm 是 tmpfs，与 virtiofs 不是同一个文件系统，故障不影响它。
+# 这里只放【状态】（数百字节），不放构建产物（体积大且需跨段复用，留在
+# $TMPD）；产物丢了顶多重编，状态丢了整轮作废。
+CKPTD=""
+for c in /dev/shm/dayanjing_ckpt "$TMPD"; do
+    if mkdir -p "$c" 2>/dev/null && : > "$c/.wtest" 2>/dev/null; then CKPTD="$c"; break; fi
+done
+[ -n "$CKPTD" ] || CKPTD="$TMPD"
+# 若 /dev/shm 不可用（部分容器无 tmpfs），退化为同盘并明确告警：此时续跑
+# 在文件系统故障下仍会失效，但至少不会静默降级成「看起来能续跑」。
+if [ "$CKPTD" = "$TMPD" ] && [ "${DAYANJING_PRINT_FP:-0}" = "1" ]; then
+    echo "[WARN] checkpoint 未分离到 tmpfs，文件系统故障时续跑将失效"
+fi
+REG_LOCK=$CKPTD/dayanjing_regression.lock
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$REG_LOCK"
     if ! flock -n 9; then
@@ -60,7 +78,7 @@ fi
 # 被杀的步骤尚未计分，重启后从它重跑（不是跳过），计数也回退到开跑前的值，
 # 不会重复计分。指纹不匹配则丢弃 checkpoint —— 跨源码树的拼接会让「55 passed」
 # 对应两份不同的代码，比从头跑一遍更难发现。
-CKPT=$TMPD/dayanjing_regression.ckpt
+CKPT=$CKPTD/dayanjing_regression.ckpt
 
 tree_fp() {
     # 指纹不可得时必须【显式返回哨兵】，绝不能退化成一个"看起来合法"的值。
@@ -100,7 +118,7 @@ tree_fp() {
     # 不会像旧实现那样因为"两边都退回同一个哨兵"而照常接管。
     # ls-files 输出 NUL 分隔，不能进 shell 变量（NUL 会被截断成只剩第一个文件），
     # 必须落临时文件再喂给 xargs -0。
-    _tmpf=$TMPD/.lsfiles.$$
+    _tmpf=$CKPTD/.lsfiles.$$
     if timeout 15 git -C "$ROOT" ls-files -z > "$_tmpf" 2>/dev/null && [ -s "$_tmpf" ]; then
         _fp=$( (cd "$ROOT" && xargs -0 -r sha256sum < "$_tmpf") 2>/dev/null \
               | LC_ALL=C sort -k2 | sha256sum 2>/dev/null | cut -c1-16)
@@ -128,9 +146,15 @@ tree_fp() {
 # 指纹，与 checkpoint 里记录的上一段指纹比对，树变了照样判不符。
 # 反而更稳：变异审计会在运行中临时改写源码再还原，若正好在改写窗口内
 # 落盘 checkpoint，逐步指纹会记下一个"还原后不复现"的值，续跑永远判不符。
-FP_NOW=$(tree_fp)
-# 仅调试用：默认关闭，不干扰正常回归输出。
-if [ "${DAYANJING_PRINT_FP:-0}" = "1" ]; then echo "[DEBUG] FP_NOW=$FP_NOW"; fi
+# 【注意：FP_NOW 不在这里算，已移至下方 mutation_audit.py heal 之后。】
+# 曾在此处计算，实测后果是跨时段续跑永远失效，而日志完全合法、看不出异常：
+# 指纹用的是 ch1 内容哈希，而 heal 的职责正是还原被强杀的变异审计留下的
+# 源码改写 —— 于是第一次启动在【污染态】算指纹（heal 尚未执行），被杀后
+# 第二次启动在【已 heal 的干净态】算指纹，两者必然不符，判据正确地拒绝
+# 拼接，续跑因此一次都没真正接管过。
+# 实测三态：干净 7ad95d83… / 注入残留变异 03692b95… / 还原后回到 7ad95d83…。
+# 教训：指纹必须描述"本次回归实际要跑的那份源码"，任何会改变源码的动作
+# （heal、自愈、格式还原）都必须排在取指纹之前，否则指纹记的是历史态。
 
 ckpt_mark() {
     # 先写临时文件再 mv。直接 `> "$CKPT"` 会先把文件截断成 0 字节，若此刻
@@ -143,6 +167,11 @@ ckpt_mark() {
     return 0
 }
 
+. "$ROOT/scripts/reg_failclass.sh" 2>/dev/null || {
+    echo "[FATAL] 无法加载 scripts/reg_failclass.sh（失败分类缺失）"
+    exit 2
+}
+
 export DAYNANJING_REGRESSION=1
 
 # 回归一律从"未被变异污染"的树开始。
@@ -152,6 +181,21 @@ export DAYNANJING_REGRESSION=1
 if [ -f "$ROOT/scripts/mutation_audit.py" ]; then
     timeout 60 python3 "$ROOT/scripts/mutation_audit.py" heal || true
 fi
+
+# 指纹【在 heal 之后、启动时算一次】，不在每个步骤重算。
+# 顺序是硬要求：heal 会还原被强杀的变异审计留下的源码改写，若在它之前取
+# 指纹，记下的就是污染态内容，而被杀后重启总是在已 heal 的干净态启动 ——
+# 两边必然不符，续跑永远拒绝接管（实测：干净 7ad95d83 vs 污染 03692b95）。
+# 实测代价：本沙盒文件系统抖动时 git diff 会因索引整体刷新而挂起，套了
+# timeout 20 也照样被拖满（RC=124 连续两次）。而它原本在 ckpt_mark 里
+# 每步调用一次 —— 55 步就是十几分钟纯卡顿，且期间拿不到任何输出。
+# 按次计算并不削弱判据：跨分段拼接时，新分段在【自己的启动时】算一次
+# 指纹，与 checkpoint 里记录的上一段指纹比对，树变了照样判不符。
+# 反而更稳：变异审计会在运行中临时改写源码再还原，若正好在改写窗口内
+# 落盘 checkpoint，逐步指纹会记下一个"还原后不复现"的值，续跑永远判不符。
+FP_NOW=$(tree_fp)
+# 仅调试用：默认关闭，不干扰正常回归输出。
+if [ "${DAYANJING_PRINT_FP:-0}" = "1" ]; then echo "[DEBUG] FP_NOW=$FP_NOW"; fi
 
 # 单个测试用例的超时（秒）。默认 120 足够绝大多数单测。
 # 例外必须写明理由：12_exploit 的 canary/PIE 爆破是**逐字节试探**，
@@ -174,7 +218,7 @@ run_c() {
     if ! (cd "$d" && timeout 300 make >$TMPD/mk_$name.log 2>&1); then
         echo "BUILD FAIL"
         tail -5 $TMPD/mk_$name.log
-        failed=$((failed+1)); return
+        record_fail $TMPD/mk_$name.log; return
     fi
     ok=1
     # 只取可执行文件，排除 .c/.o（.o 也会被 -perm -u+x 误匹配）
@@ -183,7 +227,7 @@ run_c() {
         # 一个测试都没找到却判 PASS，是最危险的假通过：模块可能压根没构建
         # 出测试二进制（实测：26_lateral_auto 的 all 目标只产出 .o）。
         echo "FAIL -> 未找到任何测试可执行文件（build/ 为空 or 默认目标不构建测试）"
-        failed=$((failed+1)); return
+        record_fail; return
     fi
     for t in $tests; do
         timeout "$(tmo_for "$name")" "$t" >$TMPD/t_$name.log 2>&1
@@ -212,7 +256,7 @@ run_c() {
             break
         fi
     done
-    if [ $ok -eq 1 ]; then echo "PASS"; passed=$((passed+1)); else failed=$((failed+1)); fi
+    if [ $ok -eq 1 ]; then echo "PASS"; passed=$((passed+1)); else record_fail $TMPD/t_$name.log; fi
 }
 
 # 跨模块集成：单独编译并运行
@@ -227,7 +271,7 @@ run_int() {
     else
         echo "FAIL"
         tail -6 $TMPD/cc_$name.log $TMPD/t_$name.log 2>/dev/null
-        failed=$((failed+1))
+        record_fail $TMPD/cc_$name.log $TMPD/t_$name.log
     fi
 }
 
@@ -238,7 +282,7 @@ run_py() {
     if timeout 180 python3 "$ROOT/$2" >$TMPD/py_$1.log 2>&1; then
         echo "PASS  $(tail -1 $TMPD/py_$1.log)"; passed=$((passed+1))
     else
-        echo "FAIL"; tail -6 $TMPD/py_$1.log; failed=$((failed+1))
+        echo "FAIL"; tail -6 $TMPD/py_$1.log; record_fail $TMPD/py_$1.log
     fi
 }
 
@@ -340,14 +384,14 @@ run_ct_asm() {
     # 00_crypto 的默认 make 只产出测试二进制，不产出该 .o —— 此前守卫能过
     # 纯属产物恰好还留在 build/ 里。显式构建，失败即报，不靠"碰巧还在"。
     if ! (cd "$ROOT/00_crypto" && make build/crypto_gcm.o >$TMPD/mk_ctasm.log 2>&1); then
-        echo "BUILD FAIL"; tail -5 $TMPD/mk_ctasm.log; failed=$((failed+1)); return
+        echo "BUILD FAIL"; tail -5 $TMPD/mk_ctasm.log; record_fail $TMPD/mk_ctasm.log; return
     fi
     if (cd "$ROOT/00_crypto" && python3 scripts/check_ct_asm.py >$TMPD/t_ct_asm.log 2>&1); then
         echo "PASS"; grep -E "^\[PASS\]" $TMPD/t_ct_asm.log | sed 's/^/    /'
         passed=$((passed+1))
     else
         echo "FAIL"; cat $TMPD/t_ct_asm.log
-        failed=$((failed+1))
+        record_fail $TMPD/t_ct_asm.log
     fi
 }
 run_ct_asm
@@ -367,7 +411,7 @@ run_mono() {
     # 两次失败都与代码无关，纯属超时预算不足。900s 留出 2.7 倍余量。
     if ! (cd "$ROOT/monolith" && timeout 900 make >$TMPD/mk_monolith.log 2>&1); then
         echo "BUILD FAIL"; tail -5 $TMPD/mk_monolith.log
-        failed=$((failed+1)); return
+        record_fail $TMPD/mk_monolith.log; return
     fi
     # --run-ms 必须有界：无上界时若帧被去重跳过，循环永不退出。
     # --budget 给足：默认预算下 3 秒窗口累积不足 1 个覆盖信元，
@@ -377,7 +421,7 @@ run_mono() {
         echo "PASS"; passed=$((passed+1))
     else
         echo "FAIL"; tail -12 $TMPD/t_monolith.log
-        failed=$((failed+1))
+        record_fail $TMPD/t_monolith.log
     fi
 }
 run_mono
@@ -395,14 +439,14 @@ run_life()
     # "[FATAL] 打包失败"，与被测逻辑无关。必须先补这一步。
     if ! (cd "$ROOT/25_deploy" && timeout 600 make >$TMPD/mk_25deploy.log 2>&1); then
         echo "DEP BUILD FAIL"; tail -5 $TMPD/mk_25deploy.log
-        failed=$((failed+1)); return
+        record_fail $TMPD/mk_25deploy.log; return
     fi
     if timeout 300 bash "$ROOT/25_deploy/scripts/lifecycle.sh" \
             >$TMPD/t_lifecycle.log 2>&1; then
         echo "PASS"; passed=$((passed+1))
     else
         echo "FAIL"; tail -20 $TMPD/t_lifecycle.log
-        failed=$((failed+1))
+        record_fail $TMPD/t_lifecycle.log
     fi
 }
 run_life
@@ -433,7 +477,7 @@ if step_begin c2_align && [ -f "$ROOT/scripts/run_c2_align.sh" ]; then
     else
         echo "  [FAIL] c2_align"
         grep -E "FAIL" $TMPD/c2_align.log | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail $TMPD/c2_align.log
     fi
 fi
 
@@ -468,7 +512,7 @@ if make -C "$ROOT/agent_windows" winshim > $TMPD/winshim.log 2>&1 \
 else
     echo "  [FAIL] winshim_mf  (见 $TMPD/winshim.log)"
     tail -15 $TMPD/winshim.log
-    failed=$((failed + 1))
+    record_fail $TMPD/winshim.log
 fi
 fi
 
@@ -485,7 +529,7 @@ if step_begin deploy_4node && [ -x /usr/bin/python3 ] && [ -f 14_p2p/tools/deplo
     else
         echo "  [FAIL] deploy_4node  (见 $TMPD/dep_selftest.log)"
         tail -12 $TMPD/dep_selftest.log
-        failed=$((failed + 1))
+        record_fail $TMPD/dep_selftest.log
     fi
 fi
 
@@ -542,7 +586,7 @@ if step_begin check_secret_cmp && [ -f "$ROOT/scripts/check_secret_cmp.py" ]; th
     else
         echo "  [FAIL] 秘密比较守卫未通过（见 $TMPD/seccmp.log）"
         sed -n '/\[FAIL\]/,$p' $TMPD/seccmp.log | head -40
-        failed=$((failed + 1))
+        record_fail $TMPD/seccmp.log
     fi
 fi
 
@@ -587,7 +631,7 @@ for g in gen_ch_struct gen_cke_struct; do
             # 不区分的话，一次端口冲突会被当成产品缺陷去查。
             grep -E "^\[FATAL\]" $TMPD/$g.log | sed 's/^/         [环境] /'
             grep -E "^\[FAIL\]|^       " $TMPD/$g.log | sed 's/^/         /'
-            failed=$((failed + 1))
+            record_fail $TMPD/$g.log
         fi
     fi
 done
@@ -610,7 +654,7 @@ if step_begin check_gen_dedup && [ -f "$ROOT/scripts/check_gen_dedup.py" ]; then
     else
         echo "  [FAIL] 探测基础设施出现重复实现"
         grep -E '^       ' $TMPD/gen_dedup.log | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail $TMPD/gen_dedup.log
     fi
 fi
 
@@ -635,7 +679,7 @@ if step_begin check_guards && [ -f "$ROOT/scripts/check_guards.py" ]; then
     else
         echo "  [FAIL] Python 侧守卫自身失效（恒绿或恒红）"
         grep -E '^       |^\[FATAL\]' $TMPD/guards.log | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail $TMPD/guards.log
     fi
 fi
 
@@ -665,7 +709,7 @@ if step_begin mut_audit_selftest && [ -f "$ROOT/scripts/mutation_audit.py" ]; th
     else
         echo "  [FAIL] Python runner 判定标记守卫失效（崩溃被记成捕获）"
         grep -E '^\[BAD\]|^\[FAIL\]' /data/ma_selftest.log | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail /data/ma_selftest.log
     fi
 fi
 
@@ -691,7 +735,7 @@ if step_begin audit_makefile_tests && [ -f "$ROOT/scripts/audit_makefile_tests.p
         echo "  [FAIL] 构建契约被破坏：有测试二进制不由 make 产出，"
         echo "         build/ 中可能正被执行陈旧产物（见 $TMPD/mkaudit.log）"
         grep -E "^\[MISS\]|^\[ERR \]" $TMPD/mkaudit.log | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail $TMPD/mkaudit.log
     fi
 fi
 
@@ -715,7 +759,7 @@ if step_begin mutation_audit && [ "$MUT_MODE" != "off" ] && [ -f "$ROOT/scripts/
     else
         echo "  [FAIL] mutation_audit ($MUT_MODE)  (见 $TMPD/mut.log)"
         sed -n '/=== 变异审计结果 ===/,$p' $TMPD/mut.log
-        failed=$((failed + 1))
+        record_fail $TMPD/mut.log
     fi
 fi
 
@@ -742,7 +786,7 @@ for m in 21_exfil agent_windows; do
     else
         echo "FAIL"
         grep -E "^\[FAIL\]|^\[ERROR\]|make.*\*\*\*" $TMPD/guards_$m.log | head -20 | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail $TMPD/guards_$m.log
     fi
 done
 
@@ -762,7 +806,7 @@ if step_begin realroot_pollution && [ -f "$ROOT/scripts/check_realroot_pollution
     else
         echo "  [FAIL] 污染守卫本身失效（恒绿或自检留污染）"
         cat $TMPD/rrguard.log | sed 's/^/         /'
-        failed=$((failed + 1))
+        record_fail $TMPD/rrguard.log
     fi
 fi
 
