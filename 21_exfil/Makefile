@@ -417,3 +417,14 @@ clean:
 # audit_makefile_tests 构建契约守卫抓到）。现接入 test，使断言真正运行。
 $(BUILD)/test_exfil_srcflag: tests/test_exfil_srcflag.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
 	$(CC) $(CFLAGS) -o $@ tests/test_exfil_srcflag.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
+
+# dump_srcflag：从 camd 真实回传信元流里解出每条记录的 flags。
+#
+# 为什么必须单独有这个工具：
+#   test_exfil_srcflag 证明的是"这个位能穿过信元层"，但它自己手工构造
+#   flags，根本不经过 cam_daemon —— cd_pack 里依据 s->src_degrade 置位
+#   的那行若被漏写、或 src_degrade 从未被写入，单元测试依然全绿。
+#   本工具因此从"接收侧视角"独立解开 camd 落盘的原始字节，不复用任何
+#   发送侧逻辑，用来证明置位在**真实运行**中确实发生。
+$(BUILD)/dump_srcflag: tests/dump_srcflag.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)
+	$(CC) $(CFLAGS) -o $@ tests/dump_srcflag.c $(BUILD)/exfil.o $(BUILD)/exfil_link.o $(LATLIB) $(C2OBJS) $(P2PLIB)

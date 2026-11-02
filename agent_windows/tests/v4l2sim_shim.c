@@ -49,6 +49,31 @@
 
 #define MAXFD 4096
 
+/* backing 临时文件所在目录。sim_init() 负责选定与创建，见其处注释。
+ *
+ * 三级候选，按序探测，取第一个"可建且可写"的：
+ *   1) V4L2SIM_DIR 环境变量   —— 调用方显式指定
+ *   2) SIM_DIR_PRIMARY        —— /dev/shm，tmpfs，不会被 /tmp 清理任务波及
+ *   3) SIM_DIR_FALLBACK       —— /tmp，仅在上面两者都不可用时
+ *
+ * 之所以必须有非 /tmp 候选：/tmp 会被环境例行清理（本仓已在 cron 日志上
+ * 吃过同一亏），目录消失后 mkstemp 失败 -> open 返回 ENODEV -> 真设备
+ * 场景被判成"无设备"。
+ *
+ * 为什么首选 /dev/shm 而不是某个"持久"目录（实测得出，勿改回）：
+ *   backing 文件会被 ftruncate 后 mmap，进程写映射区。这里试过把目录
+ *   挪到 /data/workspace，结果 camd 在真设备场景 rc=-7（SIGBUS）——
+ *   该路径是 virtiofs（FUSE 类，即本仓反复出现 Stale file handle 的
+ *   virtio_rw_*），其 mmap 语义撑不住"truncate 后写映射页"。
+ *   /dev/shm 是 tmpfs，mmap 行为与 /tmp 一致，且不在 /tmp 清理范围内。
+ *   大小足够：backing = 帧长 + 8KB，远小于默认 64MB 容量。 */
+#define SIM_DIR_PRIMARY  "/dev/shm/v4l2sim"
+#define SIM_DIR_FALLBACK "/tmp/v4l2sim"
+#define SIM_PATH_MAX     4096
+
+static char g_sim_dir[SIM_PATH_MAX];
+static int sim_dir_pick(void);
+
 typedef struct {
     int      used;
     int      real_fd;      /* 真实临时文件 fd */
@@ -88,6 +113,26 @@ static void sim_init(void)
 {
     if (g_init_done) return;
     g_init_done = 1;
+
+    /* backing 目录必须自建，且必须落在不会被例行清理的位置。
+     *
+     * open() 命中 /dev/videoN 时用 mkstemp("<dir>/backingXXXXXX") 造真实
+     * 文件作 backing——后续 mmap / memcpy 因此都是真的。此前这个目录写死
+     * 在 /tmp 且由外部先建好，于是目录一旦不存在（沙盒会清理 /tmp，本仓
+     * 已在 cron 日志上吃过同一亏），mkstemp 失败 -> open 返回 ENODEV ->
+     * v4l2_try_open 全数失败 -> 真设备场景被判成"无设备"。
+     *
+     * 症状极具误导性：CAPTURE 依然 OK、帧长依然正确、JPEG 依然合法，
+     * 因为降级路径本就产合成帧；唯一异常只是 DEGRADE=1。于是守卫的
+     * F1（真设备应不置位 SYNTH）恒红，而 F2/F3（降级应置位）恒绿——
+     * 三态判据整体失效，却看不出是验证设施的问题。
+     *
+     * 现在改由 sim_dir_pick() 在三级候选中选定可建且可写者，并用真实
+     * 建文件的方式探测可写性（access(W_OK) 对 root 恒真，不可用）。 */
+    if (sim_dir_pick() != 0) {
+        /* 三级全不可用：不留空串，退回 /tmp 让后续错误可诊断 */
+        snprintf(g_sim_dir, sizeof g_sim_dir, "%s", SIM_DIR_FALLBACK);
+    }
 
     const char *e;
     if ((e = getenv("V4L2SIM_FMT")) && strcmp(e, "yuyv") == 0) g_fmt_mjpeg = 0;
@@ -190,6 +235,70 @@ static void bind_real(void)
     if (!real_munmap)    real_munmap   = (int(*)(void*,size_t))dlsym(RTLD_NEXT, "munmap");
 }
 
+/* 递归建目录。V4L2SIM_DIR 可能指向多级路径，单级 mkdir 会失败。 */
+static int sim_mkdir_p(const char *d)
+{
+    char buf[SIM_PATH_MAX];
+    size_t n = strlen(d);
+    if (n == 0 || n >= sizeof buf) return -1;
+    memcpy(buf, d, n + 1);
+    for (size_t i = 1; i <= n; i++) {
+        if (buf[i] != '/' && buf[i] != '\0') continue;
+        char save = buf[i];
+        buf[i] = '\0';
+        if (mkdir(buf, 0700) != 0 && errno != EEXIST) return -1;
+        buf[i] = save;
+    }
+    return 0;
+}
+
+/* 可写性探测：真的造一个文件再删。
+ *
+ * 不能用 access(W_OK)：本进程是 root，权限位检查对 root 恒通过，
+ * 无法区分"可写"与"目录存在但挂在只读文件系统上"。 */
+static int sim_dir_writable(const char *d)
+{
+    char t[SIM_PATH_MAX];
+    int fd;
+    if (snprintf(t, sizeof t, "%s/.probeXXXXXX", d) >= (int)sizeof t) return 0;
+    bind_real();
+    fd = mkstemp(t);
+    if (fd < 0) return 0;
+    unlink(t);
+    real_close(fd);
+    return 1;
+}
+
+/* 选定 backing 目录：三级候选取第一个可建且可写的。
+ * 返回 0 表示已选好（写入 g_sim_dir），-1 表示全部不可用。 */
+static int sim_dir_pick(void)
+{
+    const char *cands[3];
+    int nc = 0;
+    const char *env = getenv("V4L2SIM_DIR");
+    if (env && env[0]) cands[nc++] = env;
+    cands[nc++] = SIM_DIR_PRIMARY;
+    cands[nc++] = SIM_DIR_FALLBACK;
+
+    for (int i = 0; i < nc; i++) {
+        if (sim_mkdir_p(cands[i]) != 0) continue;
+        if (!sim_dir_writable(cands[i])) continue;
+        snprintf(g_sim_dir, sizeof g_sim_dir, "%s", cands[i]);
+        return 0;
+    }
+    return -1;
+}
+
+/* 运行期自愈：目录被清理后重建一次再试。
+ * sim_init 只在首次调用时选目录，之后若目录消失（/tmp 被清理）
+ * mkstemp 就会失败；这里重新建一次，避免整个场景塌成"无设备"。 */
+static int sim_dir_heal(void)
+{
+    if (!g_sim_dir[0]) return -1;
+    if (sim_mkdir_p(g_sim_dir) != 0) return -1;
+    return sim_dir_writable(g_sim_dir) ? 0 : -1;
+}
+
 static int is_video_path(const char *p)
 {
     if (!p) return 0;
@@ -206,8 +315,19 @@ int open(const char *path, int flags, ...)
     if (is_video_path(path)) {
         /* 真实驱动不存在，改为打开一个 backing 文件：
          * 让后续 mmap 是真 mmap、memcpy 是真 memcpy */
-        char tmpl[] = "/tmp/v4l2sim/backingXXXXXX";
-        int fd = mkstemp(tmpl);
+        char tmpl[SIM_PATH_MAX];
+        int fd;
+        if (snprintf(tmpl, sizeof tmpl, "%s/backingXXXXXX", g_sim_dir)
+                >= (int)sizeof tmpl) { errno = ENODEV; return -1; }
+        fd = mkstemp(tmpl);
+        if (fd < 0) {
+            /* 目录可能在进程运行期被清理（/tmp 场景）：重建后再试一次，
+             * 避免整个场景塌成"无设备"这类误导性结果。 */
+            if (sim_dir_heal() == 0) {
+                snprintf(tmpl, sizeof tmpl, "%s/backingXXXXXX", g_sim_dir);
+                fd = mkstemp(tmpl);
+            }
+        }
         if (fd < 0) { errno = ENODEV; return -1; }
         unlink(tmpl);
         if (ftruncate(fd, (off_t)sim_frame_len() + 8192) != 0) {

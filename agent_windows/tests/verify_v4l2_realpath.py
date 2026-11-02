@@ -22,9 +22,15 @@ verify_v4l2_realpath —— 驱动**真实的 cam_linux_v4l2.c 真设备代码�
   S1      静态：产品源码确实含真 V4L2 ioctl 调用
   R1/R2   反向：两条都必须能被复现出"失败/消失"，否则正向断言是恒绿的
 
-注意：shim 依赖 /tmp/v4l2sim 目录存在（backing 文件用 mkstemp 建在其下）。
+注意：shim 的 backing 文件目录由 shim 自建（见 v4l2sim_shim.c 的
+  sim_dir_pick：优先 /dev/shm/v4l2sim，回退 /tmp/v4l2sim）。本脚本里的
+  BACKING_DIR 只是**输出目录**（state 文件落地处），与 shim 的 backing
+  目录是两回事，不要求同名同址。
+  选 /dev/shm 而非"持久"目录是实测结论：曾挪到 /data/workspace（virtiofs），
+  结果 camd 在真设备场景 rc=-7 SIGBUS——该文件系统撑不住 backing 文件的
+  ftruncate 后 mmap 写。
   目录缺失时 shim 的 open 返回 ENODEV -> 探测失败 -> 静默走降级分支，
-  计数全 0。本脚本显式创建该目录。
+  计数全 0；现在 shim 会自建并在运行期自愈，但本脚本仍显式创建输出目录。
 """
 import os
 import subprocess
