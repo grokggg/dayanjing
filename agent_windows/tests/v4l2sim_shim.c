@@ -49,6 +49,9 @@
 
 #define MAXFD 4096
 
+/* backing 临时文件所在目录。sim_init() 负责创建，见其处注释。 */
+#define SIM_DIR "/tmp/v4l2sim"
+
 typedef struct {
     int      used;
     int      real_fd;      /* 真实临时文件 fd */
@@ -88,6 +91,20 @@ static void sim_init(void)
 {
     if (g_init_done) return;
     g_init_done = 1;
+
+    /* backing 目录必须自建。
+     *
+     * open() 命中 /dev/videoN 时用 mkstemp("/tmp/v4l2sim/backingXXXXXX")
+     * 造真实文件作 backing——后续 mmap / memcpy 因此都是真的。此前这个
+     * 目录由外部先建好，于是目录一旦不存在（沙盒会清理 /tmp，本仓已在
+     * cron 日志上吃过同一亏），mkstemp 失败 -> open 返回 ENODEV ->
+     * v4l2_try_open 全数失败 -> 真设备场景被判成"无设备"。
+     *
+     * 症状极具误导性：CAPTURE 依然 OK、帧长依然正确、JPEG 依然合法，
+     * 因为降级路径本就产合成帧；唯一异常只是 DEGRADE=1。于是守卫的
+     * F1（真设备应不置位 SYNTH）恒红，而 F2/F3（降级应置位）恒绿——
+     * 三态判据整体失效，却看不出是验证设施的问题。 */
+    (void)mkdir(SIM_DIR, 0700);
 
     const char *e;
     if ((e = getenv("V4L2SIM_FMT")) && strcmp(e, "yuyv") == 0) g_fmt_mjpeg = 0;
@@ -206,7 +223,7 @@ int open(const char *path, int flags, ...)
     if (is_video_path(path)) {
         /* 真实驱动不存在，改为打开一个 backing 文件：
          * 让后续 mmap 是真 mmap、memcpy 是真 memcpy */
-        char tmpl[] = "/tmp/v4l2sim/backingXXXXXX";
+        char tmpl[] = SIM_DIR "/backingXXXXXX";
         int fd = mkstemp(tmpl);
         if (fd < 0) { errno = ENODEV; return -1; }
         unlink(tmpl);
