@@ -37,6 +37,26 @@ if [ -z "$TMPD" ]; then
     exit 2
 fi
 
+# ---- 临时盘自愈：运行中 $TMPD 变 Stale 时换盘，而不是让步骤伪装失败 ----
+# SEQ:77 实测：/data/workspace 中途出现 Stale file handle，守卫日志
+# （$TMPD/guards_*.log）与 ckpt 都写在这里 —— make test 本身还没跑，
+# 重定向先失败，回归把「临时盘不可写」记成了「守卫 FAIL」，二者外观
+# 完全一致，排查方向被引向守卫实现，而真凶是文件系统。
+# TMPD 只在启动时选一次不够：故障发生在中途。故每次落盘前重检并换盘。
+# 换盘失败时返回非 0，由调用方记 SKIP —— 绝不记 PASS：把环境故障记成
+# 通过，与「判据恒绿」是同一类错，比记 FAIL 更危险。
+tmpd_fix() {
+    if : > "$TMPD/.wtest" 2>/dev/null; then return 0; fi
+    for c in /dev/shm/dayanjing_tmp /data/workspace/.regtmp2 /tmp; do
+        if mkdir -p "$c" 2>/dev/null && : > "$c/.wtest" 2>/dev/null; then
+            echo "  [注意] 临时盘 $TMPD 已不可写，切换至 $c"
+            TMPD="$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ---- checkpoint 与锁单独放盘，必须与 $TMPD 分离 ----
 # SEQ:77 实测：virtiofs 抖动会让整个 /data/workspace 出现 Stale file handle，
 # 而续跑状态（checkpoint）原本就写在这里 —— 于是「需要续跑」的时刻恰好是
@@ -79,6 +99,18 @@ fi
 # 不会重复计分。指纹不匹配则丢弃 checkpoint —— 跨源码树的拼接会让「55 passed」
 # 对应两份不同的代码，比从头跑一遍更难发现。
 CKPT=$CKPTD/dayanjing_regression.ckpt
+# 镜像：两份各扛一种故障，缺一份就会漏掉一种场景。
+# 实测（SEQ:78）两种故障的幸存面正好互补，单写任意一份都不够：
+#   A) virtiofs 抖动（Stale file handle），沙盒存活     -> tmpfs 在，virtiofs 读不出
+#   B) 沙盒重启（502 后实测 uptime 归零）              -> tmpfs 被清空，virtiofs 在
+# 只写 tmpfs：B 场景断点随重启丢失（本轮实测 /dev/shm 被整盘清空）。
+# 只写 virtiofs：A 场景正是「需要续跑」的时刻却「读不出断点」（SEQ:77）。
+# 故双写；读取时任一可读且指纹相符即接管。
+if [ "$CKPTD" != "$TMPD" ]; then
+    CKPT_MIRROR=$TMPD/dayanjing_regression.ckpt
+else
+    CKPT_MIRROR=""
+fi
 
 tree_fp() {
     # 指纹不可得时必须【显式返回哨兵】，绝不能退化成一个"看起来合法"的值。
@@ -164,6 +196,14 @@ ckpt_mark() {
     printf 'NEXT=%s PASSED=%s FAILED=%s SKIPPED=%s FP=%s\n' \
         "$1" "$passed" "$failed" "$skipped" "$FP_NOW" > "$CKPT.tmp" 2>/dev/null \
         && mv -f "$CKPT.tmp" "$CKPT" 2>/dev/null || rm -f "$CKPT.tmp" 2>/dev/null
+    # 镜像写入失败是【允许】的：它可能正是被故障的那一面，主本已落盘即可。
+    # 不能因为镜像写不进去就返回失败——那会让 step_begin 误判为跳过步骤。
+    if [ -n "$CKPT_MIRROR" ]; then
+        printf 'NEXT=%s PASSED=%s FAILED=%s SKIPPED=%s FP=%s\n' \
+            "$1" "$passed" "$failed" "$skipped" "$FP_NOW" > "$CKPT_MIRROR.tmp" 2>/dev/null \
+            && mv -f "$CKPT_MIRROR.tmp" "$CKPT_MIRROR" 2>/dev/null \
+            || rm -f "$CKPT_MIRROR.tmp" 2>/dev/null
+    fi
     return 0
 }
 
@@ -296,14 +336,20 @@ export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
 resume_active=0
 resume_matched=0
 CKPT_RESUMED=0
-if [ -z "${RESUME_FROM:-}" ] && [ -f "$CKPT" ]; then
+# 候选顺序：tmpfs 主本优先（virtiofs 故障时它更可能可读），virtiofs 镜像回退
+# （tmpfs 被重启清空时它还在）。两份内容相同，取任一可读且指纹相符者。
+CKPT_SRC=""
+for _c in "$CKPT" "$CKPT_MIRROR"; do
+    [ -n "$_c" ] && [ -f "$_c" ] && CKPT_SRC="$_c" && break
+done
+if [ -z "${RESUME_FROM:-}" ] && [ -n "$CKPT_SRC" ]; then
     _cn=""; _cp=""; _cf=""; _cs=""; _cfp=""
     # 必须逐【词】解析，不能写 `while read -r _k _v; do case "$_k" ...`：
     # read 按 IFS 切词，_k 只拿到第一个词，其余全部落进 _v —— 于是
     # PASSED/FAILED/SKIPPED/FP 一个都没被解析，_cfp 恒为空，指纹比对必然判
     # "不符"，续跑永远退回从头跑。实测连续三次如此，而表象是"源码树变了"，
     # 排查方向被引向树的状态而不是这段解析。
-    for _w in $(cat "$CKPT" 2>/dev/null); do
+    for _w in $(cat "$CKPT_SRC" 2>/dev/null); do
         case "$_w" in
             NEXT=*)    _cn=${_w#NEXT=} ;;
             PASSED=*)  _cp=${_w#PASSED=} ;;
@@ -325,12 +371,12 @@ if [ -z "${RESUME_FROM:-}" ] && [ -f "$CKPT" ]; then
         echo "       checkpoint: ${_cfp:-（空）}"
         echo "       当前树:     $_now"
         echo "       宁可从头跑一遍，也不能把未知状态的两段拼成一份汇总。"
-        rm -f "$CKPT"
+        rm -f "$CKPT" "$CKPT_MIRROR"
     elif [ "$_now" != "$_cfp" ]; then
         echo "[续跑] checkpoint 指纹与当前源码树不符，丢弃并从头开始"
         echo "       checkpoint: $_cfp"
         echo "       当前树:     $_now"
-        rm -f "$CKPT"
+        rm -f "$CKPT" "$CKPT_MIRROR"
     elif [ -n "$_cn" ]; then
         RESUME_FROM="$_cn"
         passed=${_cp:-0}; failed=${_cf:-0}; skipped=${_cs:-0}
@@ -780,6 +826,18 @@ fi
 for m in 21_exfil agent_windows; do
     step_begin "${m}_guards" || continue
     printf "=== %-16s " "${m}_guards"
+    # 落盘前先自愈临时盘：不可写时换盘（SEQ:77 的 Stale 就发生在这里）
+    if ! tmpd_fix; then
+        echo "SKIP（临时盘不可写，非守卫缺陷）"
+        skipped=$((skipped + 1))
+        continue
+    fi
+    # 目录不可达属文件系统抖动，与守卫实现无关；记 SKIP 而非 FAIL。
+    if ! timeout 10 stat "$ROOT/$m/." >/dev/null 2>&1; then
+        echo "SKIP（$m 目录不可达，非守卫缺陷）"
+        skipped=$((skipped + 1))
+        continue
+    fi
     if (cd "$ROOT/$m" && timeout 1800 make test >$TMPD/guards_$m.log 2>&1); then
         echo "PASS"
         passed=$((passed + 1))
@@ -820,6 +878,6 @@ fi
 if [ "$CKPT_RESUMED" = 1 ]; then
     echo "[注意] 本次汇总由分段续跑拼成，非单次连续运行"
 fi
-rm -f "$CKPT"
+rm -f "$CKPT" "$CKPT_MIRROR"
 echo "-------- passed: $passed  failed: $failed  skipped: $skipped --------"
 exit $failed

