@@ -1,0 +1,94 @@
+[SIGNAL] 收到信号 15，正在还原变异...
+[DEBUG] FP_NOW=ch1:3c25c0fb3f7a7a44c0ea2127a637ab40db86fdbf:eaf2952a491604dc
+=== 00_crypto        PASS
+=== 01_proto         PASS
+=== 02_c2            PASS
+=== 03_transport     FAIL -> /data/workspace/dayanjing/03_transport/build/test_icmtun
+[FAIL] real: 空消息(纯FIN)可发
+[INFO] 服务端进程退出 status=1
+[PASS] retrans: 首片被丢后仍完成传输(重扫生效)
+[PASS] retrans: 服务端最终收到 FIN
+
+---- icmtun: pass=14 fail=4 ----
+=== 04_agent         PASS
+=== 05_server        PASS
+=== 06_db            PASS
+=== 07_ui            PASS
+=== 08_lateral       PASS
+=== 09_persistence   PASS
+=== 10_evasion       PASS
+=== 11_edr_bypass    PASS
+=== 12_exploit       PASS
+=== 14_p2p           PASS
+=== 16_initial_access PASS
+=== 17_loader        PASS
+=== 18_privilege     PASS
+=== 19_defense       PASS
+=== 20_packer        PASS
+=== 21_exfil         BUILD FAIL
+  build/exfil.o build/sched.o -o build/test_cover_loop ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o ../14_p2p/build/crypto_gcm.o ../14_p2p/build/crypto_hash.o ../14_p2p/build/crypto_x25519.o ../14_p2p/build/libp2p.a
+cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -D_DEFAULT_SOURCE -Iinclude -I../14_p2p/include -I../02_c2/include -I../00_crypto/include -I../08_lateral/include -I../agent_windows/include tests/test_cover_circuit.c build/cover_loop.o build/task_cover.o \
+  build/task.o build/task_link.o build/exfil_link.o \
+  build/exfil.o build/sched.o -o build/test_cover_circuit ../08_lateral/build/proxy.o ../08_lateral/build/lateral.o ../14_p2p/build/c2.o ../14_p2p/build/c2_frame.o ../14_p2p/build/crypto_gcm.o ../14_p2p/build/crypto_hash.o ../14_p2p/build/crypto_x25519.o ../14_p2p/build/libp2p.a
+make: *** [Makefile:206: build/test_cover_circuit] Terminated
+=== 22_kern          PASS
+=== 23_lkm           PASS
+=== 24_front         PASS
+=== 25_tls           PASS
+=== 26_lateral_auto  PASS
+=== agent_windows    PASS
+=== ct_asm_guard     PASS
+    [PASS] 机器码级：循环体内无与 diff 相关的控制流（无早退路径）
+    [PASS] 机器码级：回边仅依赖 i != len，diff 从不参与分支判断
+=== monolith         PASS
+=== lifecycle        PASS
+=== integration      PASS
+=== e2e_camo         PASS
+=== proto_c2_layer   PASS
+  [PASS] c2_align
+=== 13_c2_server_py  PASS  [13_c2_server] 19/19 tests passed
+=== 13_c2_server_exfil PASS  === result: 72 pass, 0 fail ===
+=== 13_c2_server_task PASS  total=42 pass=42 fail=0
+=== 13_c2_server_cache PASS  === result: 25 pass, 0 fail ===
+=== 13_c2_server_resume PASS  === result: 29 pass, 0 fail ===
+=== 13_c2_server_seqin PASS  === result: 24 pass, 0 fail ===
+=== 12_exploit_pillowcms PASS  === result: 15 pass, 0 fail ===
+=== winshim_mf ===
+  [PASS] winshim_mf (cam_mf 19/19)
+=== deploy_4node ===
+  [PASS] deploy_4node
+=== deploy_crossns ===
+  [PASS] deploy_crossns (4 独立网络栈贯通)
+=== check_secret_cmp（全仓 memcmp 分类守卫） ===
+  [PASS] 全仓 memcmp 均已分类且无秘密比较
+         [INFO] 扫描到 memcmp 调用点 50 处（产品代码）
+         [INFO] 已分类 50 处
+=== gen_ch_struct --check（结构化变异真值漂移） ===
+  [PASS] 真值无漂移：47 例期望值与当前 OpenSSL 实测一致
+=== gen_cke_struct --check（结构化变异真值漂移） ===
+  [PASS] 真值无漂移：17 例期望值与当前 OpenSSL 实测一致
+=== check_gen_dedup（探测基础设施去重） ===
+  [PASS] 探测基础设施无重复：2 个生成器共用 tls_truth.py 的 6 个实现
+=== check_guards（Python 守卫自身双向有效） ===
+  [PASS] Python 侧守卫双向有效：6 个方向（合规须 PASS / 违规须 FAIL）
+=== mutation_audit selftest-py（崩溃不得算作捕获） ===
+  [PASS] Python runner 判定标记守卫自检
+=== audit_makefile_tests（构建契约） ===
+  [PASS] 各模块测试二进制均由回归调用的目标构建
+=== mutation_audit ===
+  [PASS] mutation_audit (sample:1)
+         存活(用例证明不了任何事) = 0
+         审计失效/挂起           = 0
+         捕获                    = 1
+         符合预期症状(如M2挂起)  = 0
+         已知盲区(测不了,未覆盖) = 0
+=== 21_exfil_guards  FAIL
+grep: /data/workspace/.regtmp/guards_21_exfil.log: Stale file handle
+scripts/run_all_tests.sh: 146: cannot create /data/workspace/.regtmp/dayanjing_regression.ckpt.tmp: Stale file handle
+=== agent_windows_guards scripts/run_all_tests.sh: 760: cd: can't cd to /data/workspace/dayanjing/agent_windows
+FAIL
+grep: /data/workspace/.regtmp/guards_agent_windows.log: Stale file handle
+scripts/run_all_tests.sh: 146: cannot create /data/workspace/.regtmp/dayanjing_regression.ckpt.tmp: Stale file handle
+rm: cannot remove '/data/workspace/.regtmp/dayanjing_regression.ckpt': Stale file handle
+-------- passed: 49  failed: 4  skipped: 0 --------
+FULL_RC=4

@@ -1,0 +1,101 @@
+# SEQ:89 — shim backing 目录改走 /dev/shm（含 SIGBUS 反例实测）
+
+## 结论
+
+v4l2sim_shim 的 backing 文件目录不再写死 /tmp，改为三级候选 + 可写性探测
++ 运行期自愈。
+
+实测：srcflag 守卫 15 PASS / 0 FAIL；降级守卫 12 PASS / 0 FAIL。
+
+## 根因链
+
+1. shim 的 open() 命中 /dev/videoN 时用 mkstemp("<dir>/backingXXXXXX") 造
+   真实 backing 文件，后续 mmap / memcpy 因此都是真的。
+2. 该目录此前写死 /tmp/v4l2sim 且由外部先建，sim_init 从不创建。
+3. /tmp 被环境例行清理 -> mkstemp 失败 -> open 返回 ENODEV ->
+   v4l2_try_open 全数失败 -> 真设备场景被判成"无设备"。
+4. 危害：守卫三态判据整体塌成一态——F1（真设备应不置位 SYNTH）恒红、
+   F2/F3（降级应置位）恒绿。既报红也报绿，实际什么都没验证到。
+
+## 修法
+
+三级候选，取第一个"可建且可写"者：
+
+1. V4L2SIM_DIR 环境变量（调用方显式指定）
+2. /dev/shm/v4l2sim（tmpfs）
+3. /tmp/v4l2sim（回退）
+
+可写性探测用真实建文件（mkstemp + unlink + close），不用 access(W_OK)：
+本进程是 root，权限位检查对 root 恒通过，无法区分"可写"与"目录存在但
+挂在只读文件系统上"。
+
+mkstemp 失败时重建目录再试一次（sim_dir_heal），覆盖运行期被清理的情况。
+
+## 关键反例：挪到"持久"目录反而引入 SIGBUS（实测，勿改回）
+
+第一版把首选目录设为 /data/workspace/.v4l2sim，理由是它持久、不会被
+/tmp 清理任务波及。实测结果：
+
+    [FAIL] F1 真设备 degrade=0：camd 可跑并落盘  -- camd rc=-7
+
+rc=-7 即 SIGBUS。文件系统实测：
+
+    /tmp             overlayfs
+    /data/workspace  fuseblk（virtiofs，virtio_rw_44e51c2a）
+    /dev/shm         tmpfs
+
+/data/workspace 正是本仓历史上反复出现 Stale file handle 的那个
+virtio_rw_* 挂载点。它撑不住 backing 文件的"ftruncate 后写 mmap 映射页"。
+
+结论：持久 ≠ 可用。backing 必须在 tmpfs 类文件系统上。改选 /dev/shm：
+mmap 语义与 /tmp 一致，且不在 /tmp 清理范围内；容量足够（backing =
+帧长 + 8KB，远小于默认 64MB）。
+
+## 目录选择实证
+
+删除全部候选目录后重跑：
+
+    /dev/shm/v4l2sim   已自建（05:10）
+    /tmp/v4l2sim       未创建
+
+证明 shim 确实走 /dev/shm，而非回退到 /tmp。
+
+## 附带修复：上一轮中断遗留的注入残留
+
+src/cam_daemon.c 停留在 R1 反向注入状态（"恒不置位"），导致本轮首跑：
+
+    [FAIL] R1 反向：恒不置位注入可跑  -- 未找到注入锚点
+    [FAIL] F2/F3 SRC_SYNTH 必须置位  -- flags=0x03,0x03
+
+注入锚点已被替换成注入文本，再次 mutate 找不到原锚点。已还原为
+`if (d != 0) r.flags |= EXF_FLAG_SRC_SYNTH;`。
+
+教训：反向注入类守卫一旦中断，必须显式检查源码是否已还原，不能只信
+"跑到完就会还原"。
+
+## 三态实测（还原注入 + 改对目录后）
+
+| 场景 | DEGRADE | flags | 判定 |
+|---|---|---|---|
+| 真设备 | 0 | 0x03 | SYNTH 不置位 |
+| 被占用 | 2 | 0x0b | SYNTH 置位 |
+| 无设备 | 1 | 0x0b | SYNTH 置位 |
+
+三态真正区分（此前 F1/F2/F3 全为 0x0b）。
+
+反向：R1 恒不置位 -> 被占用场景失去 SYNTH（0x03）；R2 恒置位 -> 真设备
+场景被误标 SYNTH（0x0b）。两条判据均非恒绿。
+
+## 降级守卫（复核上一轮）
+
+12 PASS / 0 FAIL。F1b 显示真设备确实走通完整 mmap 路径：
+QUERYCAP=2 S_FMT=1 REQBUFS=1 QUERYBUF=1 QBUF=5 DQBUF=4 STREAMON=1
+STREAMOFF=1 MMAP=1 MUNMAP=1 —— 证明 /dev/shm 上 mmap 正常工作。
+
+## 残留风险
+
+1. R1 真摄像头仍 BLOCKED —— 这里的"真设备"是 shim 按 V4L2 ABI 造的，
+   不是物理摄像头。
+2. /dev/shm 容量 64MB，若并发大量场景可能不足；当前每场景单文件约
+   161KB，远未触及。
+3. 本轮未跑全仓回归，只跑了两个核心守卫。
