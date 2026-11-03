@@ -371,7 +371,7 @@ static void test_units(void) {
 /* 对端进程：解封请求 -> 封装响应 */
 static void peer_child(int lfd) {
     int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0) _exit(1);
+    if (cfd < 0) fflush(stdout); fflush(stderr); _exit(1);
     p2p_tunnel_t t; mk_peer(&t);
     uint8_t buf[BIGBUF];
     /* 循环服务：每个请求解封后回一个响应，直到对端关闭 */
@@ -393,7 +393,7 @@ static void peer_child(int lfd) {
         free(rsp);
     }
     close(cfd);
-    _exit(0);
+    fflush(stdout); fflush(stderr); _exit(0);
 }
 
 /* 中继子进程：accept 一连接 -> 连下一跳 -> 双工转发（可带抓包） */
@@ -404,12 +404,12 @@ static pid_t spawn_relay(int lfd, int next_port, int tapfd) {
         close(0);
         signal(SIGPIPE, SIG_IGN);
         int cfd = accept(lfd, NULL, NULL);
-        if (cfd < 0) _exit(1);
+        if (cfd < 0) fflush(stdout); fflush(stderr); _exit(1);
         int sfd = connect_to(next_port);
-        if (sfd < 0) { close(cfd); _exit(1); }
+        if (sfd < 0) { close(cfd); fflush(stdout); fflush(stderr); _exit(1); }
         relay_tap(cfd, sfd, tapfd);
         close(cfd); close(sfd);
-        _exit(0);
+        fflush(stdout); fflush(stderr); _exit(0);
     }
     return pid;
 }
@@ -432,7 +432,7 @@ static void test_chain_e2ee(void) {
     if (tapfd < 0) { printf("[FAIL] 抓包文件创建失败\n"); fail++; return; }
 
     pid_t pid_peer = fork();
-    if (pid_peer == 0) { signal(SIGPIPE, SIG_IGN); peer_child(l_peer); _exit(0); }
+    if (pid_peer == 0) { signal(SIGPIPE, SIG_IGN); peer_child(l_peer); fflush(stdout); fflush(stderr); _exit(0); }
 
     pid_t r_core  = spawn_relay(l_core,  p_peer, -1);
     pid_t r_edge1 = spawn_relay(l_edge1, p_core, -1);

@@ -1,26 +1,26 @@
 [HEAL] 无残留变异备份
-[续跑] 自动接管：自步骤 21_exfil 开始
-       前段计数已计入 passed=19 failed=0 skipped=0
-       本次汇总由多段拼成，非单次连续运行，汇报时必须说明。
-=== 00_crypto        SKIP(续跑：前段已跑过)
-=== 01_proto         SKIP(续跑：前段已跑过)
-=== 02_c2            SKIP(续跑：前段已跑过)
-=== 03_transport     SKIP(续跑：前段已跑过)
-=== 04_agent         SKIP(续跑：前段已跑过)
-=== 05_server        SKIP(续跑：前段已跑过)
-=== 06_db            SKIP(续跑：前段已跑过)
-=== 07_ui            SKIP(续跑：前段已跑过)
-=== 08_lateral       SKIP(续跑：前段已跑过)
-=== 09_persistence   SKIP(续跑：前段已跑过)
-=== 10_evasion       SKIP(续跑：前段已跑过)
-=== 11_edr_bypass    SKIP(续跑：前段已跑过)
-=== 12_exploit       SKIP(续跑：前段已跑过)
-=== 14_p2p           SKIP(续跑：前段已跑过)
-=== 16_initial_access SKIP(续跑：前段已跑过)
-=== 17_loader        SKIP(续跑：前段已跑过)
-=== 18_privilege     SKIP(续跑：前段已跑过)
-=== 19_defense       SKIP(续跑：前段已跑过)
-=== 20_packer        SKIP(续跑：前段已跑过)
+[续跑] checkpoint 指纹与当前源码树不符，丢弃并从头开始
+       checkpoint: ch1:bd24c67c45507d7c850c4fcdbf920a8fc66d8e49:ae11a663e263a83a
+       当前树:     ch1:dd51de6bda3fc6e99261c54322308fa40d9cc6a5:ae11a663e263a83a
+=== 00_crypto        PASS
+=== 01_proto         PASS
+=== 02_c2            PASS
+=== 03_transport     PASS
+=== 04_agent         PASS
+=== 05_server        PASS
+=== 06_db            PASS
+=== 07_ui            PASS
+=== 08_lateral       PASS
+=== 09_persistence   PASS
+=== 10_evasion       PASS
+=== 11_edr_bypass    PASS
+=== 12_exploit       PASS
+=== 14_p2p           PASS
+=== 16_initial_access PASS
+=== 17_loader        PASS
+=== 18_privilege     PASS
+=== 19_defense       PASS
+=== 20_packer        PASS
 === 21_exfil         PASS
 === 22_kern          PASS
 === 23_lkm           PASS
@@ -82,5 +82,5 @@
            [OK]   S2 清除后检出归零（判据可收敛）
            [OK]   S3 真实根路径构造有效（种 10 检 10）
            [OK]   S4 真实根探针已清除干净（自检不留污染）
-[注意] 本次汇总由分段续跑拼成，非单次连续运行
 -------- passed: 55  failed: 0  skipped: 0 --------
+FULL_RC=0

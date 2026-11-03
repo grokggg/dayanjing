@@ -1,0 +1,47 @@
+=== SEQ88 srcflag 守卫（修复后）===
+==============================================================
+采集源标志位（SRC_SYNTH）真实运行守卫
+==============================================================
+[OK]   前置：接收侧 dump_srcflag 可构建
+[OK]   前置：V4L2 shim 可构建
+[OK]   前置：/dev/video0 节点可用
+[OK]   前置：动态版 camd 可构建（静态产物已恢复）
+[OK]   F1 真设备 degrade=0：camd 可跑并落盘
+[OK]   F1 真设备 degrade=0：接收侧可解出记录
+[OK]   F1 真设备 degrade=0：SRC_SYNTH 必须不置位  -- flags=0x03,0x03
+[OK]   F2 被占用 degrade=2：camd 可跑并落盘
+[OK]   F2 被占用 degrade=2：接收侧可解出记录
+[OK]   F2 被占用 degrade=2：SRC_SYNTH 必须置位  -- flags=0x0b,0x0b
+[OK]   F3 无设备 degrade=1：camd 可跑并落盘
+[OK]   F3 无设备 degrade=1：接收侧可解出记录
+[OK]   F3 无设备 degrade=1：SRC_SYNTH 必须置位  -- flags=0x0b,0x0b
+[OK]   R1 反向：恒不置位时被占用场景失去 SYNTH（判据非恒绿）  -- flags=0x03,0x03
+[OK]   R2 反向：恒置位时真设备场景被误标 SYNTH（判据非恒绿）  -- flags=0x0b,0x0b
+--------------------------------------------------------------
+结果: 15 PASS / 0 FAIL
+GUARD_RC=0
+
+=== SEQ88 v4l2 降级守卫 ===
+==============================================================
+V4L2 降级可见性守卫
+==============================================================
+[OK]   前置：shim 构建成功
+[OK]   前置：/dev/video0 节点可用
+[OK]   F1 真设备 DEGRADE=0（像素来自设备）  -- DEGRADE=0  MMAP=True
+[OK]   F1b 真设备确实走了 mmap 路径  -- QUERYCAP=2 S_FMT=1 REQBUFS=1 QUERYBUF=1 QBUF=5 DQBUF=4 STREAMON=1 STREAMOFF=1 MMAP=1 MUNMAP=1 
+[OK]   F2 设备被占用 DEGRADE=2（不是静默降级）  -- DEGRADE=2
+[OK]   F2b 被占用时真路径确未走通（MMAP=0）  -- QUERYCAP=2 S_FMT=1 REQBUFS=1 QUERYBUF=0 QBUF=0 DQBUF=0 STREAMON=0 STREAMOFF=0 MMAP=0 MUNMAP=0 
+[OK]   F2c 被占用时流程仍不中断（CAPTURE=OK）  -- CAPTURE=OK
+[OK]   F3 无可用设备 DEGRADE=1（合法降级）  -- DEGRADE=1
+[OK]   F3b 无设备时流程仍不中断（CAPTURE=OK）  -- CAPTURE=OK
+[OK]   F4 源码按 found_capture_dev 区分两种降级
+[OK]   F4b 真设备路径显式置 CAM_DEGRADE_NONE
+  [R1] 退化实现下 被占用场景 DEGRADE=1（应为 1，且与 F2 的 2 不同）
+[OK]   R1 反向：退化实现被抓到（判据非恒绿）
+--------------------------------------------------------------
+结果: 12 PASS / 0 FAIL
+DG_RC=0
+
+=== 根因决定性实验 ===
+删除 /tmp/v4l2sim 前: DEGRADE=1 (无设备, 误判)
+修复后删除目录重跑: DEGRADE=0 (真设备, 正确) 且目录被 sim_init 自建

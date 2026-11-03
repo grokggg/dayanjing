@@ -42,13 +42,13 @@ static pid_t start_sink(uint16_t *port, int slow) {
         a.sin_family = AF_INET;
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         a.sin_port = 0;
-        if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0) _exit(1);
-        if (listen(lfd, 4) != 0) _exit(1);
+        if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0) fflush(stdout); fflush(stderr); _exit(1);
+        if (listen(lfd, 4) != 0) fflush(stdout); fflush(stderr); _exit(1);
         struct sockaddr_in got;
         socklen_t gl = sizeof got;
         getsockname(lfd, (struct sockaddr *)&got, &gl);
         uint16_t np = ntohs(got.sin_port);
-        if (write(sv[1], &np, sizeof np) != (ssize_t)sizeof np) _exit(1);
+        if (write(sv[1], &np, sizeof np) != (ssize_t)sizeof np) fflush(stdout); fflush(stderr); _exit(1);
         close(sv[1]);
 
         /* 循环 accept：探测会被调用多次，sink 不能在第一次连接后就退出 */
@@ -72,7 +72,7 @@ static pid_t start_sink(uint16_t *port, int slow) {
             close(cfd);
         }
         close(lfd);
-        _exit(0);
+        fflush(stdout); fflush(stderr); _exit(0);
     }
     close(sv[1]);
     uint16_t np = 0;

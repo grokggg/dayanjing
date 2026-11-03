@@ -76,8 +76,8 @@ static pid_t spawn_echo(int *port) {
     if (pid == 0) {
         close(pfd[0]);
         int lp = 0, s = listen_auto(&lp);
-        if (s < 0) _exit(2);
-        if (write(pfd[1], &lp, sizeof lp) != (ssize_t)sizeof lp) _exit(3);
+        if (s < 0) fflush(stdout); fflush(stderr); _exit(2);
+        if (write(pfd[1], &lp, sizeof lp) != (ssize_t)sizeof lp) fflush(stdout); fflush(stderr); _exit(3);
         close(pfd[1]);
         for (;;) {
             int c = accept(s, NULL, NULL);
@@ -107,11 +107,11 @@ static pid_t spawn_route_node(const p2p_mesh_t *m, const uint8_t *my_id, int *po
     if (pid == 0) {
         close(pfd[0]);
         int lp = 0, s = listen_auto(&lp);
-        if (s < 0) _exit(2);
-        if (write(pfd[1], &lp, sizeof lp) != (ssize_t)sizeof lp) _exit(3);
+        if (s < 0) fflush(stdout); fflush(stderr); _exit(2);
+        if (write(pfd[1], &lp, sizeof lp) != (ssize_t)sizeof lp) fflush(stdout); fflush(stderr); _exit(3);
         close(pfd[1]);
         p2p_route_serve(m, my_id, s);
-        _exit(0);
+        fflush(stdout); fflush(stderr); _exit(0);
     }
     close(pfd[1]);
     int lp = 0;

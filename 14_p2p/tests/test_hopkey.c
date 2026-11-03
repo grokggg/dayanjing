@@ -189,5 +189,5 @@ int main(void) {
     check(p2p_hopkey_epoch(&hC) == 0xffffffffu, "wipe 后无有效 epoch");
 
     printf("\ntotal=%d pass=%d fail=%d\n", g_pass + g_fail, g_pass, g_fail);
-    return g_fail ? 1 : 0;
+    fflush(stdout); fflush(stderr); return g_fail ? 1 : 0;
 }

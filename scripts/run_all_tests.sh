@@ -37,6 +37,26 @@ if [ -z "$TMPD" ]; then
     exit 2
 fi
 
+# ---- 临时盘自愈：运行中 $TMPD 变 Stale 时换盘，而不是让步骤伪装失败 ----
+# SEQ:77 实测：/data/workspace 中途出现 Stale file handle，守卫日志
+# （$TMPD/guards_*.log）与 ckpt 都写在这里 —— make test 本身还没跑，
+# 重定向先失败，回归把「临时盘不可写」记成了「守卫 FAIL」，二者外观
+# 完全一致，排查方向被引向守卫实现，而真凶是文件系统。
+# TMPD 只在启动时选一次不够：故障发生在中途。故每次落盘前重检并换盘。
+# 换盘失败时返回非 0，由调用方记 SKIP —— 绝不记 PASS：把环境故障记成
+# 通过，与「判据恒绿」是同一类错，比记 FAIL 更危险。
+tmpd_fix() {
+    if : > "$TMPD/.wtest" 2>/dev/null; then return 0; fi
+    for c in /dev/shm/dayanjing_tmp /data/workspace/.regtmp2 /tmp; do
+        if mkdir -p "$c" 2>/dev/null && : > "$c/.wtest" 2>/dev/null; then
+            echo "  [注意] 临时盘 $TMPD 已不可写，切换至 $c"
+            TMPD="$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ---- checkpoint 与锁单独放盘，必须与 $TMPD 分离 ----
 # SEQ:77 实测：virtiofs 抖动会让整个 /data/workspace 出现 Stale file handle，
 # 而续跑状态（checkpoint）原本就写在这里 —— 于是「需要续跑」的时刻恰好是
@@ -58,11 +78,58 @@ REG_LOCK=$CKPTD/dayanjing_regression.lock
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$REG_LOCK"
     if ! flock -n 9; then
-        echo "[FATAL] 已有回归实例在运行（锁 $REG_LOCK）"
-        echo "        并发实例会互相破坏 build 产物与端口，结果不可信。"
-        echo "        确认无实例后再跑；若确认是残留锁，删除 $REG_LOCK。"
-        exit 2
+        # SEQ:91 修复：先区分"真并发"与"孤儿锁"。
+        # 实测：502 强杀持锁子进程后，fd 关闭路径不完整，flock 报 EBUSY，
+        # 但 /proc/locks 与 lslocks 均无记录（内核锁表已空，只剩文件 inode
+        # 上的遗留标记）。此时没有进程持有锁，报 FATAL 会永久卡死回归。
+        # 判据：/proc/locks 里找不到该 inode 的 flock 记录 → 孤儿锁 → 删
+        # 文件换新 inode 后重试一次；否则才是真并发。
+        _ino=$(stat -c '%i' "$REG_LOCK" 2>/dev/null)
+        _orphan=0
+        if [ -n "$_ino" ] && ! awk -v i="$_ino" '$3=="POSIX" && $6==i {found=1} END{exit !found}' /proc/locks 2>/dev/null; then
+            _orphan=1
+        fi
+        if [ "$_orphan" -eq 1 ]; then
+            echo "  [自愈] 锁 $REG_LOCK 在内核无持有者（inode=$_ino），判定为孤儿锁，删除后重试"
+            flock -u 9 2>/dev/null
+            exec 9>&-
+            rm -f "$REG_LOCK"
+            exec 9>"$REG_LOCK"
+            if ! flock -n 9; then
+                echo "[FATAL] 重试持锁仍失败（锁 $REG_LOCK），确认无实例后再跑"
+                exit 2
+            fi
+            echo "  [自愈] 重试成功，回归继续"
+        else
+            echo "[FATAL] 已有回归实例在运行（锁 $REG_LOCK）"
+            echo "        并发实例会互相破坏 build 产物与端口，结果不可信。"
+            echo "        确认无实例后再跑；若确认是残留锁，删除 $REG_LOCK。"
+            exit 2
+        fi
     fi
+    # SEQ:91 修复：fd 9 会被后续所有 fork 出的子进程继承（make、timeout、
+    # python3 mutation_audit.py、测试二进制）。flock 是进程引用计数语义，
+    # 任一子进程持有 fd 即算一个引用；502 强杀子进程时 fd 不 close，锁成
+    # 孤儿，下次启动恒报"已有实例在运行"——而本脚本自己起的 mutation_audit
+    # 也会持锁，形成自死锁（SEQ:91 实测复现：PID 1623/1624 持锁，主进程反
+    # 被自己挡在门外，FULL_RC=2）。
+    # 修法：持锁成功后立刻给 fd 9 打 FD_CLOEXEC。exec 出去的子进程内核自动
+    # 关闭该 fd，引用计数随子进程退出归零；父进程自己的 fd 9 不受影响，
+    # 锁继续有效。验证结论（scripts/fd_cloexec 语义验证）：
+    #   子进程 flock 被父锁挡住  ✓   父进程仍持锁  ✓   无误伤
+    if command -v "$ROOT/scripts/fd_cloexec" >/dev/null 2>&1; then
+        "$ROOT/scripts/fd_cloexec" 9 || {
+            echo "[FATAL] fd_cloexec 9 失败：无法阻断子进程继承回归锁，继续跑会重现自死锁"
+            flock -u 9 2>/dev/null; exit 2
+        }
+    else
+        echo "[FATAL] scripts/fd_cloexec 不存在（需先构建），子进程会继承回归锁导致自死锁"
+        flock -u 9 2>/dev/null; exit 2
+    fi
+    # 兜底：脚本任何路径退出都显式释放锁，防止父进程异常退出留下孤儿锁。
+    # 注意：EXIT trap 在 exec 之后触发；CLOEXEC 已让子进程不继承，这里只
+    # 负责父进程自己的 fd 9。
+    trap 'flock -u 9 2>/dev/null; exec 9>&-' EXIT
 else
     echo "[WARN] 无 flock，无法施加单实例锁；请勿并发运行本脚本"
 fi
@@ -79,6 +146,18 @@ fi
 # 不会重复计分。指纹不匹配则丢弃 checkpoint —— 跨源码树的拼接会让「55 passed」
 # 对应两份不同的代码，比从头跑一遍更难发现。
 CKPT=$CKPTD/dayanjing_regression.ckpt
+# 镜像：两份各扛一种故障，缺一份就会漏掉一种场景。
+# 实测（SEQ:78）两种故障的幸存面正好互补，单写任意一份都不够：
+#   A) virtiofs 抖动（Stale file handle），沙盒存活     -> tmpfs 在，virtiofs 读不出
+#   B) 沙盒重启（502 后实测 uptime 归零）              -> tmpfs 被清空，virtiofs 在
+# 只写 tmpfs：B 场景断点随重启丢失（本轮实测 /dev/shm 被整盘清空）。
+# 只写 virtiofs：A 场景正是「需要续跑」的时刻却「读不出断点」（SEQ:77）。
+# 故双写；读取时任一可读且指纹相符即接管。
+if [ "$CKPTD" != "$TMPD" ]; then
+    CKPT_MIRROR=$TMPD/dayanjing_regression.ckpt
+else
+    CKPT_MIRROR=""
+fi
 
 tree_fp() {
     # 指纹不可得时必须【显式返回哨兵】，绝不能退化成一个"看起来合法"的值。
@@ -164,6 +243,14 @@ ckpt_mark() {
     printf 'NEXT=%s PASSED=%s FAILED=%s SKIPPED=%s FP=%s\n' \
         "$1" "$passed" "$failed" "$skipped" "$FP_NOW" > "$CKPT.tmp" 2>/dev/null \
         && mv -f "$CKPT.tmp" "$CKPT" 2>/dev/null || rm -f "$CKPT.tmp" 2>/dev/null
+    # 镜像写入失败是【允许】的：它可能正是被故障的那一面，主本已落盘即可。
+    # 不能因为镜像写不进去就返回失败——那会让 step_begin 误判为跳过步骤。
+    if [ -n "$CKPT_MIRROR" ]; then
+        printf 'NEXT=%s PASSED=%s FAILED=%s SKIPPED=%s FP=%s\n' \
+            "$1" "$passed" "$failed" "$skipped" "$FP_NOW" > "$CKPT_MIRROR.tmp" 2>/dev/null \
+            && mv -f "$CKPT_MIRROR.tmp" "$CKPT_MIRROR" 2>/dev/null \
+            || rm -f "$CKPT_MIRROR.tmp" 2>/dev/null
+    fi
     return 0
 }
 
@@ -296,14 +383,45 @@ export HF_CASES="$ROOT/24_front/tests/data/hf_cases.txt"
 resume_active=0
 resume_matched=0
 CKPT_RESUMED=0
-if [ -z "${RESUME_FROM:-}" ] && [ -f "$CKPT" ]; then
+# 候选顺序：tmpfs 主本优先（virtiofs 故障时它更可能可读），virtiofs 镜像回退
+# （tmpfs 被重启清空时它还在）。两份内容相同，取任一可读且指纹相符者。
+#
+# 【必须按指纹挑，不能只按"存在"挑】——旧实现取第一个存在的文件，实测后果：
+# 主本（/dev/shm）残留着【上一个提交】的过期 ckpt，而镜像才是本次被杀时
+# 落下的、指纹相符的那一份；旧实现选中过期那份 -> 判不符 -> rm -f 掉【两份】
+# （含可用镜像）——唯一能续跑的一份被自己删除，续跑永远回退到从头跑，
+# 而日志显示"源码树变了"，排查方向被引向 git 状态而不是这段选取逻辑。
+# 502 重启清空 /dev/shm 后实测：镜像（virtiofs）带着匹配指纹存活，正是
+# 唯一可接管的一份。
+ckpt_fp_of() { # 取候选文件的 FP 字段；不可读或无该字段时输出空
+    _f="$1"
+    [ -n "$_f" ] && [ -f "$_f" ] || return 0
+    for _w in $(cat "$_f" 2>/dev/null); do
+        case "$_w" in FP=*) echo "${_w#FP=}"; return 0 ;; esac
+    done
+    return 0
+}
+CKPT_SRC=""
+CKPT_STALE=""
+for _c in "$CKPT" "$CKPT_MIRROR"; do
+    [ -n "$_c" ] && [ -f "$_c" ] || continue
+    # 指纹不可得时一律不参与"相符"判定，避免两边哨兵相等而误接管。
+    case "${FP_NOW:-}" in ""|FPUNKNOWN|*FPUNKNOWN*) CKPT_STALE="$_c"; continue ;; esac
+    if [ "$(ckpt_fp_of "$_c")" = "$FP_NOW" ]; then
+        CKPT_SRC="$_c"; break
+    fi
+    [ -z "$CKPT_STALE" ] && CKPT_STALE="$_c"
+done
+# 没有一份相符时，退回首份存在者，仅用于打印"为何不符"（随后会被判丢弃）。
+[ -z "$CKPT_SRC" ] && [ -n "$CKPT_STALE" ] && CKPT_SRC="$CKPT_STALE"
+if [ -z "${RESUME_FROM:-}" ] && [ -n "$CKPT_SRC" ]; then
     _cn=""; _cp=""; _cf=""; _cs=""; _cfp=""
     # 必须逐【词】解析，不能写 `while read -r _k _v; do case "$_k" ...`：
     # read 按 IFS 切词，_k 只拿到第一个词，其余全部落进 _v —— 于是
     # PASSED/FAILED/SKIPPED/FP 一个都没被解析，_cfp 恒为空，指纹比对必然判
     # "不符"，续跑永远退回从头跑。实测连续三次如此，而表象是"源码树变了"，
     # 排查方向被引向树的状态而不是这段解析。
-    for _w in $(cat "$CKPT" 2>/dev/null); do
+    for _w in $(cat "$CKPT_SRC" 2>/dev/null); do
         case "$_w" in
             NEXT=*)    _cn=${_w#NEXT=} ;;
             PASSED=*)  _cp=${_w#PASSED=} ;;
@@ -325,12 +443,12 @@ if [ -z "${RESUME_FROM:-}" ] && [ -f "$CKPT" ]; then
         echo "       checkpoint: ${_cfp:-（空）}"
         echo "       当前树:     $_now"
         echo "       宁可从头跑一遍，也不能把未知状态的两段拼成一份汇总。"
-        rm -f "$CKPT"
+        rm -f "$CKPT" "$CKPT_MIRROR"
     elif [ "$_now" != "$_cfp" ]; then
         echo "[续跑] checkpoint 指纹与当前源码树不符，丢弃并从头开始"
         echo "       checkpoint: $_cfp"
         echo "       当前树:     $_now"
-        rm -f "$CKPT"
+        rm -f "$CKPT" "$CKPT_MIRROR"
     elif [ -n "$_cn" ]; then
         RESUME_FROM="$_cn"
         passed=${_cp:-0}; failed=${_cf:-0}; skipped=${_cs:-0}
@@ -780,6 +898,18 @@ fi
 for m in 21_exfil agent_windows; do
     step_begin "${m}_guards" || continue
     printf "=== %-16s " "${m}_guards"
+    # 落盘前先自愈临时盘：不可写时换盘（SEQ:77 的 Stale 就发生在这里）
+    if ! tmpd_fix; then
+        echo "SKIP（临时盘不可写，非守卫缺陷）"
+        skipped=$((skipped + 1))
+        continue
+    fi
+    # 目录不可达属文件系统抖动，与守卫实现无关；记 SKIP 而非 FAIL。
+    if ! timeout 10 stat "$ROOT/$m/." >/dev/null 2>&1; then
+        echo "SKIP（$m 目录不可达，非守卫缺陷）"
+        skipped=$((skipped + 1))
+        continue
+    fi
     if (cd "$ROOT/$m" && timeout 1800 make test >$TMPD/guards_$m.log 2>&1); then
         echo "PASS"
         passed=$((passed + 1))
@@ -820,6 +950,6 @@ fi
 if [ "$CKPT_RESUMED" = 1 ]; then
     echo "[注意] 本次汇总由分段续跑拼成，非单次连续运行"
 fi
-rm -f "$CKPT"
+rm -f "$CKPT" "$CKPT_MIRROR"
 echo "-------- passed: $passed  failed: $failed  skipped: $skipped --------"
 exit $failed
